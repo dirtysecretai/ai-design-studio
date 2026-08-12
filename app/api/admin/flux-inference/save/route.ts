@@ -21,8 +21,14 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const body = await req.json().catch(() => ({})) as { r2Key?: string; prompt?: string; videoMetadata?: Record<string, unknown>; referenceImageUrls?: string[] }
+  const body = await req.json().catch(() => ({})) as { r2Key?: string; prompt?: string; videoMetadata?: Record<string, unknown>; referenceImageUrls?: string[]; createdAt?: string }
   const { r2Key, prompt, videoMetadata } = body
+  // createdAt = when the generation was QUEUED (the feed's ordering key).
+  // Sanity-capped so a bad client value can't strand a row far in the past.
+  const queuedDate = body.createdAt ? new Date(body.createdAt) : null
+  const createdAtOverride = queuedDate && !isNaN(queuedDate.getTime())
+    && queuedDate.getTime() > Date.now() - 24 * 3600 * 1000 && queuedDate.getTime() <= Date.now() + 60_000
+    ? queuedDate : null
   // i2i / IP-Adapter refs — shown in the info panel like the other models.
   // https URLs only (never store data URLs in the DB row)
   const refUrls = Array.isArray(body.referenceImageUrls)
@@ -56,6 +62,7 @@ export async function POST(req: Request) {
       expiresAt:          new Date(Date.now() + 100 * 365 * 24 * 60 * 60 * 1000),
       ...(videoMetadata ? { videoMetadata: videoMetadata as object } : {}),
       ...(fw > 0 && fh > 0 ? { aspectRatio: `${fw}x${fh}` } : {}),
+      ...(createdAtOverride ? { createdAt: createdAtOverride } : {}),
     },
     select: { id: true },
   })

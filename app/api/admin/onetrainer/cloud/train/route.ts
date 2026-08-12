@@ -144,5 +144,29 @@ export async function POST(req: Request) {
   }
 
   const data = await res.json() as { id: string }
+
+  // Record the RunPod job id + launch time in run.json so the Monitor can be
+  // SERVER-backed: any admin on any device lists in-flight runs from R2 rather
+  // than from the launching browser's localStorage.
+  try {
+    await uploadToR2(
+      `training/loras/${folder}/run.json`,
+      Buffer.from(JSON.stringify({
+        run_name:          runName,
+        folder,
+        created_at:        new Date().toISOString(),
+        checkpoint_r2_key: body.checkpoint_r2_key ?? null,
+        config:            body.config ?? null,
+        concepts:          body.concepts ?? null,
+        dataset:           runMeta?.dataset ?? null,
+        job_id:            data.id,
+        started_at:        Date.now(),
+      }, null, 2)),
+      'application/json',
+    )
+  } catch (e) {
+    console.error('[cloud/train] run.json job_id update failed:', e)
+  }
+
   return NextResponse.json({ job_id: data.id, started: true, run_folder: folder, run_name: runName })
 }

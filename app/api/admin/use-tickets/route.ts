@@ -26,16 +26,23 @@ export async function POST(req: Request) {
     }
 
     if (action === 'deduct') {
-      const ticket = await prisma.ticket.findUnique({ where: { userId: user.id } })
-      if (!ticket || ticket.balance < amount) {
+      // ATOMIC check+deduct. The old read-then-update was a TOCTOU race: two
+      // concurrent requests could both pass the balance check and both
+      // subtract, driving the balance negative. The conditional UPDATE makes
+      // the check and the deduction a single indivisible operation.
+      const affected = await prisma.$executeRaw`
+        UPDATE "Ticket"
+        SET balance = balance - ${amount}, "totalUsed" = "totalUsed" + ${amount}
+        WHERE "userId" = ${user.id}
+          AND (balance - GREATEST(0, COALESCE(reserved, 0))) >= ${amount}
+      `
+      if (affected === 0) {
         return NextResponse.json({ error: 'Insufficient tickets' }, { status: 402 })
       }
-      const updated = await prisma.ticket.update({
-        where: { userId: user.id },
-        data: { balance: { decrement: amount }, totalUsed: { increment: amount } },
-        select: { balance: true },
+      const updated = await prisma.ticket.findUnique({
+        where: { userId: user.id }, select: { balance: true },
       })
-      return NextResponse.json({ success: true, newBalance: updated.balance })
+      return NextResponse.json({ success: true, newBalance: updated?.balance ?? 0 })
     }
 
     if (action === 'refund') {

@@ -88,6 +88,14 @@ export async function GET(request: Request) {
       })
     }
 
+    // ?models=a,b,c → only these model ids (the Feed dropdown's per-model
+    // include/exclude). Empty/absent = no model filtering.
+    const modelsParam = searchParams.get('models')
+    const modelList = modelsParam
+      ? modelsParam.split(',').map(s => s.trim()).filter(Boolean).slice(0, 100)
+      : []
+    const modelFilter = modelList.length > 0 ? { model: { in: modelList } } : {}
+
     const baseWhere = {
       userId: user.id,
       isDeleted: false,
@@ -109,9 +117,18 @@ export async function GET(request: Request) {
         }
       : {}
 
-    // AND-combine instead of spreading: both the type filter and the cursor
-    // predicate use OR/AND keys, which a plain spread would silently clobber
-    const where = hasCursor ? { AND: [baseWhere, cursorWhere] } : baseWhere
+    // Dataset uploads are GeneratedImage rows too (model '__upload__'), but they
+    // are TRAINING DATA, not generations. A single 260-image dataset upload
+    // buried the user's actual generations ~11 pages deep in this time-sorted
+    // feed. Exclude them here — they stay fully browsable on /admin/dataset.
+    const uploadWhere = { model: { not: '__upload__' } }
+
+    // AND-combine instead of spreading: the type filter, upload filter and the
+    // cursor predicate all use model/OR/AND keys that a plain spread would
+    // silently clobber
+    const where = hasCursor
+      ? { AND: [baseWhere, cursorWhere, uploadWhere, modelFilter] }
+      : { AND: [baseWhere, uploadWhere, modelFilter] }
 
     const images = await prisma.generatedImage.findMany({
       where,
@@ -150,8 +167,10 @@ export async function GET(request: Request) {
       })
     }
 
-    // Page mode (unchanged) — used by callers that still pass ?page=
-    const total = await prisma.generatedImage.count({ where: baseWhere })
+    // Page mode (unchanged) — used by callers that still pass ?page=.
+    // Count with the SAME filter as the list, or totalPages overshoots by the
+    // number of excluded dataset uploads.
+    const total = await prisma.generatedImage.count({ where: { AND: [baseWhere, uploadWhere, modelFilter] } })
     return NextResponse.json({
       success: true,
       images: mapped,

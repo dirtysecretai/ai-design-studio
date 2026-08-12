@@ -7,6 +7,14 @@ const nextConfig: NextConfig = {
     },
   },
 
+  // ffmpeg-static resolves its binary relative to its own __dirname — bundling
+  // it breaks that path, so it must stay external; tracing then carries the
+  // binary for the reference-video trim route on Vercel
+  serverExternalPackages: ['ffmpeg-static'],
+  outputFileTracingIncludes: {
+    '/api/user/references/trim-video': ['./node_modules/ffmpeg-static/**'],
+  },
+
   images: {
     remotePatterns: [
       { hostname: 'pub-de315f4652054008be5f90bf09919f80.r2.dev' },

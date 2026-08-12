@@ -19,7 +19,7 @@ export async function POST(req: Request) {
 
     const body = await req.json()
     requestId = body.requestId
-    const { falEndpoint, prompt, outputFormat, aspectRatio, quality, referenceImageUrls, ticketCost } = body
+    const { falEndpoint, prompt, outputFormat, aspectRatio, quality, referenceImageUrls, ticketCost, queuedAt, videoMetadata } = body
     if (!requestId || !falEndpoint) {
       return NextResponse.json({ error: 'Missing requestId or falEndpoint' }, { status: 400 })
     }
@@ -98,6 +98,14 @@ export async function POST(req: Request) {
                 referenceImageUrls: Array.isArray(referenceImageUrls) ? referenceImageUrls : [],
                 expiresAt:          new Date(Date.now() + 100 * 365 * 24 * 60 * 60 * 1000),
                 falRequestId:       requestId,
+                // createdAt = when the user QUEUED the generation (the feed's
+                // ordering key), not when it completed — keeps queue order
+                // stable across refresh. Sanity-capped to the last 24h.
+                ...(typeof queuedAt === 'number' && queuedAt > Date.now() - 24 * 3600 * 1000 && queuedAt <= Date.now() + 60_000
+                  ? { createdAt: new Date(queuedAt) } : {}),
+                // Full generation settings for the info panel
+                ...(videoMetadata && typeof videoMetadata === 'object'
+                  ? { videoMetadata: videoMetadata as object } : {}),
               },
               select: { id: true },
             })

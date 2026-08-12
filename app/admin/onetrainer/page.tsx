@@ -768,14 +768,17 @@ function CompletedRunCard({ run, adminHeaders }: { run: RunInfo; adminHeaders: R
 // One card per concurrent RunPod training run: own status/log polling, parsed
 // progress (epoch splits + streaming %), config + dataset viewer, cancel.
 
-function CloudRunCard({ run, adminHeaders, onDismiss, onRename, onStatus }: {
+function CloudRunCard({ run, adminHeaders, onDismiss, onRename, onStatus, onRetry }: {
   run: TrackedRun
   adminHeaders: Record<string, string>
   onDismiss: () => void
   onRename?: (name: string) => void
   // Reports the live status up so the Monitor can filter completed runs
   onStatus?: (status: string) => void
+  // Relaunch a failed run with its recorded config (from run.json)
+  onRetry?: (meta: Record<string, unknown>, runName: string) => Promise<void> | void
 }) {
+  const [retrying, setRetrying] = useState(false)
   // Inline rename — updates the tracked entry + the run.json metadata in R2
   const [editingName, setEditingName] = useState(false)
   const [nameDraft, setNameDraft]     = useState(run.runName)
@@ -1046,6 +1049,21 @@ function CloudRunCard({ run, adminHeaders, onDismiss, onRename, onStatus }: {
             <button onClick={cancel} disabled={cancelling}
               className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-[10px] font-bold hover:bg-red-500/15 transition-all disabled:opacity-50">
               <Square size={9} /> {cancelling ? '…' : 'Cancel'}
+            </button>
+          )}
+          {/* Retry — relaunch a failed run with the exact same recipe */}
+          {!active && (status === 'error' || status === 'cancelled') && onRetry && meta && (
+            <button
+              onClick={async () => {
+                setRetrying(true)
+                try { await onRetry(meta as unknown as Record<string, unknown>, run.runName) }
+                finally { setRetrying(false) }
+              }}
+              disabled={retrying}
+              title="Relaunch this run with the same configuration"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/10 border border-white/25 text-white text-[10px] font-bold hover:bg-white/15 transition-all disabled:opacity-50">
+              {retrying ? <Loader2 size={9} className="animate-spin" /> : <RefreshCw size={9} />}
+              {retrying ? 'Retrying…' : 'Retry'}
             </button>
           )}
           {!active && (
@@ -2848,8 +2866,9 @@ function BucketPickerModal({ onClose, onBuilt, adminHeaders, initialData }: {
             </div>
           </div>
 
-          {/* ── RIGHT: current dataset — equal pillar ── */}
-          <div className="flex-1 basis-0 min-w-0 border-l border-white/[0.06] flex flex-col min-h-0">
+          {/* ── RIGHT: current dataset — equal pillar (stacks under the browser
+              on phones; side-by-side from lg up) ── */}
+          <div className="flex-1 basis-0 min-w-0 border-t lg:border-t-0 lg:border-l border-white/[0.06] flex flex-col min-h-0">
             <div className="relative z-40 px-4 py-2.5 border-b border-white/[0.06] shrink-0 flex items-center gap-2">
               <p className="text-[10px] font-mono font-bold uppercase tracking-[0.2em] text-slate-400 shrink-0">Current Dataset</p>
               <span className="text-[10px] text-slate-500 font-mono shrink-0">{selected.size} images</span>
@@ -3406,26 +3425,83 @@ export default function OneTrainerPage() {
 
   // Concurrent cloud runs tracked on the Monitor tab (each RunPod submission is
   // its own serverless worker). Persisted so a refresh keeps monitoring them.
+  // SERVER-BACKED: the tracked list comes from each run's run.json in R2 (the
+  // train route records job_id + started_at at launch), so every admin device
+  // monitors the same runs. Previously this lived in localStorage, which meant
+  // a run was only visible on the browser that launched it.
   const [cloudRuns, setCloudRuns] = useState<TrackedRun[]>([])
-  useEffect(() => {
+  const refreshTrackedRuns = useCallback(async () => {
     try {
-      const raw = localStorage.getItem('ot-cloud-runs-v1')
-      if (raw) {
-        const parsed = JSON.parse(raw)
-        if (Array.isArray(parsed)) setCloudRuns(parsed.filter(r => r && typeof r.jobId === 'string'))
+      const res = await fetch('/api/admin/onetrainer/runs?tracked=1', { headers: ah(), signal: AbortSignal.timeout(20_000) })
+      if (!res.ok) return
+      const d = await res.json()
+      if (Array.isArray(d?.runs)) {
+        setCloudRuns(prev => {
+          // Keep any run this device just launched but the list hasn't caught
+          // up to yet (R2 list is eventually consistent)
+          const serverIds = new Set(d.runs.map((r: TrackedRun) => r.jobId))
+          const pendingLocal = prev.filter(p => !serverIds.has(p.jobId) && Date.now() - p.startedAt < 120_000)
+          return [...pendingLocal, ...d.runs]
+        })
       }
     } catch {}
   }, [])
-  const trackRun = (r: TrackedRun) => setCloudRuns(prev => {
-    const next = [r, ...prev.filter(x => x.jobId !== r.jobId)].slice(0, 20)
-    try { localStorage.setItem('ot-cloud-runs-v1', JSON.stringify(next)) } catch {}
-    return next
-  })
-  const dismissRun = (jobId: string) => setCloudRuns(prev => {
-    const next = prev.filter(x => x.jobId !== jobId)
-    try { localStorage.setItem('ot-cloud-runs-v1', JSON.stringify(next)) } catch {}
-    return next
-  })
+  useEffect(() => {
+    refreshTrackedRuns()
+    const t = setInterval(refreshTrackedRuns, 60_000)
+    return () => clearInterval(t)
+  }, [refreshTrackedRuns])
+  // Relaunch a failed run from its recorded run.json — same config, concepts
+  // (dataset zips already live in R2) and base checkpoint. The train route
+  // auto-versions the display name, so the retry lands as "<name> v2" rather
+  // than colliding with the failed run's folder.
+  const retryCloudRun = async (meta: Record<string, unknown>, runName: string) => {
+    const config = meta.config
+    const concepts = meta.concepts
+    const checkpoint = meta.checkpoint_r2_key
+    if (!config || !Array.isArray(concepts) || concepts.length === 0 || !checkpoint) {
+      alert('This run has no saved recipe to retry from (missing config, concepts or checkpoint).')
+      return
+    }
+    try {
+      const res = await fetch('/api/admin/onetrainer/cloud/train', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...ah() },
+        body: JSON.stringify({
+          run_name: runName,
+          config,
+          concepts,
+          checkpoint_r2_key: checkpoint,
+          ...(meta.dataset ? { run_meta: { dataset: meta.dataset } } : {}),
+        }),
+      })
+      const d = await res.json().catch(() => ({}))
+      if (!res.ok || !d.job_id) { alert(d.error ?? `Retry failed (${res.status})`); return }
+      trackRun({
+        jobId: d.job_id,
+        runName: d.run_name || runName,
+        runFolder: d.run_folder || runName.replace(/[^a-z0-9_-]/gi, '_'),
+        startedAt: Date.now(),
+      })
+    } catch (e) {
+      alert(`Retry failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  // Optimistic local add on launch; the next server refresh confirms it
+  const trackRun = (r: TrackedRun) => {
+    setCloudRuns(prev => [r, ...prev.filter(x => x.jobId !== r.jobId)].slice(0, 20))
+    setTimeout(() => { void refreshTrackedRuns() }, 3000)
+  }
+  // Dismiss persists to R2 so the run hides on every device
+  const dismissRun = (jobId: string) => {
+    setCloudRuns(prev => prev.filter(x => x.jobId !== jobId))
+    fetch('/api/admin/onetrainer/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...ah() },
+      body: JSON.stringify({ action: 'dismiss', jobId }),
+    }).catch(() => {})
+  }
   // Monitor "Show completed" toggle — each card reports its live status up so
   // finished runs can be hidden without unmounting the active pollers
   const [showCompleted, setShowCompleted] = useState<boolean>(() => {
@@ -3440,6 +3516,17 @@ export default function OneTrainerPage() {
   // localStorage mismatch the SSR render and throw hydration errors.
   const [tab, setTab]             = useState<'config' | 'monitor' | 'loras' | 'history'>('config')
   const [uiPrefsHydrated, setUiPrefsHydrated] = useState(false)
+  // Training-preset dropdown (replaced the permanent left column)
+  const [presetDdOpen, setPresetDdOpen] = useState(false)
+  const presetDdRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!presetDdOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (presetDdRef.current && !presetDdRef.current.contains(e.target as Node)) setPresetDdOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [presetDdOpen])
   useEffect(() => {
     try {
       const t = localStorage.getItem('ot-active-tab')
@@ -4285,15 +4372,16 @@ export default function OneTrainerPage() {
     <div className="h-screen bg-[#05080f] text-white flex flex-col overflow-hidden">
 
       {/* ── Header ── */}
-      <div className="shrink-0 bg-[#05080f] border-b border-white/[0.06] px-4 py-3 flex items-center gap-3">
+      <div className="shrink-0 bg-[#05080f] border-b border-white/[0.06] px-3 sm:px-4 py-3 flex items-center gap-2 sm:gap-3 flex-wrap">
         <button onClick={() => window.location.href = '/admin'}
-          className="p-1.5 rounded-lg hover:bg-white/[0.06] text-slate-500 hover:text-white transition-colors">
+          className="p-1.5 rounded-lg hover:bg-white/[0.06] text-slate-500 hover:text-white transition-colors shrink-0">
           <ArrowLeft size={14} />
         </button>
         <SiteLogoBox size={26} rounded={9} />
-        <div className="flex-1">
-          <h1 className="text-sm font-bold text-white leading-none">OneTrainer</h1>
-          <p className="text-[9px] font-mono uppercase tracking-[0.2em] text-slate-500 mt-1 leading-none">Model Training · Studio</p>
+        <div className="flex-1 min-w-0">
+          <h1 className="text-sm font-bold text-white leading-none truncate">OneTrainer</h1>
+          {/* Subtitle is decorative — it ate a whole line on a phone */}
+          <p className="hidden sm:block text-[9px] font-mono uppercase tracking-[0.2em] text-slate-500 mt-1 leading-none">Model Training · Studio</p>
         </div>
 
         {/* Mode toggle */}
@@ -4341,12 +4429,12 @@ export default function OneTrainerPage() {
         )}
       </div>
 
-      {/* ── Tabs ── */}
-      <div className="shrink-0 border-b border-white/[0.06] px-4">
-        <div className="flex">
+      {/* ── Tabs — horizontally scrollable so all four stay reachable on a phone ── */}
+      <div className="shrink-0 border-b border-white/[0.06] px-2 sm:px-4">
+        <div className="flex overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
           {([['config', 'Configuration', Settings2], ['monitor', 'Monitor', Terminal], ['loras', 'Saved LoRAs', Zap], ['history', 'Completed Runs', CheckCircle]] as const).map(([id, label, Icon]) => (
             <button key={id} onClick={() => { setTab(id); if (id === 'loras' || id === 'history') loadRuns() }}
-              className={`flex items-center gap-2 px-4 py-3 text-xs font-medium border-b-2 transition-colors ${
+              className={`flex items-center gap-2 px-3 sm:px-4 py-3 text-xs font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                 tab === id ? 'border-white text-white' : 'border-transparent text-slate-500 hover:text-slate-300'
               }`}>
               <Icon size={12} /> {label}
@@ -4358,97 +4446,116 @@ export default function OneTrainerPage() {
         </div>
       </div>
 
-      {/* ── Config tab ── */}
+      {/* ── Config tab ──
+          Phones get ONE scrolling column (preset list, then the config panel);
+          lg+ keeps the original sidebar + main split. */}
       {tab === 'config' && (
-        <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden">
 
-          {/* Left sidebar — preset picker */}
-          <div className="w-72 shrink-0 border-r border-white/[0.06] overflow-y-auto flex flex-col">
-            <div className="p-4 flex items-center justify-between shrink-0">
-              <div>
-                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Training Preset</p>
-                <p className="text-[9px] text-slate-700 mt-0.5">Select model + method</p>
-              </div>
-              <button onClick={loadPresets} className="p-1 rounded hover:bg-white/[0.06] text-slate-600 hover:text-slate-400 transition-colors">
-                <RefreshCw size={10} />
-              </button>
-            </div>
+          {/* Single main panel — the preset picker is now a dropdown at the
+              top (step 0) instead of a permanent left column */}
+          <div className="flex-1 min-w-0 lg:overflow-y-auto">
+            <div className="p-4 sm:p-6 space-y-5 max-w-3xl">
 
-            <div className="flex-1 px-3 pb-4">
-              {mode === 'local' && !serverRunning ? (
-                <div className="rounded-xl border border-amber-500/15 bg-amber-500/5 p-3 flex items-start gap-2.5">
-                  <BookOpen size={12} className="text-amber-500 shrink-0 mt-0.5" />
-                  <div className="text-[10px] text-amber-600 space-y-0.5">
-                    <p className="font-semibold text-amber-400">Server offline</p>
-                    <p>Click <strong>Start Server</strong> above to load presets.</p>
-                  </div>
+              {/* ── Step 0: Training Preset (dropdown) ── */}
+              <div ref={presetDdRef} className="relative rounded-2xl border border-white/[0.08] bg-[#0a101d] p-4 sm:p-5 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Training Preset</p>
+                  <button onClick={loadPresets} title="Reload presets"
+                    className="p-1 rounded hover:bg-white/[0.06] text-slate-600 hover:text-slate-400 transition-colors">
+                    <RefreshCw size={11} />
+                  </button>
                 </div>
-              ) : presets.length === 0 ? (
-                <p className="text-[10px] text-slate-600 px-1">No presets found — check your OneTrainer installation.</p>
-              ) : (() => {
-                const grouped: Record<string, Preset[]> = {}
-                for (const p of presets) {
-                  const { family } = parsePreset(p.filename)
-                  ;(grouped[family] ??= []).push(p)
-                }
-                const activeFamilies = FAMILY_ORDER.filter(f => grouped[f]?.length)
-                return (
-                  <div className="space-y-3">
-                    {activeFamilies.map(family => (
-                      <div key={family}>
-                        <div className="flex items-center gap-2 mb-1.5 px-1">
-                          <span className={`text-[9px] font-bold uppercase tracking-widest ${FAMILY_COLOR[family] ?? 'text-slate-500'}`}>
-                            {family}
-                          </span>
-                          <div className="flex-1 h-px bg-white/[0.05]" />
-                        </div>
-                        <div className="space-y-0.5">
-                          {grouped[family].map(p => {
-                            const { method, vram } = parsePreset(p.filename)
-                            const isSelected = selectedPreset?.filename === p.filename
-                            const cfgLr  = p.config.learning_rate
-                            const cfgBs  = p.config.batch_size
-                            const cfgRes = p.config.resolution
-                            return (
-                              <button key={p.filename} onClick={() => selectPreset(p)}
-                                className={`w-full text-left px-2.5 py-2 rounded-lg border transition-all ${
-                                  isSelected
-                                    ? 'border-white/30 bg-white/[0.07]'
-                                    : 'border-transparent hover:border-white/[0.08] hover:bg-white/[0.03]'
-                                }`}>
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                  <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border ${METHOD_PILL[method]}`}>{method}</span>
-                                  {vram
-                                    ? <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border ${VRAM_PILL[vram] ?? 'bg-white/5 text-slate-400 border-white/10'}`}>{vram}</span>
-                                    : <span className="text-[9px] font-mono px-1.5 py-0.5 rounded border bg-white/5 text-slate-500 border-white/10">any</span>
-                                  }
-                                  {isSelected && <CheckCircle size={9} className="text-white ml-auto shrink-0" />}
-                                </div>
-                                <div className="flex gap-2 mt-1">
-                                  {!!cfgRes && <span className="text-[9px] text-slate-600 font-mono">res <span className="text-slate-500">{String(cfgRes)}</span></span>}
-                                  {!!cfgBs  && <span className="text-[9px] text-slate-600 font-mono">bs <span className="text-slate-500">{String(cfgBs)}</span></span>}
-                                  {!!cfgLr  && <span className="text-[9px] text-slate-600 font-mono">lr <span className="text-slate-500">{Number(cfgLr).toExponential(0)}</span></span>}
-                                </div>
-                              </button>
-                            )
-                          })}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )
-              })()}
-            </div>
-          </div>
 
-          {/* Right main panel */}
-          <div className="flex-1 overflow-y-auto">
-            {!selectedPreset ? (
-              <div className="flex items-center justify-center h-full text-slate-700 text-sm">
-                {mode === 'cloud' ? 'Select a preset from the left to begin.' : serverRunning ? 'Select a preset from the left to begin.' : 'Start the server, then select a preset.'}
+                {mode === 'local' && !serverRunning ? (
+                  <div className="rounded-xl border border-amber-500/15 bg-amber-500/5 p-3 flex items-start gap-2.5">
+                    <BookOpen size={12} className="text-amber-500 shrink-0 mt-0.5" />
+                    <div className="text-[10px] text-amber-600 space-y-0.5">
+                      <p className="font-semibold text-amber-400">Server offline</p>
+                      <p>Click <strong>Start Server</strong> above to load presets.</p>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <button onClick={() => setPresetDdOpen(v => !v)}
+                      className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl border text-left transition-all ${
+                        presetDdOpen ? 'border-white/30 bg-white/[0.08]' : 'border-white/10 bg-white/[0.03] hover:border-white/20'}`}>
+                      {selectedPreset ? (() => {
+                        const { family, method, vram } = parsePreset(selectedPreset.filename)
+                        return (
+                          <span className="flex items-center gap-1.5 flex-wrap min-w-0">
+                            <span className={`text-[10px] font-bold uppercase tracking-widest ${FAMILY_COLOR[family] ?? 'text-slate-400'}`}>{family}</span>
+                            <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border ${METHOD_PILL[method]}`}>{method}</span>
+                            <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border ${vram ? (VRAM_PILL[vram] ?? 'bg-white/5 text-slate-400 border-white/10') : 'bg-white/5 text-slate-500 border-white/10'}`}>{vram || 'any'}</span>
+                          </span>
+                        )
+                      })() : (
+                        <span className="text-[12px] text-slate-500">
+                          {presets.length === 0 ? 'No presets found' : 'Select a model + method…'}
+                        </span>
+                      )}
+                      <ChevronDown size={13} className={`shrink-0 text-slate-500 transition-transform ${presetDdOpen ? 'rotate-180' : ''}`} />
+                    </button>
+
+                    {presetDdOpen && presets.length > 0 && (
+                      <div className="absolute left-4 right-4 sm:left-5 sm:right-5 z-40 mt-1 max-h-[60vh] overflow-y-auto rounded-xl border border-white/[0.1] bg-[#070b14] shadow-2xl p-2 space-y-3">
+                        {(() => {
+                          const grouped: Record<string, Preset[]> = {}
+                          for (const p of presets) {
+                            const { family } = parsePreset(p.filename)
+                            ;(grouped[family] ??= []).push(p)
+                          }
+                          const activeFamilies = FAMILY_ORDER.filter(f => grouped[f]?.length)
+                          return activeFamilies.map(family => (
+                            <div key={family}>
+                              <div className="flex items-center gap-2 mb-1.5 px-1">
+                                <span className={`text-[9px] font-bold uppercase tracking-widest ${FAMILY_COLOR[family] ?? 'text-slate-500'}`}>{family}</span>
+                                <div className="flex-1 h-px bg-white/[0.05]" />
+                              </div>
+                              <div className="space-y-0.5">
+                                {grouped[family].map(p => {
+                                  const { method, vram } = parsePreset(p.filename)
+                                  const isSelected = selectedPreset?.filename === p.filename
+                                  const cfgLr  = p.config.learning_rate
+                                  const cfgBs  = p.config.batch_size
+                                  const cfgRes = p.config.resolution
+                                  return (
+                                    <button key={p.filename}
+                                      onClick={() => { selectPreset(p); setPresetDdOpen(false) }}
+                                      className={`w-full text-left px-2.5 py-2 rounded-lg border transition-all ${
+                                        isSelected ? 'border-white/30 bg-white/[0.07]' : 'border-transparent hover:border-white/[0.08] hover:bg-white/[0.03]'}`}>
+                                      <div className="flex items-center gap-1.5 flex-wrap">
+                                        <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border ${METHOD_PILL[method]}`}>{method}</span>
+                                        {vram
+                                          ? <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border ${VRAM_PILL[vram] ?? 'bg-white/5 text-slate-400 border-white/10'}`}>{vram}</span>
+                                          : <span className="text-[9px] font-mono px-1.5 py-0.5 rounded border bg-white/5 text-slate-500 border-white/10">any</span>
+                                        }
+                                        {isSelected && <CheckCircle size={9} className="text-white ml-auto shrink-0" />}
+                                      </div>
+                                      <div className="flex gap-2 mt-1">
+                                        {!!cfgRes && <span className="text-[9px] text-slate-600 font-mono">res <span className="text-slate-500">{String(cfgRes)}</span></span>}
+                                        {!!cfgBs  && <span className="text-[9px] text-slate-600 font-mono">bs <span className="text-slate-500">{String(cfgBs)}</span></span>}
+                                        {!!cfgLr  && <span className="text-[9px] text-slate-600 font-mono">lr <span className="text-slate-500">{Number(cfgLr).toExponential(0)}</span></span>}
+                                      </div>
+                                    </button>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          ))
+                        })()}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {!selectedPreset ? (
+              <div className="flex items-center justify-center py-12 text-slate-700 text-sm px-6 text-center">
+                {mode === 'cloud' ? 'Choose a preset above to begin.' : serverRunning ? 'Choose a preset above to begin.' : 'Start the server, then choose a preset.'}
               </div>
             ) : (
-              <div className="p-6 space-y-5 max-w-3xl">
+              <div className="space-y-5">
 
                 {/* ── Section 1: Base Model ── */}
                 <div className="rounded-2xl border border-white/[0.08] bg-[#0a101d] p-5 space-y-3">
@@ -5036,6 +5143,7 @@ export default function OneTrainerPage() {
 
               </div>
             )}
+            </div>
           </div>
         </div>
       )}
@@ -5222,6 +5330,7 @@ export default function OneTrainerPage() {
                  running so a hidden run's status stays current */
               <div key={r.jobId} className={!showCompleted && runStatuses[r.jobId] === 'done' ? 'hidden' : undefined}>
                 <CloudRunCard run={r} adminHeaders={ah()} onDismiss={() => dismissRun(r.jobId)}
+                  onRetry={retryCloudRun}
                   onStatus={s => setRunStatuses(prev => prev[r.jobId] === s ? prev : { ...prev, [r.jobId]: s })}
                   onRename={name => setCloudRuns(prev => {
                     const next = prev.map(x => x.jobId === r.jobId ? { ...x, runName: name } : x)

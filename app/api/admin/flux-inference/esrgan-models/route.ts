@@ -1,8 +1,8 @@
-﻿import { NextResponse } from 'next/server'
+import { NextResponse } from 'next/server'
 import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3'
 import { checkAdminRequest } from '@/lib/admin-check'
 
-// Built-in models bundled in the worker image â€” excluded from the custom list
+// Built-in models bundled in the worker image — excluded from the custom list
 const BUILT_IN = new Set(['4x-UltraSharp.pth', 'RealESRGAN_x4plus.pth', 'RealESRGAN_x2plus.pth'])
 
 function makeR2() {
@@ -18,7 +18,7 @@ function makeR2() {
 }
 
 // GET /api/admin/flux-inference/esrgan-models
-// Returns { models: string[] } â€” custom .pth filenames in training/models/esrgan/
+// Returns { models: string[] } — custom .pth filenames in training/models/esrgan/
 export async function GET(req: Request) {
   if (!await checkAdminRequest(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   if (!process.env.R2_ENDPOINT || !process.env.R2_ACCESS_KEY_ID || !process.env.R2_BUCKET_NAME) {

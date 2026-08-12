@@ -2717,8 +2717,16 @@ const modelOptions      = useMemo(() => (facets?.models    ?? []).map(m => ({ va
         {/* ONE merged taskbar row: back · logo+title · scrollable actions · stats · refresh */}
         <div className="px-3 py-2 flex items-center gap-2.5">
           <button onClick={() => window.location.href = '/admin'}
+            title="Back to Admin"
             className="shrink-0 p-1.5 rounded-lg hover:bg-white/[0.06] text-slate-500 hover:text-white transition-colors">
             <ArrowLeft size={16} />
+          </button>
+          {/* Direct jump to the portal — skips the extra hop through /admin */}
+          <button onClick={() => window.location.href = '/admin/portal-v2'}
+            title="Back to Portal"
+            className="shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg border border-white/10 bg-white/[0.04] hover:bg-white/[0.08] text-slate-400 hover:text-white transition-colors">
+            <ArrowLeft size={12} />
+            <span className="text-[10px] font-semibold leading-none">Portal</span>
           </button>
           <div className="flex items-center gap-2.5 min-w-0 shrink-0">
             <SiteLogoBox size={28} rounded={9} />

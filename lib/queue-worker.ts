@@ -38,14 +38,25 @@ export async function queueGeneration(params: {
   priority?: number;
 }): Promise<{ queueId: number; position: number }> {
   try {
-    // Reserve tickets
-    await prisma.ticket.update({
-      where: { userId: params.userId },
-      data: {
-        balance: { decrement: params.ticketCost },
-        reserved: { increment: params.ticketCost }
+    // Reserve tickets — ATOMIC and guarded. This used to be a bare decrement
+    // with no balance check, which is how accounts went negative (one user hit
+    // -12): concurrent submissions, or a submission with a balance below cost,
+    // both just subtracted. The conditional UPDATE only applies when the funds
+    // are actually there, and returns 0 rows otherwise.
+    if (params.ticketCost > 0) {
+      const affected = await prisma.$executeRaw`
+        UPDATE "Ticket"
+        SET balance = balance - ${params.ticketCost},
+            reserved = GREATEST(0, COALESCE(reserved, 0)) + ${params.ticketCost}
+        WHERE "userId" = ${params.userId}
+          AND (balance - GREATEST(0, COALESCE(reserved, 0))) >= ${params.ticketCost}
+      `;
+      if (affected === 0) {
+        const t = await prisma.ticket.findUnique({ where: { userId: params.userId } });
+        const available = Math.max(0, (t?.balance ?? 0) - Math.max(0, t?.reserved ?? 0));
+        throw new Error(`Insufficient tickets. Need ${params.ticketCost} ticket(s), but you have ${available}.`);
       }
-    });
+    }
 
     // Create queue item
     const queueItem = await prisma.generationQueue.create({

@@ -22,8 +22,22 @@ function makeR2() {
   })
 }
 
+// Dismissed-run list, stored in R2 so hiding a run on one device hides it on
+// all of them (the Monitor is shared across every admin device now).
+const DISMISSED_KEY = 'training/monitor-dismissed.json'
+async function readDismissed(r2: S3Client, bucket: string): Promise<string[]> {
+  try {
+    const obj = await r2.send(new GetObjectCommand({ Bucket: bucket, Key: DISMISSED_KEY }))
+    const text = await obj.Body?.transformToString('utf-8')
+    const parsed = text ? JSON.parse(text) : null
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []
+  } catch { return [] }
+}
+
 // GET               → { runs: [{ folder, final, epochs[], hasMeta, createdAt }], legacy: FileInfo[] }
 // GET ?meta=<folder> → parsed run.json for that run
+// GET ?tracked=1     → in-flight/recent runs for the Monitor, from run.json —
+//                      SERVER-backed so every admin device sees the same list
 export async function GET(req: Request) {
   if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const { searchParams } = new URL(req.url)
@@ -32,6 +46,28 @@ export async function GET(req: Request) {
   const bucket = process.env.R2_BUCKET_NAME!
 
   try {
+    if (searchParams.get('tracked') === '1') {
+      const listed = await r2.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: 'training/loras/' }))
+      const metaKeys = (listed.Contents ?? []).map(o => o.Key ?? '').filter(k => k.endsWith('/run.json'))
+      const dismissed = new Set(await readDismissed(r2, bucket))
+      const runs = (await Promise.all(metaKeys.map(async key => {
+        try {
+          const obj = await r2.send(new GetObjectCommand({ Bucket: bucket, Key: key }))
+          const text = await obj.Body?.transformToString('utf-8')
+          const meta = text ? JSON.parse(text) : null
+          const jobId = typeof meta?.job_id === 'string' ? meta.job_id : null
+          if (!jobId || dismissed.has(jobId)) return null
+          const folder = key.split('/')[2]
+          const startedAt = typeof meta?.started_at === 'number'
+            ? meta.started_at
+            : (meta?.created_at ? new Date(meta.created_at).getTime() : 0)
+          return { jobId, runName: String(meta?.run_name || folder), runFolder: folder, startedAt }
+        } catch { return null }
+      }))).filter((r): r is { jobId: string; runName: string; runFolder: string; startedAt: number } => !!r)
+      // Newest first, capped — the Monitor polls one status request per card
+      runs.sort((a, b) => b.startedAt - a.startedAt)
+      return NextResponse.json({ runs: runs.slice(0, 20) })
+    }
     // ?final=<folder> → does the run's final LoRA exist yet? Ground truth for
     // completion when RunPod's job status has expired (it TTLs after a while,
     // which left finished runs spinning forever on the Monitor).
@@ -128,7 +164,24 @@ export async function GET(req: Request) {
 // alone caps at 5GB).
 export async function POST(req: Request) {
   if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const body = await req.json().catch(() => null) as { action?: string; folder?: string; name?: string } | null
+  const body = await req.json().catch(() => null) as { action?: string; folder?: string; name?: string; jobId?: string } | null
+
+  // { action: 'dismiss', jobId } → hide a run from the Monitor on EVERY device
+  // (the tracked list is server-backed, so dismissal has to be too)
+  if (body?.action === 'dismiss') {
+    const jobId = typeof body.jobId === 'string' ? body.jobId : ''
+    if (!jobId) return NextResponse.json({ error: 'jobId required' }, { status: 400 })
+    const r2d = makeR2()
+    const bkt = process.env.R2_BUCKET_NAME!
+    const current = await readDismissed(r2d, bkt)
+    if (!current.includes(jobId)) current.push(jobId)
+    await r2d.send(new PutObjectCommand({
+      Bucket: bkt, Key: DISMISSED_KEY,
+      Body: JSON.stringify(current.slice(-500)), ContentType: 'application/json',
+    }))
+    return NextResponse.json({ ok: true })
+  }
+
   if (body?.action !== 'promote') return NextResponse.json({ error: 'Unknown action' }, { status: 400 })
   const folder = (body.folder ?? '').replace(/[^a-z0-9_-]/gi, '_')
   if (!folder) return NextResponse.json({ error: 'folder required' }, { status: 400 })

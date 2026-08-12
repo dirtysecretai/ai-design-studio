@@ -1,11 +1,11 @@
 "use client"
 
-import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo, useReducer, cloneElement, isValidElement, type ReactNode, type ReactElement } from "react"
 import { createPortal } from "react-dom"
 import Link from "next/link"
 import ChatWidget from "@/components/ChatWidget"
 import ChatHub, { ChatProviderSettings, ChatLayoutSettings, ChatAgentSettings, ChatAgentCapabilities, ChatApiKeysSettings } from "@/components/chat-hub"
-import { Image, Video, Type, ChevronDown, ChevronLeft, ChevronRight, Ticket, User, BookMarked, ImagePlus, X, Plus, Check, Copy, Download, RotateCcw, ShoppingBag, SlidersHorizontal, Bell, AlertTriangle, CheckCircle, Info, Sparkles, Music, BookOpen, Star, Trash2, Loader2, Eye, RefreshCw, Upload, Pencil, Eraser, Crop, Undo2, Square, Circle, Droplets, Lock, FolderPlus, Layers, Search, PanelLeft, PanelRight, PanelTop, PanelBottom, EyeOff, Folder, Maximize2, Minimize2, FolderInput, Zap, Pin, MessagesSquare, ArrowUpRight, Wand2, Scissors, List, LayoutGrid, Unlock, MousePointer2, ClipboardPaste } from "lucide-react"
+import { Image, Video, Type, ChevronDown, ChevronLeft, ChevronRight, Ticket, User, BookMarked, ImagePlus, X, Plus, Check, Copy, Download, RotateCcw, ShoppingBag, SlidersHorizontal, Bell, AlertTriangle, CheckCircle, Info, Sparkles, Music, BookOpen, Star, Trash2, Loader2, Eye, RefreshCw, Upload, Pencil, Eraser, Crop, Undo2, Square, Circle, Droplets, Lock, FolderPlus, Layers, Search, PanelLeft, PanelRight, PanelTop, PanelBottom, EyeOff, Folder, Maximize2, Minimize2, FolderInput, Zap, Pin, MessagesSquare, ArrowUpRight, Wand2, Scissors, List, LayoutGrid, Unlock, MousePointer2, ClipboardPaste, Play, Film } from "lucide-react"
 import { AddToBucketModal, type Bucket, type BucketFolder } from "@/components/AddToBucketModal"
 import { NewsManager } from "@/components/NewsManager"
 import { HomeView } from "@/components/home/HomeView"
@@ -487,9 +487,22 @@ interface RefFolder { id: number; name: string; parentId: number | null }
 // --- PENDING SLOT ---
 interface PendingSlot {
   slotId: string
-  status: "loading" | "failed"
+  // "done" keeps the card ALIVE after the image arrives. Previously the slot
+  // was destroyed and the image re-added as a different element with a
+  // different React key, so the tile unmounted/remounted (visible flicker)
+  // and jumped to wherever the new element sorted. One generation = one card,
+  // from queued through finished/failed, in one fixed position.
+  status: "loading" | "failed" | "done"
   prompt: string
   error?: string
+  doneImage?: ImageItem  // set with status "done" — rendered in place
+  // id of the savedFails entry this slot produced, so the feed can suppress
+  // that duplicate while the slot's own error card is still on screen
+  failItemId?: number
+  // When the user QUEUED this generation. The feed's single ordering key:
+  // finished images and error tiles inherit this time (not completion/failure
+  // time), so the feed stays in queue order live AND after a refresh.
+  queuedAtMs?: number
   queueId?: number       // FAL queue job ID — stored so polling can resume after a page refresh
   queueJobId?: number    // GenerationQueue DB ID — set when the job was queued (capacity exceeded)
   nb2RequestId?: string  // FAL queue request ID for any async image model (NB2, Kling V3/O3, etc.)
@@ -760,6 +773,15 @@ function CostBadge({ tier }: { tier: "$" | "$$" | "$$$" | "$$$+" }) {
 const IMAGE_MODEL_COST_BY_NAME: Record<string, "$" | "$$" | "$$$" | "$$$+"> = Object.fromEntries(
   IMAGE_MODEL_CONFIGS.map(m => [m.name, IMAGE_MODEL_COST[m.id] ?? "$"])
 )
+
+// Feed model filter: a taskbar display name → every DB `model` value a
+// generation from it could have been saved under. Rows record either the
+// config id or the apiId depending on the route, so match on both.
+function modelDbKeysForName(name: string): string[] {
+  const cfg = [...IMAGE_MODEL_CONFIGS, ...VIDEO_MODEL_CONFIGS].find(m => m.name === name)
+  if (!cfg) return []
+  return [...new Set([cfg.id, (cfg as { apiId?: string }).apiId].filter((x): x is string => !!x))]
+}
 const IMAGE_MODEL_GROUPS = [
   { label: "Gemini",            type: "text to image",             accent: "text-blue-400",    dot: "bg-blue-400",    items: ["NanoBanana Pro", "NanoBanana Pro 2"] },
   { label: "Kling",             type: "text to image",             accent: "text-orange-400",  dot: "bg-orange-400",  items: ["Kling V3", "Kling O3"] },
@@ -800,6 +822,13 @@ const SILVER_RIM_MODELS = new Set([
 ])
 const SILVER_RIM_CONIC =
   "conic-gradient(from 0deg, rgba(226,232,240,0.1), #f8fafc, #94a3b8, rgba(226,232,240,0.15), #cbd5e1, #64748b, rgba(226,232,240,0.1))"
+// Phase the rim sweep to the WALL CLOCK via negative animation-delay: a CSS
+// animation restarts from zero whenever its element (re)mounts — feed tiles
+// can remount for legitimate reasons (identity swaps, list churn), which made
+// the border's travelling highlight visibly reset ("flash and re-run"). Keyed
+// to real time, a remounted rim resumes at exactly the angle it should be at,
+// so restarts are invisible — and all rims sweep in sync as a bonus.
+const rimPhase = (periodMs = 5000) => `-${Date.now() % periodMs}ms`
 // Detail-modal frame: a SOLID silver ring with a single travelling break (gap)
 // orbiting it. The base must be one uniform color — any gradient in the silver
 // would visibly shimmer as the layer rotates; a flat color hides the rotation
@@ -1779,6 +1808,32 @@ function refTileThumb(url: string, w: 128 | 256 = 256): string {
   return url.startsWith("https://") ? `/_next/image?url=${encodeURIComponent(url)}&w=${w}&q=75` : url
 }
 
+// ── Reference VIDEOS in the account library ──
+// Stored as plain UserReference rows (no schema change) — the media kind is
+// derived from the URL extension the upload route preserved.
+function isVideoRefUrl(url: string): boolean {
+  return /\.(mp4|webm|mov|m4v)(\?|#|$)/i.test(url)
+}
+// Duration + dimensions of a hosted video, cached per URL (metadata-only load)
+const videoRefMetaCache = new Map<string, { duration: number; w: number; h: number }>()
+function measureVideoRef(url: string): Promise<{ duration: number; w: number; h: number }> {
+  const hit = videoRefMetaCache.get(url)
+  if (hit) return Promise.resolve(hit)
+  return new Promise((resolve, reject) => {
+    const v = document.createElement("video")
+    v.preload = "metadata"
+    v.muted = true
+    v.onloadedmetadata = () => {
+      const meta = { duration: v.duration, w: v.videoWidth, h: v.videoHeight }
+      videoRefMetaCache.set(url, meta)
+      v.src = ""
+      resolve(meta)
+    }
+    v.onerror = () => reject(new Error("Could not read video metadata"))
+    v.src = url
+  })
+}
+
 // Deterministic shortest-column packing: assign each item, in order, to the currently
 // shortest column. Because a given item's placement depends only on the items before it,
 // appending new items never moves existing ones (no reflow/jump), and the first row fills
@@ -1858,6 +1913,88 @@ function FeedToggleRow({ label, icon, on, onChange, accent = "white" }: {
   )
 }
 
+// Per-model feed filter. Lists exactly the models offered in the taskbar's
+// Image / Video dropdowns; unchecking one hides its generations from the feed.
+// State is kept as an EXCLUSION list so models added later show up by default.
+type FeedModelGroup = { label: string; accent: string; dot: string; items: readonly string[] }
+function FeedModelFilter({ label, groups, adminGroups = [], hidden, onChange }: {
+  label: string
+  groups: FeedModelGroup[]
+  // Admin-only models — rendered in their own "Admin Models" block at the
+  // bottom, and only passed in at all for admin accounts
+  adminGroups?: FeedModelGroup[]
+  hidden: string[]
+  onChange: (next: string[]) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const all = [...groups, ...adminGroups].flatMap(g => g.items as string[])
+  const shownCount = all.length - hidden.filter(h => all.includes(h)).length
+  const toggle = (name: string) =>
+    onChange(hidden.includes(name) ? hidden.filter(h => h !== name) : [...hidden, name])
+  // Keys are namespaced: the public and admin lists both contain a "Gemini"
+  // group, and a bare g.label collided (React duplicate-key error)
+  const renderGroup = (g: FeedModelGroup, ns: string) => (
+    <div key={`${ns}-${g.label}`} className="space-y-1">
+      <span className={`flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-widest ${g.accent}`}>
+        <span className={`w-1.5 h-1.5 rounded-full ${g.dot}`} />{g.label}
+      </span>
+      {(g.items as string[]).map(name => {
+        const on = !hidden.includes(name)
+        return (
+          <button key={`${ns}-${name}`} onClick={() => toggle(name)}
+            className={`w-full flex items-center gap-2 px-2 py-1 rounded-md border text-[11px] text-left transition-colors ${
+              on ? "bg-white/[0.07] border-white/20 text-white" : "border-white/[0.06] text-slate-600 hover:text-slate-400"}`}>
+            <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${
+              on ? "bg-white border-white" : "border-white/25"}`}>
+              {on && <Check size={9} className="text-black" strokeWidth={3} />}
+            </span>
+            <span className="truncate">{name}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+  return (
+    <section className="space-y-2">
+      <button onClick={() => setOpen(v => !v)} className="w-full flex items-center justify-between gap-2">
+        <span className="text-[10px] font-mono font-semibold uppercase tracking-[0.2em] text-slate-500">{label}</span>
+        <span className="flex items-center gap-1.5">
+          <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono leading-none border ${
+            shownCount === all.length ? "border-white/10 text-slate-500" : "border-white/25 text-white"}`}>
+            {shownCount === all.length ? "All" : `${shownCount}/${all.length}`}
+          </span>
+          <ChevronDown size={11} className={`text-slate-500 transition-transform ${open ? "rotate-180" : ""}`} />
+        </span>
+      </button>
+      {open && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-1.5">
+            <button onClick={() => onChange([])}
+              className="flex-1 px-2 py-1 rounded-lg border border-white/10 text-[10px] text-slate-400 hover:text-white hover:border-white/25 transition-colors">
+              Select all
+            </button>
+            <button onClick={() => onChange([...all])}
+              className="flex-1 px-2 py-1 rounded-lg border border-white/10 text-[10px] text-slate-400 hover:text-white hover:border-white/25 transition-colors">
+              Clear all
+            </button>
+          </div>
+          <div className="max-h-52 overflow-y-auto space-y-2 pr-0.5">
+            {groups.map(g => renderGroup(g, "pub"))}
+            {adminGroups.length > 0 && (
+              <div className="pt-1.5 mt-1 border-t border-white/[0.08] space-y-2">
+                <span className="flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-[0.2em] text-violet-300/80">
+                  <Lock size={8} /> Admin Models
+                </span>
+                {adminGroups.map(g => renderGroup(g, "adm"))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
 // Columns picker — one per feed (image / video) so each can be tuned separately
 function FeedColsPicker({ label, cols, onChange }: {
   label: string
@@ -1918,6 +2055,16 @@ function FeedDropdown({
   adminFilterCount = 0,
   adminFilters = null,
   onApplyAdminFilters,
+  imageModelGroups,
+  videoModelGroups,
+  adminImageModelGroups = [],
+  adminVideoModelGroups = [],
+  hiddenImageModels,
+  onHiddenImageModelsChange,
+  hiddenVideoModels,
+  onHiddenVideoModelsChange,
+  errorCount = 0,
+  onClearErrors,
 }: {
   open: boolean
   onToggle: () => void
@@ -1949,6 +2096,20 @@ function FeedDropdown({
   adminFilterCount?: number
   adminFilters?: AdminFeedFilters | null
   onApplyAdminFilters?: (filters: AdminFeedFilters | null) => void
+  // Per-model feed filter (taskbar model lists; exclusion-based).
+  // admin* lists are passed ONLY for admin accounts — regular users never see
+  // models they can't use.
+  imageModelGroups: FeedModelGroup[]
+  videoModelGroups: FeedModelGroup[]
+  adminImageModelGroups?: FeedModelGroup[]
+  adminVideoModelGroups?: FeedModelGroup[]
+  hiddenImageModels: string[]
+  onHiddenImageModelsChange: (next: string[]) => void
+  hiddenVideoModels: string[]
+  onHiddenVideoModelsChange: (next: string[]) => void
+  // "Clear Errors" — dismisses every error card across both feeds
+  errorCount?: number
+  onClearErrors?: () => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
@@ -2105,6 +2266,50 @@ function FeedDropdown({
                 <FeedColsPicker label="Video Columns" cols={videoCols} onChange={onVideoColsChange} />
                 <p className="text-[9.5px] text-slate-600 leading-relaxed"><span className="text-slate-400">Auto</span> adapts to your screen size.</p>
 
+                {/* MODELS — include/exclude per model, same list as the taskbar */}
+                <section className="border-t border-white/5 pt-3 space-y-3">
+                  <FeedModelFilter
+                    label="Image Models"
+                    groups={imageModelGroups}
+                    adminGroups={adminImageModelGroups}
+                    hidden={hiddenImageModels}
+                    onChange={onHiddenImageModelsChange}
+                  />
+                  <FeedModelFilter
+                    label="Video Models"
+                    groups={videoModelGroups}
+                    adminGroups={adminVideoModelGroups}
+                    hidden={hiddenVideoModels}
+                    onChange={onHiddenVideoModelsChange}
+                  />
+                  <p className="text-[9.5px] text-slate-600 leading-relaxed">
+                    Unchecked models are hidden from the feed.
+                  </p>
+                </section>
+
+                {/* CLEAR ERRORS — dismiss every error card in one click */}
+                {onClearErrors && (
+                  <section className="border-t border-white/5 pt-3">
+                    <button
+                      onClick={onClearErrors}
+                      disabled={errorCount === 0}
+                      className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border text-[11px] font-medium transition-all ${
+                        errorCount > 0
+                          ? "border-red-500/25 bg-red-500/10 text-red-300 hover:bg-red-500/20 hover:border-red-500/40"
+                          : "border-white/[0.06] bg-white/[0.02] text-slate-600 cursor-not-allowed"
+                      }`}>
+                      <span className="flex items-center gap-1.5"><X size={11} /> Clear Errors</span>
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold leading-none ${
+                        errorCount > 0 ? "bg-red-500/25 text-red-300" : "bg-white/10 text-slate-600"}`}>
+                        {errorCount}
+                      </span>
+                    </button>
+                    <p className="text-[9.5px] text-slate-600 leading-relaxed mt-1.5">
+                      Removes every error card from both feeds. They will not return on refresh.
+                    </p>
+                  </section>
+                )}
+
                 {/* TASKBAR SIZE */}
                 <section className="border-t border-white/5 pt-3 space-y-2">
                   <div className="flex items-center justify-between">
@@ -2140,48 +2345,25 @@ function FeedDropdown({
               {/* DISPLAY */}
               <section className="space-y-2 border-t border-white/5 pt-3 sm:border-t-0 sm:pt-0 sm:border-l sm:border-white/5 sm:pl-4">
                 <span className="text-[10px] font-mono font-semibold uppercase tracking-[0.2em] text-slate-500">Display</span>
+                {/* Layout is fixed sitewide: masonry, rows packing. The old
+                    Grid/Flow options moved out of the product — only tile
+                    quality remains user-tunable. */}
                 <FeedToggleRow label="Full Size" on={fullSize} onChange={onFullSizeChange} />
                 {fullSize && (
                   <div className="rounded-lg bg-black/20 border border-white/10 p-2.5 space-y-2">
-                    <FeedOptionRow label="Layout">
-                      <FeedSeg value={fullSizeLayout} onChange={onFullSizeLayoutChange} options={[{ value: "grid", label: "Grid" }, { value: "masonry", label: "Masonry" }]} />
-                    </FeedOptionRow>
-                    {fullSizeLayout === "masonry" && (
-                      <FeedOptionRow label="Packing">
-                        <FeedSeg value={masonryMode} onChange={onMasonryModeChange} options={[{ value: "rows", label: "Rows" }, { value: "flow", label: "Flow" }]} />
-                      </FeedOptionRow>
-                    )}
                     <FeedOptionRow label="Quality">
                       <FeedSeg value={tileRes} onChange={onTileResChange} options={[{ value: "thumb", label: "Thumbnail" }, { value: "full", label: "Full size", accent: "amber" }]} />
                     </FeedOptionRow>
                     <p className="text-[9.5px] text-slate-600 leading-relaxed pt-0.5">
                       {tileRes === "full"
                         ? <><span className="text-amber-400">Full size</span> loads originals — sharper, but long scrolls may reload the page.</>
-                        : fullSizeLayout === "masonry"
-                          ? <><span className="text-white">Rows</span> stays put as images load; <span className="text-white">Flow</span> fills each column top-to-bottom.</>
-                          : <>Whole images at their natural shape — nothing cropped. Tap any for full resolution.</>}
+                        : <>Whole images at their natural shape in a masonry flow — tap any for full resolution.</>}
                     </p>
                   </div>
                 )}
                 {/* Video-feed only: autoplay tiles while they're on screen */}
                 <FeedToggleRow label="Autoplay Videos" icon={<Video size={11} />} on={videoAutoplay} onChange={onVideoAutoplayChange} />
                 {videoAutoplay && <p className="text-[9.5px] text-slate-600 leading-relaxed px-0.5">Video feed tiles play automatically (muted) while visible. Uses more data.</p>}
-                {/* Silver animated border around every feed thumbnail */}
-                <FeedToggleRow label="Borders" icon={<Square size={11} />} on={tileBorders} onChange={onTileBordersChange} />
-                {tileBorders && (
-                  <div className="rounded-lg bg-black/20 border border-white/10 p-2.5 space-y-2">
-                    <FeedOptionRow label="Style">
-                      <FeedSeg value={borderMode} onChange={onBorderModeChange} options={[{ value: "slim", label: "Slim" }, { value: "fill", label: "Thick" }, { value: "smart", label: "Smart" }]} />
-                    </FeedOptionRow>
-                    <p className="text-[9.5px] text-slate-600 leading-relaxed">
-                      {borderMode === "smart"
-                        ? <><span className="text-white">Smart</span> fills the whole feed with flowing silver — no black space between or around generations.</>
-                        : borderMode === "fill"
-                        ? <><span className="text-white">Thick</span> frames each thumbnail with a wide animated silver border.</>
-                        : <><span className="text-white">Slim</span> hugs each thumbnail with a thin animated silver outline.</>}
-                    </p>
-                  </div>
-                )}
               </section>
             </div>
 
@@ -2203,6 +2385,24 @@ function FeedDropdown({
 
                 {adminOpen && (
                   <div className="space-y-2.5">
+                    {/* Borders — admin-controlled feed styling (moved out of the
+                        public Display section) */}
+                    <FeedToggleRow label="Borders" icon={<Square size={11} />} on={tileBorders} onChange={onTileBordersChange} />
+                    {tileBorders && (
+                      <div className="rounded-lg bg-black/20 border border-white/10 p-2.5 space-y-2">
+                        <FeedOptionRow label="Style">
+                          <FeedSeg value={borderMode} onChange={onBorderModeChange} options={[{ value: "slim", label: "Slim" }, { value: "fill", label: "Thick" }, { value: "smart", label: "Smart" }]} />
+                        </FeedOptionRow>
+                        <p className="text-[9.5px] text-slate-600 leading-relaxed">
+                          {borderMode === "smart"
+                            ? <><span className="text-white">Smart</span> fills the whole feed with flowing silver — no black space between or around generations.</>
+                            : borderMode === "fill"
+                            ? <><span className="text-white">Thick</span> frames each thumbnail with a wide animated silver border.</>
+                            : <><span className="text-white">Slim</span> hugs each thumbnail with a thin animated silver outline.</>}
+                        </p>
+                      </div>
+                    )}
+
                     {loadError && <p className="text-[10px] text-red-400">{loadError}</p>}
 
                     {authNeeded ? (
@@ -3790,6 +3990,463 @@ function AgeAttestModal({ onDone }: { onDone: () => void }) {
 }
 
 // --- REF IMAGE DROPDOWN ---
+// ── Frame Extractor ──
+// Upload a video (≤2 min), automatically pull frames from it, and rank them by
+// sharpness. Everything runs CLIENT-SIDE: the video never uploads — frames are
+// decoded via seek-stepping into a canvas, and each is scored with the
+// variance-of-Laplacian sharpness measure (edge energy: crisp frames score
+// high, motion-blurred ones low). Selected frames can join the refs library.
+interface ExtractedFrame {
+  t: number
+  url: string      // object URL of the JPEG blob
+  blob: Blob
+  score: number    // raw Laplacian variance
+  norm: number     // 0-100 normalized within this extraction
+}
+
+function laplacianVariance(data: Uint8ClampedArray, w: number, h: number): number {
+  const gray = new Float32Array(w * h)
+  for (let i = 0; i < w * h; i++) {
+    gray[i] = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2]
+  }
+  let sum = 0, sumSq = 0, n = 0
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x
+      const lap = gray[i - w] + gray[i + w] + gray[i - 1] + gray[i + 1] - 4 * gray[i]
+      sum += lap; sumSq += lap * lap; n++
+    }
+  }
+  const mean = sum / n
+  return sumSq / n - mean * mean
+}
+
+function FrameExtractorModal({ onClose, onAddRefs }: {
+  onClose: () => void
+  onAddRefs: (files: File[]) => Promise<{ added: number; failed: number; limitHit: boolean }>
+}) {
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const cancelRef = useRef(false)
+  const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const [videoName, setVideoName] = useState("")
+  const [duration, setDuration] = useState(0)
+  const [interval_, setInterval_] = useState(0.5) // seconds between samples
+  const [extracting, setExtracting] = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [frames, setFrames] = useState<ExtractedFrame[]>([])
+  const [sortBy, setSortBy] = useState<"quality" | "time">("quality")
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [error, setError] = useState<string | null>(null)
+  const [addState, setAddState] = useState<"idle" | "adding" | "done" | "limit">("idle")
+
+  const MAX_DURATION = 120  // seconds
+  const MAX_FRAMES = 300    // hard cap — interval auto-widens beyond it
+
+  const reset = useCallback(() => {
+    cancelRef.current = true
+    setFrames(f => { f.forEach(fr => URL.revokeObjectURL(fr.url)); return [] })
+    setSelected(new Set())
+    setVideoUrl(v => { if (v) URL.revokeObjectURL(v); return null })
+    setDuration(0); setProgress(0); setExtracting(false); setError(null); setAddState("idle")
+  }, [])
+  useEffect(() => () => { reset() }, [reset])
+
+  const handleFile = (file: File) => {
+    reset()
+    cancelRef.current = false
+    if (!file.type.startsWith("video/")) { setError("That's not a video file."); return }
+    if (file.size > 200 * 1024 * 1024) { setError("Video too large (max 200MB)."); return }
+    const url = URL.createObjectURL(file)
+    const probe = document.createElement("video")
+    probe.preload = "metadata"
+    probe.muted = true
+    probe.onloadedmetadata = () => {
+      if (probe.duration > MAX_DURATION) {
+        setError(`Video is ${Math.round(probe.duration)}s — the extractor takes up to ${MAX_DURATION}s (2 minutes). Trim it down first.`)
+        URL.revokeObjectURL(url)
+        return
+      }
+      setVideoName(file.name)
+      setDuration(probe.duration)
+      setVideoUrl(url)
+    }
+    probe.onerror = () => { setError("Couldn't read that video — convert it to MP4 (H.264) and retry."); URL.revokeObjectURL(url) }
+    probe.src = url
+  }
+
+  const extract = async () => {
+    if (!videoUrl || extracting) return
+    cancelRef.current = false
+    setExtracting(true)
+    setFrames(f => { f.forEach(fr => URL.revokeObjectURL(fr.url)); return [] })
+    setSelected(new Set())
+    setProgress(0)
+    setError(null)
+    try {
+      const v = document.createElement("video")
+      v.muted = true
+      v.playsInline = true
+      v.src = videoUrl
+      await new Promise<void>((res, rej) => { v.onloadedmetadata = () => res(); v.onerror = () => rej(new Error("decode failed")) })
+      // Frame-count cap: widen the interval instead of truncating the tail
+      const step = Math.max(interval_, v.duration / MAX_FRAMES)
+      const full = document.createElement("canvas")
+      full.width = v.videoWidth; full.height = v.videoHeight
+      const fctx = full.getContext("2d")!
+      // Sharpness runs on a 320px-wide grayscale downscale — plenty for the
+      // Laplacian, ~100x cheaper than scoring full res
+      const sw = 320, sh = Math.max(2, Math.round(320 * v.videoHeight / v.videoWidth))
+      const small = document.createElement("canvas")
+      small.width = sw; small.height = sh
+      const sctx = small.getContext("2d", { willReadFrequently: true })!
+
+      const out: ExtractedFrame[] = []
+      const seekTo = (t: number) => new Promise<void>(res => {
+        const on = () => { v.removeEventListener("seeked", on); res() }
+        v.addEventListener("seeked", on)
+        v.currentTime = Math.min(t, Math.max(0, v.duration - 0.05))
+      })
+      for (let t = 0; t < v.duration; t += step) {
+        if (cancelRef.current) break
+        await seekTo(t)
+        fctx.drawImage(v, 0, 0)
+        sctx.drawImage(v, 0, 0, sw, sh)
+        const score = laplacianVariance(sctx.getImageData(0, 0, sw, sh).data, sw, sh)
+        const blob = await new Promise<Blob | null>(res => full.toBlob(res, "image/jpeg", 0.92))
+        if (blob) out.push({ t, url: URL.createObjectURL(blob), blob, score, norm: 0 })
+        setProgress(Math.min(1, (t + step) / v.duration))
+      }
+      const max = Math.max(1, ...out.map(f => f.score))
+      out.forEach(f => { f.norm = Math.round((f.score / max) * 100) })
+      setFrames(out)
+    } catch {
+      setError("Frame extraction failed — the video format may not decode in this browser. MP4 (H.264) is safest.")
+    } finally {
+      setExtracting(false)
+    }
+  }
+
+  const shown = sortBy === "quality" ? [...frames].sort((a, b) => b.score - a.score) : frames
+  const toggleSel = (url: string) => setSelected(prev => {
+    const next = new Set(prev)
+    if (next.has(url)) next.delete(url); else next.add(url)
+    return next
+  })
+
+  const addSelectedToRefs = async () => {
+    if (selected.size === 0 || addState === "adding") return
+    setAddState("adding")
+    const files = frames.filter(f => selected.has(f.url))
+      .map(f => new File([f.blob], `frame-${f.t.toFixed(2)}s.jpg`, { type: "image/jpeg" }))
+    const res = await onAddRefs(files)
+    setAddState(res.limitHit ? "limit" : "done")
+    setTimeout(() => setAddState("idle"), 3000)
+  }
+
+  const scoreColor = (n: number) => n >= 75 ? "text-emerald-300 bg-emerald-500/20" : n >= 45 ? "text-amber-300 bg-amber-500/20" : "text-red-300 bg-red-500/20"
+
+  return (
+    <div className="fixed inset-0 z-[240] bg-black/85 backdrop-blur-sm flex items-center justify-center p-3" onClick={extracting ? undefined : onClose}>
+      <div className="w-full max-w-4xl max-h-[92vh] rounded-2xl border border-white/10 bg-[#070b14]/98 flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="shrink-0 px-4 py-3 border-b border-white/[0.06] flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <Film size={16} className="text-slate-300 shrink-0" />
+            <div className="min-w-0">
+              <p className="text-sm font-bold text-white leading-none">Frame Extractor</p>
+              <p className="text-[10px] text-slate-500 mt-1 leading-none truncate">
+                {videoUrl ? `${videoName} · ${duration.toFixed(1)}s` : "Pull the sharpest frames out of a video — nothing uploads until you save"}
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-white/[0.06] transition-colors shrink-0"><X size={15} /></button>
+        </div>
+
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+          {/* Source picker */}
+          <input ref={fileInputRef} type="file" accept="video/*" className="hidden"
+            onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = "" }} />
+          {!videoUrl ? (
+            <button onClick={() => fileInputRef.current?.click()}
+              className="w-full py-14 rounded-xl border-2 border-dashed border-white/10 hover:border-white/25 bg-white/[0.02] hover:bg-white/[0.04] transition-all flex flex-col items-center gap-2 text-slate-500 hover:text-slate-300">
+              <Film size={26} />
+              <span className="text-sm font-medium">Choose a video</span>
+              <span className="text-[11px] text-slate-600">Up to 2 minutes · stays on this device</span>
+            </button>
+          ) : (
+            <div className="flex items-center gap-3 flex-wrap">
+              <video src={videoUrl} muted playsInline preload="metadata" className="h-20 rounded-lg bg-black" />
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500">Frame every</span>
+                {[0.25, 0.5, 1, 2].map(s => (
+                  <button key={s} onClick={() => setInterval_(s)} disabled={extracting}
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-mono transition-colors ${
+                      interval_ === s ? "bg-white/15 border-white/30 text-white" : "border-white/10 text-slate-500 hover:text-white"}`}>
+                    {s}s
+                  </button>
+                ))}
+                <button onClick={extract} disabled={extracting}
+                  className="px-4 py-1.5 rounded-lg bg-white/10 border border-white/25 text-[12px] font-bold text-white hover:bg-white/15 transition-all disabled:opacity-50 flex items-center gap-1.5">
+                  {extracting ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
+                  {extracting ? `Extracting… ${Math.round(progress * 100)}%` : frames.length > 0 ? "Re-extract" : "Extract Frames"}
+                </button>
+                <button onClick={() => { reset(); }} disabled={extracting}
+                  className="px-2.5 py-1.5 rounded-lg border border-white/10 text-[11px] text-slate-500 hover:text-white transition-colors disabled:opacity-40">
+                  Change video
+                </button>
+              </div>
+            </div>
+          )}
+
+          {error && <p className="text-[12px] text-red-400 bg-red-500/10 border border-red-500/25 rounded-lg px-3 py-2">{error}</p>}
+          {extracting && (
+            <div className="h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
+              <div className="h-full bg-gradient-to-r from-slate-400 to-white rounded-full transition-[width] duration-200" style={{ width: `${progress * 100}%` }} />
+            </div>
+          )}
+
+          {/* Results */}
+          {frames.length > 0 && (
+            <>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500">{frames.length} frames · sort</span>
+                  {(["quality", "time"] as const).map(s => (
+                    <button key={s} onClick={() => setSortBy(s)}
+                      className={`px-2.5 py-1 rounded-lg border text-[11px] transition-colors ${
+                        sortBy === s ? "bg-white/15 border-white/30 text-white" : "border-white/10 text-slate-500 hover:text-white"}`}>
+                      {s === "quality" ? "Sharpest first" : "Timeline"}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => setSelected(new Set(shown.slice(0, 10).map(f => f.url)))}
+                    className="px-2.5 py-1 rounded-lg border border-white/10 text-[11px] text-slate-400 hover:text-white transition-colors">
+                    Select top 10
+                  </button>
+                  <button onClick={() => setSelected(new Set())} disabled={selected.size === 0}
+                    className="px-2.5 py-1 rounded-lg border border-white/10 text-[11px] text-slate-400 hover:text-white transition-colors disabled:opacity-40">
+                    Clear
+                  </button>
+                  <button onClick={addSelectedToRefs} disabled={selected.size === 0 || addState === "adding"}
+                    className={`px-3.5 py-1.5 rounded-lg border text-[11px] font-bold transition-all flex items-center gap-1.5 ${
+                      addState === "done" ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                      : addState === "limit" ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+                      : "bg-white/10 border-white/25 text-white hover:bg-white/15 disabled:opacity-40"}`}>
+                    {addState === "adding" && <Loader2 size={11} className="animate-spin" />}
+                    {addState === "done" ? "Added!" : addState === "limit" ? "Library full" : `Add ${selected.size || ""} to Refs`}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2">
+                {shown.map(f => {
+                  const isSel = selected.has(f.url)
+                  return (
+                    <div key={f.url} className="relative group">
+                      <button onClick={() => toggleSel(f.url)}
+                        className={`w-full rounded-lg overflow-hidden border-2 transition-all ${
+                          isSel ? "border-white ring-1 ring-white/40" : "border-transparent hover:border-white/30"}`}>
+                        <img src={f.url} alt="" className="w-full aspect-video object-cover" loading="lazy" decoding="async" />
+                      </button>
+                      {/* Sharpness + timestamp badges */}
+                      <span className={`absolute top-1 left-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold leading-none pointer-events-none ${scoreColor(f.norm)}`}>
+                        {f.norm}
+                      </span>
+                      <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-black/70 text-white text-[9px] font-mono leading-none pointer-events-none">
+                        {f.t.toFixed(1)}s
+                      </span>
+                      {isSel && (
+                        <span className="absolute top-1 right-1 w-4 h-4 rounded-full bg-white flex items-center justify-center pointer-events-none">
+                          <Check size={9} className="text-black" />
+                        </span>
+                      )}
+                      {/* Download single frame */}
+                      <a href={f.url} download={`frame-${f.t.toFixed(2)}s.jpg`}
+                        className="absolute bottom-1 right-1 p-1 rounded bg-black/70 text-slate-300 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity">
+                        <Download size={10} />
+                      </a>
+                    </div>
+                  )
+                })}
+              </div>
+              <p className="text-[10px] text-slate-600 leading-relaxed">
+                The badge is a relative sharpness score (variance-of-Laplacian) — <span className="text-emerald-300">green</span> frames are the crispest in this video,
+                <span className="text-red-300"> red</span> ones carry motion blur. Selected frames upload to your refs library as JPEGs.
+              </p>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Trim popup for a reference video that exceeds the selected model's input
+// window (e.g. SeeDance 2.0 takes 2-15s, Kling Motion Control 30s). Pick a
+// start point and a length inside the allowed range; the server cuts the clip
+// (stream copy — no re-encode) and hands back a new R2 URL.
+function VideoTrimModal({ url, minSec, maxSec, modelName, onCancel, onDone }: {
+  url: string
+  minSec: number
+  maxSec: number
+  modelName: string
+  onCancel: () => void
+  onDone: (url: string, duration: number) => void
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const [duration, setDuration] = useState<number | null>(null)
+  const [start, setStart] = useState(0)
+  const [len, setLen] = useState(maxSec)
+  const [trimming, setTrimming] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // Loop playback inside the selected window so the preview shows exactly
+  // what the model will receive
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    const onTime = () => {
+      if (v.currentTime > start + len || v.currentTime < start - 0.3) v.currentTime = start
+    }
+    v.addEventListener("timeupdate", onTime)
+    return () => v.removeEventListener("timeupdate", onTime)
+  }, [start, len])
+  useEffect(() => {
+    const v = videoRef.current
+    if (v && duration !== null) { v.currentTime = start; v.play().catch(() => {}) }
+  }, [start, len, duration])
+
+  const maxStart = duration !== null ? Math.max(0, duration - minSec) : 0
+  const effLen = duration !== null ? Math.min(len, duration - start) : len
+
+  const confirm = async () => {
+    setTrimming(true)
+    setError(null)
+    try {
+      const res = await fetch("/api/user/references/trim-video", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, startSec: start, endSec: start + effLen, maxSec }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !data.url) throw new Error(data.error || `Trim failed (${res.status})`)
+      onDone(data.url as string, Number(data.duration) || effLen)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Trim failed")
+      setTrimming(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[300] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4" onClick={trimming ? undefined : onCancel}>
+      <div className="w-full max-w-lg rounded-2xl border border-white/10 bg-[#0a101d] p-4 space-y-3" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <p className="text-sm font-bold text-white">Trim for {modelName}</p>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              This model accepts {minSec}–{maxSec}s clips{duration !== null ? ` — this video is ${duration.toFixed(1)}s` : ""}.
+            </p>
+          </div>
+          {!trimming && (
+            <button onClick={onCancel} className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-white/[0.06] transition-colors"><X size={14} /></button>
+          )}
+        </div>
+
+        <div className="rounded-xl overflow-hidden bg-black">
+          <video ref={videoRef} src={url} muted playsInline autoPlay
+            onLoadedMetadata={(e) => {
+              const d = e.currentTarget.duration
+              setDuration(d)
+              setLen(Math.min(maxSec, Math.max(minSec, Math.min(maxSec, d))))
+            }}
+            className="w-full max-h-[40vh] object-contain" />
+        </div>
+
+        {duration !== null && (
+          <>
+            {/* Window visual on the full timeline */}
+            <div className="relative h-2 rounded-full bg-white/[0.08] overflow-hidden">
+              <div className="absolute inset-y-0 bg-white/70 rounded-full"
+                style={{ left: `${(start / duration) * 100}%`, width: `${(effLen / duration) * 100}%` }} />
+            </div>
+            <div className="space-y-2.5">
+              <label className="block">
+                <span className="flex items-center justify-between text-[10px] font-mono text-slate-500 uppercase tracking-wider">
+                  <span>Start</span><span className="text-slate-300">{start.toFixed(1)}s</span>
+                </span>
+                <input type="range" min={0} max={maxStart} step={0.1} value={Math.min(start, maxStart)}
+                  onChange={e => {
+                    const s = +e.target.value
+                    setStart(s)
+                    setLen(l => Math.min(l, Math.max(minSec, duration - s)))
+                  }}
+                  className="w-full cursor-pointer accent-white" />
+              </label>
+              <label className="block">
+                <span className="flex items-center justify-between text-[10px] font-mono text-slate-500 uppercase tracking-wider">
+                  <span>Length</span><span className="text-slate-300">{effLen.toFixed(1)}s</span>
+                </span>
+                <input type="range" min={minSec} max={Math.min(maxSec, Math.max(minSec, duration - start))} step={0.1} value={effLen}
+                  onChange={e => setLen(+e.target.value)}
+                  className="w-full cursor-pointer accent-white" />
+              </label>
+            </div>
+          </>
+        )}
+
+        {error && <p className="text-[11px] text-red-400">{error}</p>}
+
+        <div className="flex gap-2 pt-1">
+          <button onClick={onCancel} disabled={trimming}
+            className="flex-1 py-2 rounded-lg border border-white/10 text-[12px] text-slate-400 hover:text-white transition-colors disabled:opacity-40">
+            Cancel
+          </button>
+          <button onClick={confirm} disabled={trimming || duration === null}
+            className="flex-1 py-2 rounded-lg bg-white/10 border border-white/25 text-[12px] font-bold text-white hover:bg-white/15 transition-all disabled:opacity-40 flex items-center justify-center gap-2">
+            {trimming && <Loader2 size={12} className="animate-spin" />}
+            {trimming ? "Trimming…" : `Use ${effLen.toFixed(1)}s clip`}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Library tile for a reference VIDEO: first frame as the thumb, a play glyph,
+// and the measured duration badged in the corner (metadata-only load).
+function RefVideoTile({ url, dim = false }: { url: string; dim?: boolean }) {
+  const [dur, setDur] = useState<number | null>(() => videoRefMetaCache.get(url)?.duration ?? null)
+  return (
+    <div className="relative w-full h-full">
+      <video
+        src={`${url}${url.includes("#") ? "" : "#t=0.001"}`}
+        muted
+        playsInline
+        preload="metadata"
+        onLoadedMetadata={(e) => {
+          const v = e.currentTarget
+          if (v.duration > 0) {
+            videoRefMetaCache.set(url, { duration: v.duration, w: v.videoWidth, h: v.videoHeight })
+            setDur(v.duration)
+          }
+        }}
+        className={`w-full h-full object-cover transition-opacity ${dim ? "opacity-60" : ""}`}
+      />
+      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+        <span className="w-5 h-5 rounded-full bg-black/60 flex items-center justify-center">
+          <Play size={9} className="text-white ml-px" />
+        </span>
+      </div>
+      {dur !== null && (
+        <span className="absolute bottom-0 right-0 px-1 text-[8px] font-mono bg-black/70 text-white rounded-tl pointer-events-none">
+          {dur.toFixed(1)}s
+        </span>
+      )}
+    </div>
+  )
+}
+
 function RefDropdown({
   open,
   onToggle,
@@ -4140,7 +4797,9 @@ function RefDropdown({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*"
+                // Reference VIDEOS ride the same library — SeeDance 2.0 and
+                // Kling Motion Control accept them as inputs
+                accept="image/*,video/mp4,video/webm,video/quicktime,video/x-m4v"
                 multiple
                 className="hidden"
                 onChange={handleFileChange}
@@ -4345,7 +5004,8 @@ function RefDropdown({
                     // (the active checkmark rendered half a tile away at 1.5x).
                     <div key={img.id} className="relative group aspect-square grid [grid-template-columns:100%] [grid-template-rows:100%]">
                       <button
-                        onClick={() => editMode ? setEditingImage(img) : selectMode ? toggleSelectForDelete(img.id) : handleToggle(img)}
+                        // Video refs have no pixel editor — edit-mode clicks fall through to toggle
+                        onClick={() => (editMode && !isVideoRefUrl(img.url)) ? setEditingImage(img) : selectMode ? toggleSelectForDelete(img.id) : handleToggle(img)}
                         disabled={!selectMode && !editMode && (isDisabled || disabled)}
                         title={
                           editMode ? "Click to edit"
@@ -4373,9 +5033,13 @@ function RefDropdown({
                       >
                         {/* Eager small thumbs: loading="lazy" never fires in this nested
                             scroller on iPad Safari, and the optimizer keeps them tiny */}
-                        <img src={refTileThumb(img.url)} alt="" decoding="async" className={`w-full h-full object-cover transition-opacity ${isSelectedForDelete ? "opacity-60" : ""}`} />
+                        {isVideoRefUrl(img.url) ? (
+                          <RefVideoTile url={img.url} dim={isSelectedForDelete} />
+                        ) : (
+                          <img src={refTileThumb(img.url)} alt="" decoding="async" className={`w-full h-full object-cover transition-opacity ${isSelectedForDelete ? "opacity-60" : ""}`} />
+                        )}
                         {/* Edit hint overlay (edit mode) */}
-                        {editMode && (
+                        {editMode && !isVideoRefUrl(img.url) && (
                           <div className="absolute inset-0 rounded-md bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
                             <Pencil size={12} className="text-white" />
                           </div>
@@ -4939,8 +5603,230 @@ function QueueDisplay({ active, max, label = "queue" }: { active: number; max: n
 }
 
 // --- GRID IMAGE CELL ---
-function GridImage({ src, alt, onClick, imageId, directUrl, thumbUrl, aspectRatio, fullRes = false, selectMode, selected, onSelect, fullWidth = false, isVideo = false, adminThumb = false, silverRim = false, letterbox = false }: {
+// Sources this session has fully loaded at least once — lets a remounted tile
+// (moved to another column by a new generation) render instantly with no
+// skeleton/fade, since the browser already holds the bytes
+const seenTileSrcs = new Set<string>()
+
+// ONE flat masonry for the whole rows-mode feed — head strip AND body.
+// Solves all three constraints at once:
+//  • No remounts: every tile is a direct child of a single container with a
+//    stable key, so queueing a generation inserts a sibling — existing tiles
+//    keep their DOM nodes (no image refetch, no flicker) and SLIDE to their
+//    new spot via a CSS transition.
+//  • True masonry: head tiles stack in queue order (col = i % n), body tiles
+//    continue each column from wherever the head left it — landscape tiles
+//    interlock with what's below them, no seam between head and body.
+//  • Exact fits: tile heights are MEASURED (ResizeObserver per tile), not
+//    estimated from aspect ratios, so error cards, unknown-AR images and
+//    late-loading media all pack tightly with uniform gutters.
+function FeedMasonry({ head, body, n, gap = 8 }: {
+  head: { key: string; weight: number; node: ReactNode }[]
+  body: { key?: string; weight: number; node: ReactNode }[]
+  n: number
+  gap?: number
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [width, setWidth] = useState(0)
+  const heightsRef = useRef(new Map<string, number>())
+  const [, force] = useReducer((x: number) => x + 1, 0)
+  const rafRef = useRef(0)
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(entries => setWidth(entries[0].contentRect.width))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // One observer for every tile: the measured box gives BOTH the true height
+  // (beats the AR estimate — relayout when an image pops in or a card grows)
+  // and the true width:height ratio, which drives column SPANNING below.
+  // rAF-coalesced so bursts of measurements cost one re-render.
+  const ratiosRef = useRef(new Map<string, number>())
+  const tileRO = useRef<ResizeObserver | null>(null)
+  if (tileRO.current === null && typeof ResizeObserver !== "undefined") {
+    tileRO.current = new ResizeObserver(entries => {
+      let changed = false
+      for (const e of entries) {
+        const k = (e.target as HTMLElement).dataset.mkey
+        if (!k) continue
+        const arEl = (e.target as HTMLElement).querySelector?.("[data-ar-ready]") as HTMLElement | null
+        // IMAGE tiles: the ratio comes ONLY from the decoded file's natural
+        // dimensions (data-nat-ar) — box shapes lied for un-decoded
+        // placeholders and height-capped spans, which is how portrait autos
+        // got spanned as landscape. natAr is box-independent, so it's safe to
+        // learn even while spanned: a mis-spanned tile self-corrects.
+        const natAr = arEl?.dataset.natAr ? parseFloat(arEl.dataset.natAr) : null
+        if (natAr && isFinite(natAr) && natAr > 0.05 && natAr < 20) {
+          const pr = ratiosRef.current.get(k)
+          if (pr === undefined || Math.abs(pr - natAr) > 0.02) { ratiosRef.current.set(k, natAr); changed = true }
+        }
+        // Learn heights only from REAL boxes:
+        //  • media tile without decoded dimensions yet → its box is a
+        //    placeholder or a 0-height undecoded <img> (the overlap bug:
+        //    cached images report "loaded" before decode, measure ~0 tall,
+        //    and the next tile got placed on top of them)
+        //  • degenerate (<24px) boxes → never meaningful
+        if (arEl && (arEl.dataset.arReady === "0" || !arEl.dataset.natAr)) continue
+        const h = e.contentRect.height
+        const w = e.contentRect.width
+        if (h < 24) continue
+        // Height is trusted from here — it includes chrome (border rim padding)
+        const prev = heightsRef.current.get(k)
+        if (prev === undefined || Math.abs(prev - h) > 1) { heightsRef.current.set(k, h); changed = true }
+        // Box-shape inference remains ONLY for tiles without media (error
+        // cards, spinners) — image tiles never learn shape from their box
+        if (!arEl && w > 0 && h > 0 && !spannedKeysRef.current.has(k)) {
+          const r = w / h
+          const pr = ratiosRef.current.get(k)
+          if (pr === undefined || Math.abs(pr - r) > 0.02) { ratiosRef.current.set(k, r); changed = true }
+        }
+      }
+      if (changed) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = requestAnimationFrame(() => force())
+      }
+    })
+  }
+  // Spanned tiles have a FIXED box (height-capped), so their measured ratio is
+  // the box's, not the image's — never let it overwrite the learned ratio
+  const spannedKeysRef = useRef(new Set<string>())
+  // Width each tile was last PLACED at — a stored height is only valid for
+  // the width it was measured at (see place())
+  const lastPlacedWRef = useRef(new Map<string, number>())
+  useEffect(() => () => { tileRO.current?.disconnect(); cancelAnimationFrame(rafRef.current) }, [])
+  const register = (key: string) => (el: HTMLDivElement | null) => {
+    if (el) { el.dataset.mkey = key; tileRO.current?.observe(el) }
+  }
+  // DIRECT dimension reports from the tiles themselves (img onLoad /
+  // complete-ref) — the authoritative ratio channel. The ResizeObserver path
+  // raced with image decode on live-session tiles: tall portraits kept their
+  // placeholder-derived placement and got overlapped until a refresh.
+  const reportNat = useCallback((key: string, r: number) => {
+    if (!(r > 0.05 && r < 20) || !isFinite(r)) return
+    const pr = ratiosRef.current.get(key)
+    if (pr === undefined || Math.abs(pr - r) > 0.02) {
+      ratiosRef.current.set(key, r)
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = requestAnimationFrame(() => force())
+    }
+  }, [])
+
+  const colW = width > 0 ? (width - gap * (n - 1)) / n : 0
+  const colHeights = new Array(n).fill(0)
+  const placed: { key: string; node: ReactNode; left: number; top: number; w: number; span: number; ratio: number }[] = []
+  // Wide tiles span columns so landscape generations display at real size
+  // instead of being shrunk into one narrow cell: ≥16:9-ish gets 2 columns,
+  // ≥21:9-ish gets 3 (capped by the column count). Ratio comes from the known
+  // aspect ratio when recorded, or the MEASURED tile box for "auto" sizes —
+  // an auto landscape starts at 1 column and grows once its image loads.
+  const spanFor = (ratio: number) => Math.min(n, ratio >= 2.2 ? 3 : ratio >= 1.6 ? 2 : 1)
+  // Skyline placement, one item at a time in list order: pick the column
+  // window (span wide) whose max height is lowest, leftmost on ties. With
+  // equal heights this reproduces round-robin (newest → top-left, rightward),
+  // and body items naturally continue the head's column stacks — no seam.
+  // Holes left under a spanning tile (it sits at the max of its covered
+  // columns; shorter columns get a void above it). Later single-column tiles
+  // BACKFILL these voids instead of extending the skyline, so spans can't
+  // leave permanent empty pockets in the feed.
+  const gaps: { c: number; top: number; h: number }[] = []
+  const place = (key: string, weight: number, node: ReactNode) => {
+    const ratio = ratiosRef.current.get(key) ?? 1 / (weight || 1)
+    // Only IMAGE tiles span — a spanned tile is height-capped and cropped,
+    // which would clip the buttons off error cards and spinner labels
+    const isImage = isValidElement(node) && node.type === GridImage
+    const span = isImage ? spanFor(ratio) : 1
+    const w = span * colW + (span - 1) * gap
+    // A measured height belongs to the WIDTH it was measured at. When a
+    // tile's width changes (span flip, column resize) the stored height is
+    // garbage — a tile un-spanning from its capped landscape box kept a
+    // too-short height and the next card was placed on top of it.
+    const lw = lastPlacedWRef.current.get(key)
+    if (lw !== undefined && Math.abs(lw - w) > 2) heightsRef.current.delete(key)
+    lastPlacedWRef.current.set(key, w)
+    // NEVER place shorter than the known image ratio guarantees: the box is
+    // at least (w / ratio) tall once decoded (chrome like the border rim only
+    // ADDS height), so max(measured, estimate) makes stale-short measurements
+    // — the residual overlap cases — mathematically impossible.
+    const h = span > 1 ? Math.max(heightsRef.current.get(key) ?? 0, colW)
+      : Math.max(heightsRef.current.get(key) ?? 0, w / ratio)
+    // Single tiles: fill the topmost hole they fit into first
+    if (span === 1 && gaps.length > 0) {
+      let gi = -1
+      for (let i = 0; i < gaps.length; i++) {
+        if (gaps[i].h >= h + gap && (gi === -1 || gaps[i].top < gaps[gi].top)) gi = i
+      }
+      if (gi !== -1) {
+        const g = gaps[gi]
+        placed.push({ key, node, left: Math.round(g.c * (colW + gap)), top: g.top, w: Math.round(w), span, ratio })
+        g.top += h + gap
+        g.h -= h + gap
+        if (g.h < 40) gaps.splice(gi, 1)
+        return
+      }
+    }
+    let best = 0, bestTop = Infinity
+    for (let c = 0; c + span <= n; c++) {
+      let top = 0
+      for (let j = c; j < c + span; j++) top = Math.max(top, colHeights[j])
+      if (top < bestTop - 0.5) { bestTop = top; best = c }
+    }
+    placed.push({ key, node, left: Math.round(best * (colW + gap)), top: bestTop, w: Math.round(w), span, ratio })
+    if (span > 1) {
+      // Record the voids this span creates over its shorter columns
+      for (let j = best; j < best + span; j++) {
+        const void_ = bestTop - colHeights[j] - gap
+        if (void_ >= 40) gaps.push({ c: j, top: colHeights[j], h: void_ })
+      }
+    }
+    for (let j = best; j < best + span; j++) colHeights[j] = bestTop + h + gap
+  }
+  head.forEach(it => place(it.key, it.weight, it.node))
+  body.forEach((it, i) => place(it.key ?? `b-${i}`, it.weight, it.node))
+  spannedKeysRef.current = new Set(placed.filter(p => p.span > 1).map(p => p.key))
+  const totalH = colHeights.some(h => h > 0) ? Math.max(...colHeights) - gap : 0
+
+  return (
+    <div ref={containerRef} className="relative" style={{ height: width > 0 && totalH > 0 ? totalH : undefined }}>
+      {width > 0 && placed.map(p => (
+        <div key={p.key} ref={register(p.key)}
+          // Position via TRANSFORM, not top/left: layout-property transitions
+          // repaint every moving tile on the main thread, which starved the
+          // border rims' own CSS animation of frames (the sweep stuttered and
+          // read as "flashing"). Transforms animate on the compositor, so
+          // tiles slide without touching the rims' animation.
+          className="absolute left-0 top-0 transition-transform duration-300 ease-out"
+          style={{ transform: `translate(${p.left}px, ${p.top}px)`, width: p.w }}>
+          {isValidElement(p.node) && p.node.type === GridImage
+            // Every image tile gets the direct size-report channel; spanned
+            // tiles additionally get the height cap + hi-res source. (Capping
+            // the MEDIA box inside the tile keeps the border rim intact.)
+            ? cloneElement(p.node as ReactElement<Record<string, unknown>>, {
+                onNaturalSize: (r: number) => reportNat(p.key, r),
+                ...(p.span > 1 ? { spanBoost: true, capHeightPx: Math.round(colW) } : {}),
+              })
+            : p.node}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function GridImage({ src, alt, onClick, imageId, directUrl, thumbUrl, aspectRatio, fullRes = false, selectMode, selected, onSelect, fullWidth = false, isVideo = false, adminThumb = false, silverRim = false, letterbox = false, spanBoost = false, capHeightPx, onNaturalSize }: {
   src: string; alt: string; onClick?: () => void; imageId?: number; directUrl?: string
+  // Injected by FeedMasonry on multi-column tiles: load a higher-res rendition
+  spanBoost?: boolean
+  // Injected by FeedMasonry on multi-column tiles: fix the MEDIA box to this
+  // height with a centered object-cover crop. Capping inside the tile (rather
+  // than cropping the whole card from outside) keeps the border rim intact —
+  // an outer overflow crop was slicing the rim's bottom edge off.
+  capHeightPx?: number
+  // Injected by FeedMasonry: DIRECT report of the decoded file's width:height.
+  // The layout must not depend on observing DOM boxes for this — box sniffing
+  // raced with decode and left tall tiles placed at placeholder height.
+  onNaturalSize?: (ratio: number) => void
   // silverRim: Feed "Borders" setting — "slim" hugs the tile, "fill" is a thick
   // frame; "smart" backgrounds the whole feed instead (no per-tile wrapper here)
   silverRim?: false | "slim" | "fill" | "smart"
@@ -4967,7 +5853,6 @@ function GridImage({ src, alt, onClick, imageId, directUrl, thumbUrl, aspectRati
   // images, so cross-user thumbnails 404 — use the admin dataset thumb route instead
   adminThumb?: boolean
 }) {
-  const [loaded, setLoaded] = useState(false)
   // directUrl: skip the proxy and load directly (used for just-completed images where the
   // blob URL is already known — avoids the DB-auth → blob-fetch → sharp chain adding delay)
   const thumbSrc = thumbUrl
@@ -4976,6 +5861,21 @@ function GridImage({ src, alt, onClick, imageId, directUrl, thumbUrl, aspectRati
     ? `/api/admin/dataset/thumb/${imageId}`
     : directUrl || (imageId ? `/api/images/${imageId}?thumb=1` : src)
   const fullSrc = directUrl || src
+  // Remount ≠ reload: when a queued generation pushes tiles into a different
+  // column, React remounts them — but the browser still has their images
+  // cached. Skipping the skeleton + fade for already-seen sources makes those
+  // moves visually silent instead of "the whole row flickering".
+  // spanBoost (multi-column masonry tiles): the feed thumbnail is too small to
+  // stretch across 2-3 columns, so load a 1080px optimized rendition instead —
+  // crisp at span width without decoding full 4K originals.
+  const midSrc = spanBoost && fullSrc.startsWith("https://")
+    ? `/_next/image?url=${encodeURIComponent(fullSrc)}&w=1080&q=75`
+    : fullSrc
+  const renderedSrc = fullWidth && fullRes ? fullSrc : spanBoost ? midSrc : thumbSrc
+  const [loaded, setLoaded] = useState(() => seenTileSrcs.has(renderedSrc) || (spanBoost ? seenTileSrcs.has(thumbSrc) : false))
+  // Locked at mount: recomputing per render would rewrite animation-delay on
+  // the running rim sweep and jump its phase
+  const [rimDelay] = useState(() => rimPhase())
   // Full Size mode: reserve the tile's height from the known ratio ("2:3" → "2/3",
   // "1024x1536" → "1024/1536") so images don't shove the layout when they pop in.
   // Null → natural height.
@@ -4988,8 +5888,13 @@ function GridImage({ src, alt, onClick, imageId, directUrl, thumbUrl, aspectRati
   }
   const tile = (
     <div
-      className={`${fullWidth && !letterbox ? "" : "aspect-square"} ${letterbox ? "bg-black" : "bg-slate-800"} overflow-hidden relative ${fullWidth && !letterbox && !loaded && !arCss ? "min-h-40" : ""} ${onClick || selectMode ? "cursor-pointer group" : ""} ${selected ? "ring-2 ring-cyan-400 ring-inset" : ""}`}
-      style={arCss ? { aspectRatio: arCss } : undefined}
+      // data-ar-ready: FeedMasonry must NOT learn this tile's shape until the
+      // media is actually loaded — an unloaded "auto" tile is a wide
+      // placeholder box (min-h-40), and learning THAT ratio spanned portrait
+      // images as landscape and locked them there
+      data-ar-ready={loaded ? "1" : "0"}
+      className={`${fullWidth && !letterbox ? "" : "aspect-square"} ${letterbox ? "bg-black" : "bg-slate-800"} overflow-hidden relative ${fullWidth && !letterbox && !loaded && !arCss && !capHeightPx ? "min-h-40" : ""} ${onClick || selectMode ? "cursor-pointer group" : ""} ${selected ? "ring-2 ring-cyan-400 ring-inset" : ""}`}
+      style={capHeightPx ? { height: capHeightPx } : arCss ? { aspectRatio: arCss } : undefined}
       onClick={handleClick}
     >
       {!loaded && (
@@ -5004,8 +5909,16 @@ function GridImage({ src, alt, onClick, imageId, directUrl, thumbUrl, aspectRati
           muted
           playsInline
           preload="metadata"
-          onLoadedData={() => setLoaded(true)}
-          className={`${letterbox ? "w-full h-full object-contain" : fullWidth ? (arCss ? "w-full h-full object-cover" : "w-full h-auto block") : "w-full h-full object-cover"} transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"} ${(onClick && !selectMode) ? "group-hover:opacity-80 transition-opacity" : ""} ${selected ? "opacity-80" : ""}`}
+          onLoadedData={(e) => {
+            seenTileSrcs.add(renderedSrc)
+            const v = e.currentTarget
+            if (v.videoWidth > 0 && v.videoHeight > 0) {
+              onNaturalSize?.(v.videoWidth / v.videoHeight)
+              if (v.parentElement?.dataset) v.parentElement.dataset.natAr = String(v.videoWidth / v.videoHeight)
+            }
+            setLoaded(true)
+          }}
+          className={`${capHeightPx ? "w-full h-full object-cover" : letterbox ? "w-full h-full object-contain" : fullWidth ? (arCss ? "w-full h-full object-cover" : "w-full h-auto block") : "w-full h-full object-cover"} transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"} ${(onClick && !selectMode) ? "group-hover:opacity-80 transition-opacity" : ""} ${selected ? "opacity-80" : ""}`}
         />
       ) : (
         <img
@@ -5013,12 +5926,32 @@ function GridImage({ src, alt, onClick, imageId, directUrl, thumbUrl, aspectRati
           // natural shape). Loading full-resolution originals into every mounted tile
           // exhausts iPad Safari's memory on long scrolls and reloads the tab, so the
           // default is the thumbnail; Full Size + fullRes opts into the originals.
-          src={fullWidth && fullRes ? fullSrc : thumbSrc}
+          src={renderedSrc}
           alt={alt}
           decoding="async"
           loading="lazy"
-          onLoad={() => setLoaded(true)}
-          className={`${letterbox ? "w-full h-full object-contain" : fullWidth ? (arCss ? "w-full h-full object-cover" : "w-full h-auto block") : "w-full h-full object-cover"} transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"} ${(onClick && !selectMode) ? "group-hover:opacity-80 transition-opacity" : ""} ${selected ? "opacity-80" : ""}`}
+          // data-nat-ar: the decoded file's TRUE width:height, stamped on the
+          // tile root for FeedMasonry. Span decisions come only from this —
+          // box measurements lied for un-decoded and height-capped tiles
+          // (portrait autos were landing in landscape spans).
+          onLoad={(e) => {
+            seenTileSrcs.add(renderedSrc)
+            const img = e.currentTarget
+            if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+              onNaturalSize?.(img.naturalWidth / img.naturalHeight)
+              if (img.parentElement?.dataset) img.parentElement.dataset.natAr = String(img.naturalWidth / img.naturalHeight)
+            }
+            setLoaded(true)
+          }}
+          // Cache-complete images can fire load before React attaches the
+          // handler — report from the ref as well so the size is never missed
+          ref={(img) => {
+            if (img && img.complete && img.naturalWidth > 0) {
+              onNaturalSize?.(img.naturalWidth / img.naturalHeight)
+              if (img.parentElement?.dataset) img.parentElement.dataset.natAr = String(img.naturalWidth / img.naturalHeight)
+            }
+          }}
+          className={`${capHeightPx ? "w-full h-full object-cover" : letterbox ? "w-full h-full object-contain" : fullWidth ? (arCss ? "w-full h-full object-cover" : "w-full h-auto block") : "w-full h-full object-cover"} transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"} ${(onClick && !selectMode) ? "group-hover:opacity-80 transition-opacity" : ""} ${selected ? "opacity-80" : ""}`}
         />
       )}
       {isVideo && loaded && (
@@ -5042,7 +5975,7 @@ function GridImage({ src, alt, onClick, imageId, directUrl, thumbUrl, aspectRati
     >
       <span
         className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 aspect-square w-[300%] animate-spin pointer-events-none -z-10"
-        style={{ background: thick ? SILVER_RIM_CONIC_BRIGHT : SILVER_RIM_CONIC, animationDuration: "5s" }}
+        style={{ background: thick ? SILVER_RIM_CONIC_BRIGHT : SILVER_RIM_CONIC, animationDuration: "5s", animationDelay: rimDelay }}
       />
       <div className={`relative overflow-hidden ${thick ? "rounded-md" : "rounded-[7px]"}`}>{tile}</div>
     </div>
@@ -5345,6 +6278,17 @@ const retryBridge: { fn: ((opts: RetryRunOpts) => void) | null } = { fn: null }
 // Red variant of the animated rim — error-coded, same motion as the silver one
 const RED_RIM_CONIC =
   "conic-gradient(from 0deg, rgba(248,113,113,0.15), #fca5a5, #ef4444, rgba(248,113,113,0.2), #f87171, #b91c1c, rgba(248,113,113,0.15))"
+
+// Unique client-side ids for feed items that have no DB row yet.
+// Date.now() was NOT enough: a batch of generations completing (or failing) in
+// the same millisecond produced identical ids — duplicate React keys, and
+// worse, handlePrependImage dedupes by id so the colliding image was silently
+// dropped from the feed. Seeded from the clock so it can't collide with real
+// DB ids, then strictly incrementing for the session.
+let __tempFeedIdSeq = Date.now()
+function nextTempFeedId(): number {
+  return ++__tempFeedIdSeq
+}
 
 // Compress raw provider/server errors into something a person can read at
 // tile size. The full raw text stays available in the detail modal.
@@ -6158,6 +7102,8 @@ function ImageDetailModal({
   onRescan,
   onUsePrompt,
   onAddRef,
+  onEditCanvas,
+  editCanvasLocked = false,
   navList,
   navIndex,
   onNavigate,
@@ -6170,6 +7116,12 @@ function ImageDetailModal({
   onRescan: (image: ImageItem, opts?: { keepSeed?: boolean }) => void
   onUsePrompt: (text: string) => void
   onAddRef: (url: string, r2Key?: string) => void
+  // Open the layer canvas with this generation stacked over the reference
+  // image(s) that guided it. The button always shows (when refs exist);
+  // editCanvasLocked marks non-Dev accounts — their click routes to the
+  // Dev Tier upgrade page instead of the canvas.
+  onEditCanvas?: (image: ImageItem) => void
+  editCanvasLocked?: boolean
   navList?: ImageItem[]
   navIndex?: number
   onNavigate?: (item: ImageItem) => void
@@ -6657,6 +7609,24 @@ function ImageDetailModal({
                     <ImagePlus size={11} />
                     {addedRef ? "Added!" : "Ref"}
                   </button>
+                  {/* Layer this generation over its reference(s) in the canvas.
+                      Non-Dev accounts see the button too — it routes them to
+                      the Dev Tier upgrade page instead of the canvas. */}
+                  {onEditCanvas && image.referenceImageUrls && image.referenceImageUrls.length > 0 && (
+                    <button
+                      onClick={() => {
+                        if (editCanvasLocked) { window.location.href = "/prompting-studio/subscribe"; return }
+                        onEditCanvas(image); onClose()
+                      }}
+                      title={editCanvasLocked
+                        ? "Dev Tier feature — upgrade to edit this generation over its reference"
+                        : "Open the layer canvas with this generation stacked over its reference image"}
+                      className="flex-1 py-1.5 rounded-lg border border-violet-500/25 bg-violet-500/5 hover:bg-violet-500/15 hover:border-violet-500/40 text-violet-300 text-[11px] font-medium transition-all flex items-center justify-center gap-1.5"
+                    >
+                      {editCanvasLocked ? <Sparkles size={11} /> : <Pencil size={11} />}
+                      Edit
+                    </button>
+                  )}
                   <button
                     onClick={async () => {
                       try {
@@ -7154,6 +8124,7 @@ function ImageGrid({
   onRetryFail,
   onRetryPending,
   tileBorders = false,
+  modelFilter = null,
 }: {
   signedIn: boolean
   pendingSlots: PendingSlot[]
@@ -7176,6 +8147,8 @@ function ImageGrid({
   onRetryFail?: (item: ImageItem) => void
   onRetryPending?: (slot: PendingSlot) => void
   tileBorders?: false | "slim" | "fill" | "smart"
+  // Feed dropdown's per-model filter: explicit DB model ids, or null for all
+  modelFilter?: string[] | null
 }) {
   const fullRes = tileRes === "full"
   // Responsive column count for JS "Rows" masonry (auto = 2 on mobile, 4 on desktop)
@@ -7186,6 +8159,8 @@ function ImageGrid({
     window.addEventListener("resize", compute)
     return () => window.removeEventListener("resize", compute)
   }, [])
+  // Stable identity for the model filter so effects don't churn on re-render
+  const modelFilterKey = (modelFilter ?? []).join(",")
   const [images, setImages] = useState<ImageItem[]>([])
   const [loading, setLoading] = useState(false)
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -7194,16 +8169,15 @@ function ImageGrid({
   // Cursor for keyset pagination of the my-images feed — constant-speed at any depth
   const cursorRef = useRef<{ before: string; beforeId: number } | null>(null)
   const hasMoreRef = useRef(true)
-  // Sticky column assignment for pending/fresh tiles woven into the masonry tops —
-  // keyed by tile key so a finishing generation stays in its spinner's column
-  const headColMapRef = useRef(new Map<string, number>())
   // Persisted head-strip layout for masonry "Rows": the visual order + column of
   // recent generations, saved to localStorage. Without this, a refresh drops the
   // session's gens into the body where newest-first shortest-column packing
   // REVERSES the left-to-right order the user watched fill in — tiles switched
   // places. On reload, ids in this list are woven back into the column tops at
   // their exact saved spots; everything else packs below as usual.
-  const HEAD_LAYOUT_KEY = "pv2-feed-head-layout"
+  // v2: ordering switched to strict queue time — stale v1 layouts encode the
+  // old completion-time order and must not restore
+  const HEAD_LAYOUT_KEY = "pv2-feed-head-layout-v2"
   const HEAD_LAYOUT_MAX = 60
   const headLayoutRef = useRef<Array<{ id: number; col: number }>>([])
   const [, setHeadLayoutLoaded] = useState(false) // re-render once hydrated
@@ -7238,7 +8212,8 @@ function ImageGrid({
         // from there instead of skipping — same speed at page 500 as at page 1.
         const c = cursorRef.current
         const cursorQs = c ? `&before=${encodeURIComponent(c.before)}&beforeId=${c.beforeId}` : ""
-        res = await fetch(`/api/my-images?limit=${pageLimitRef.current}&type=image&cursor=1${showHidden ? "&hidden=true" : ""}${cursorQs}`)
+        const modelQs = modelFilter && modelFilter.length > 0 ? `&models=${encodeURIComponent(modelFilter.join(","))}` : ""
+        res = await fetch(`/api/my-images?limit=${pageLimitRef.current}&type=image&cursor=1${showHidden ? "&hidden=true" : ""}${cursorQs}${modelQs}`)
       }
       if (!res.ok) { hasMoreRef.current = false; return }
       const data = await res.json()
@@ -7276,7 +8251,9 @@ function ImageGrid({
         setLoading(false)
       }
     }
-  }, [adminFilters, showHidden])
+  // modelFilterKey (not the array) — a new array identity each render would
+  // otherwise reset the feed on every parent re-render
+  }, [adminFilters, showHidden, modelFilterKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const checkSentinel = useCallback(() => {
     if (!sentinelRef.current || !hasMoreRef.current) return
@@ -7320,7 +8297,11 @@ function ImageGrid({
     }
     const freshIds = new Set(freshImages.map(i => i.id))
     const liveFailIds = new Set(freshImages.filter(i => i.failed).map(i => i.id))
-    const dbFiltered = images.filter(img => !freshIds.has(img.id))
+    // Match on URL as well as id: a just-finished generation sits in
+    // freshImages under a TEMPORARY id while the DB row it was saved to has a
+    // real one, so an id-only check rendered the same picture twice.
+    const freshUrls = new Set(freshImages.map(i => i.imageUrl).filter(Boolean))
+    const dbFiltered = images.filter(img => !freshIds.has(img.id) && !freshUrls.has(img.imageUrl))
     // Fails paginate WITH the images: only merge errors newer than the oldest
     // loaded image while more pages remain — older errors reveal themselves as
     // the user scrolls, instead of stacking into a wall at the bottom that
@@ -7378,53 +8359,114 @@ function ImageGrid({
         // in their own pinned strip above the masonry, because shortest-column
         // packing re-shuffles every tile when items are PREPENDED — without the
         // split, each new generation visually rebuilt the whole feed.
-        const headNodes: { weight: number; node: ReactNode; key: string; presetCol?: number }[] = []
-        const nodes: { weight: number; node: ReactNode }[] = []
+        // `t` = queue time (ms). The head strip is sorted by it so every kind
+        // of tile — spinner, finished image, error — holds the position of the
+        // moment its generation was QUEUED, regardless of model or how long it
+        // ran. Matches the DB, whose rows are backdated to queue time too.
+        const headNodes: { weight: number; node: ReactNode; key: string; presetCol?: number; t?: number }[] = []
+        const nodes: { weight: number; node: ReactNode; key?: string }[] = []
         const rowsMode = fullSize && fullSizeLayout === "masonry" && masonryMode === "rows"
 
         // Pending + fresh (top of feed) — only in the normal (non-admin, non-hidden) view
         if (!adminFilters && !showHidden) {
           pendingSlots.forEach((slot) => {
+            // FINISHED, rendered inside the SAME card (same React key, same
+            // position) — the whole point of the "done" state
+            if (slot.status === "done" && slot.doneImage) {
+              const img = slot.doneImage
+              headNodes.push({
+                weight: arHeightWeight(img.aspectRatio),
+                key: slot.slotId,
+                t: slot.queuedAtMs ?? (img.createdAt ? Date.parse(img.createdAt) : undefined),
+                node: (
+                  <GridImage key={slot.slotId} src={img.imageUrl} alt={img.prompt}
+                    onClick={selectMode ? undefined : () => onImageClick(img)}
+                    imageId={img.id} directUrl={img.imageUrl} aspectRatio={img.aspectRatio}
+                    fullRes={fullRes} selectMode={selectMode} selected={selectedIds?.has(img.id)}
+                    onSelect={onSelectToggle} fullWidth={fullSize}
+                    letterbox={fullSize && fullSizeLayout === "grid"} silverRim={tileBorders} />
+                ),
+              })
+              return
+            }
             const node = slot.status === "loading"
               ? (slot.streamDataUrl
                   ? <StreamingSlot key={slot.slotId} dataUrl={slot.streamDataUrl} onClick={onPendingClick ? () => onPendingClick(slot) : undefined} />
                   : slot.queueJobId && !slot.nb2RequestId
                     ? <QueuedSlot key={slot.slotId} onClick={onPendingClick ? () => onPendingClick(slot) : undefined} />
                     : <LoadingSlot key={slot.slotId} onClick={onPendingClick ? () => onPendingClick(slot) : undefined} startedAtMs={slot.execStartMs ?? slotStartMs(slot.slotId)} modelId={slot.modelId} coldStart={slot.coldStart} durVariant={fluxDurationVariant(slot.videoMetadata)} durPrior={fluxVariantPrior(slot.videoMetadata)} aspectRatio={slotAspectRatio(slot)} waiting={slot.inQueue} />)
-              : <FailedSlot key={slot.slotId} prompt={slot.prompt} error={slot.error || "Generation failed"} aspectRatio={slot.aspectRatio} onRetry={onRetryPending ? () => onRetryPending(slot) : undefined} />
-            headNodes.push({ weight: arHeightWeight(slot.status === "failed" ? slot.aspectRatio : slotAspectRatio(slot)), node, key: slot.slotId })
+              : <FailedSlot key={slot.slotId} prompt={slot.prompt} error={slot.error || "Generation failed"} aspectRatio={slot.aspectRatio}
+                  onRetry={onRetryPending ? () => onRetryPending(slot) : undefined}
+                  // Click opens the fail-detail popup, same as savedFails cards
+                  // (this card IS the slot now, so it needs its own handler)
+                  onClick={selectMode ? undefined : () => {
+                    const twin = savedFails.find(f => f.id === slot.failItemId)
+                    onImageClick(twin ?? ({
+                      id: slot.failItemId ?? -1, imageUrl: "", prompt: slot.prompt,
+                      model: slot.modelId || "", failed: true, failError: slot.error,
+                      aspectRatio: slot.nb2AspectRatio || slot.aspectRatio, quality: slot.nb2Quality || slot.quality,
+                      referenceImageUrls: slot.referenceImageUrls || [],
+                      videoMetadata: slot.videoMetadata as Record<string, any> | undefined,
+                    } as ImageItem))
+                  }}
+                  // The failed card now lives on as its slot, so dismissing it
+                  // must clear BOTH the slot and its savedFails twin
+                  onDismiss={onDismissFail ? () => {
+                    const twin = savedFails.find(f => f.id === slot.failItemId)
+                    if (twin) onDismissFail(twin)
+                    else onDismissFail({ id: slot.failItemId ?? 0, imageUrl: "", prompt: slot.prompt, model: slot.modelId || "", failed: true } as ImageItem)
+                  } : undefined} />
+            headNodes.push({ weight: arHeightWeight(slot.status === "failed" ? slot.aspectRatio : slotAspectRatio(slot)), node, key: slot.slotId, t: slot.queuedAtMs })
           })
+          // A finished generation is already on screen inside its own "done"
+          // slot — skip the freshImages copy of it, or the same picture renders
+          // twice (and the duplicate is what used to shove the layout around).
+          const slotHeldUrls = new Set(
+            pendingSlots.filter(s => s.status === "done" && s.doneImage)
+              .map(s => s.doneImage!.imageUrl))
           freshImages.forEach((img) => {
+            if (img.imageUrl && slotHeldUrls.has(img.imageUrl)) return
             const node = img.failed
               ? <FailedSlot key={`fresh-${img.id}`} prompt={img.prompt} error={img.failError || "Generation failed"} aspectRatio={img.aspectRatio} onRetry={onRetryFail ? () => onRetryFail(img) : undefined} onClick={selectMode ? undefined : () => onImageClick(img)} />
               : <GridImage key={`fresh-${img.id}`} src={img.imageUrl} alt={img.prompt} onClick={selectMode ? undefined : () => onImageClick(img)} imageId={img.id} directUrl={img.imageUrl} aspectRatio={img.aspectRatio} fullRes={fullRes} selectMode={selectMode} selected={selectedIds?.has(img.id)} onSelect={onSelectToggle} fullWidth={fullSize} letterbox={fullSize && fullSizeLayout === "grid"} silverRim={tileBorders} />
-            headNodes.push({ weight: arHeightWeight(img.aspectRatio), node, key: `fresh-${img.id}` })
+            headNodes.push({ weight: arHeightWeight(img.aspectRatio), node, key: `fresh-${img.id}`, t: img.createdAt ? Date.parse(img.createdAt) : undefined })
           })
+          // Strict queue order, newest first. Entries without a timestamp keep
+          // their relative insertion order (stable sort) at the front.
+          headNodes.sort((a, b) => (b.t ?? Infinity) - (a.t ?? Infinity))
         }
 
         if (adminFilters) {
           // Admin-filtered view: exactly the API results, in API order
           images.forEach((img) => nodes.push({
             weight: arHeightWeight(img.aspectRatio),
+            key: `af-${img.id}`,
             node: <GridImage key={`af-${img.id}`} src={img.imageUrl} alt={img.prompt} onClick={selectMode ? undefined : () => onImageClick(img)} imageId={img.id} aspectRatio={img.aspectRatio} fullRes={fullRes} selectMode={selectMode} selected={selectedIds?.has(img.id)} onSelect={onSelectToggle} fullWidth={fullSize} letterbox={fullSize && fullSizeLayout === "grid"} isVideo={!!img.videoMetadata || isVideoUrl(img.imageUrl)} adminThumb silverRim={tileBorders} />,
           }))
         } else if (showHidden) {
           // Hidden view: exactly the API results (user's hidden items)
           images.forEach((img) => nodes.push({
             weight: arHeightWeight(img.aspectRatio),
+            key: `h-${img.id}`,
             node: <GridImage key={`h-${img.id}`} src={img.imageUrl} alt={img.prompt} onClick={selectMode ? undefined : () => onImageClick(img)} imageId={img.id} thumbUrl={img.thumbnailUrl} aspectRatio={img.aspectRatio} fullRes={fullRes} selectMode={selectMode} selected={selectedIds?.has(img.id)} onSelect={onSelectToggle} fullWidth={fullSize} letterbox={fullSize && fullSizeLayout === "grid"} silverRim={tileBorders} />,
           }))
         } else {
           // DB images merged with restored fails, sorted by createdAt so fails land in place
           const freshIds = new Set(freshImages.map(i => i.id))
           const liveFailIds = new Set(freshImages.filter(i => i.failed).map(i => i.id))
-          const dbFiltered = images.filter(img => !freshIds.has(img.id))
+          // See the nav-list effect: URL match kills the temp-id/real-id double
+          const freshUrls = new Set(freshImages.map(i => i.imageUrl).filter(Boolean))
+          const dbFiltered = images.filter(img => !freshIds.has(img.id) && !freshUrls.has(img.imageUrl))
           // Same pagination gate as the nav-list effect (see comment there)
           const failFrontier = hasMoreRef.current && images.length > 0
             ? Math.min(...images.map(i => (i.createdAt ? new Date(i.createdAt).getTime() : 0)))
             : hasMoreRef.current ? Infinity : -Infinity
+          // A failure whose slot card is still on screen must not ALSO appear
+          // as a body item — that duplicate is what pushed errors out of place
+          const slotFailIds = new Set(pendingSlots.map(s => s.failItemId).filter((x): x is number => x != null))
           const failsToMerge = savedFails.filter(f =>
-            !liveFailIds.has(f.id) && (f.createdAt ? new Date(f.createdAt).getTime() : 0) >= failFrontier)
+            !liveFailIds.has(f.id) && !slotFailIds.has(f.id) &&
+            (f.createdAt ? new Date(f.createdAt).getTime() : 0) >= failFrontier)
           const merged = [...dbFiltered, ...failsToMerge].sort((a, b) => {
             const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0
             const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0
@@ -7441,23 +8483,26 @@ function ImageGrid({
           // its images repack into the body instead of jumping above them
           const newestBody = merged.find(m => !layoutCols.has(m.id))
           const cutoffT = newestBody?.createdAt ? new Date(newestBody.createdAt).getTime() : -Infinity
-          const restoredById = new Map<number, { weight: number; node: ReactNode; key: string; presetCol?: number }>()
+          const restoredById = new Map<number, { weight: number; node: ReactNode; key: string; presetCol?: number; t?: number }>()
           merged.forEach((img) => {
             const node = img.failed
               ? <FailedSlot key={`sf-${img.id}`} prompt={img.prompt} error={img.failError || "Generation failed"} aspectRatio={img.aspectRatio} onRetry={onRetryFail ? () => onRetryFail(img) : undefined} onClick={selectMode ? undefined : () => onImageClick(img)} onDismiss={onDismissFail ? () => onDismissFail(img) : undefined} />
               : <GridImage key={`db-${img.id}`} src={img.imageUrl} alt={img.prompt} onClick={selectMode ? undefined : () => onImageClick(img)} imageId={img.id} thumbUrl={img.thumbnailUrl} aspectRatio={img.aspectRatio} fullRes={fullRes} selectMode={selectMode} selected={selectedIds?.has(img.id)} onSelect={onSelectToggle} fullWidth={fullSize} letterbox={fullSize && fullSizeLayout === "grid"} silverRim={tileBorders} />
             if (layoutCols.has(img.id) && (img.createdAt ? new Date(img.createdAt).getTime() : 0) >= cutoffT) {
-              restoredById.set(img.id, { weight: arHeightWeight(img.aspectRatio), node, key: `db-${img.id}`, presetCol: layoutCols.get(img.id) })
+              restoredById.set(img.id, { weight: arHeightWeight(img.aspectRatio), node, key: `db-${img.id}`, presetCol: layoutCols.get(img.id), t: img.createdAt ? Date.parse(img.createdAt) : undefined })
             } else {
-              nodes.push({ weight: arHeightWeight(img.aspectRatio), node })
+              nodes.push({ weight: arHeightWeight(img.aspectRatio), node, key: img.failed ? `sf-${img.id}` : `db-${img.id}` })
             }
           })
-          // Append in SAVED order (visual order, newest rows first) so stacking
-          // within each column reproduces exactly what the user last saw
           for (const e of layout) {
             const r = restoredById.get(e.id)
             if (r) headNodes.push(r)
           }
+          // FINAL ordering pass, after restored entries joined: strict queue
+          // time, newest first. DB rows are backdated to queue time on save,
+          // so live tiles and reloaded tiles sort identically — a page refresh
+          // reproduces exactly the order you watched happen.
+          headNodes.sort((a, b) => (b.t ?? Infinity) - (a.t ?? Infinity))
         }
 
         // Masonry "Rows": JS shortest-column packing — left-to-right, and tiles never
@@ -7469,44 +8514,23 @@ function ImageGrid({
         if (rowsMode) {
           const n = cols ?? autoCols
           const columns = distributeMasonry(nodes, n)
-          const colMap = headColMapRef.current
-          const liveKeys = new Set(headNodes.map(h => h.key))
-          for (const k of Array.from(colMap.keys())) if (!liveKeys.has(k)) colMap.delete(k)
-          // Restored tiles claim their SAVED columns first so they count toward
-          // occupancy before any new tile picks a spot
-          headNodes.forEach(h => {
-            if (h.presetCol !== undefined && h.presetCol < n && !colMap.has(h.key)) colMap.set(h.key, h.presetCol)
-          })
-          // Count live tiles already holding a column, then hand new tiles the
-          // least-occupied column (freed columns get reused first)
-          const counts = new Array(n).fill(0)
-          colMap.forEach(c => { if (c < n) counts[c]++ })
-          headNodes.forEach(h => {
-            let c = colMap.get(h.key)
-            if (c === undefined || c >= n) {
-              c = 0
-              for (let i = 1; i < n; i++) if (counts[i] < counts[c]) c = i
-              colMap.set(h.key, c)
-              counts[c]++
-            }
-          })
-          for (let i = headNodes.length - 1; i >= 0; i--) {
-            const c = colMap.get(headNodes[i].key)!
-            columns[c] = [headNodes[i], ...columns[c]]
-          }
-          // Persist the strip (id + column, in visual order) so a refresh
-          // rebuilds these exact positions instead of repacking newest-first.
-          // Saved entries whose images aren't loaded yet (below the first page)
-          // keep their spot as a tail; pending spinners are transient and skipped.
+
+          // HEAD STRIP = ONE CSS GRID, children in queue order (newest first).
+          // Auto-placement puts index i at column i%n — top-left for the
+          // newest, pushing the rest right/down — while the DOM stays a flat
+          // keyed list under a single parent. Prepending a spinner therefore
+          // INSERTS a sibling instead of moving tiles between column
+          // containers: React reuses every existing element, so nothing
+          // remounts, no <img> refetches, no skeleton flash. (The old
+          // implementation wove heads into the per-column divs; every queue
+          // changed most tiles' parent and re-created them = the stutter.)
           if (!adminFilters && !showHidden) {
             try {
               const next: Array<{ id: number; col: number }> = []
-              for (const h of headNodes) {
+              headNodes.forEach((h, i) => {
                 const m = /^(?:fresh|db)-(\d+)$/.exec(h.key)
-                if (!m) continue
-                const c = colMap.get(h.key)
-                if (c !== undefined) next.push({ id: Number(m[1]), col: c })
-              }
+                if (m) next.push({ id: Number(m[1]), col: i % n })
+              })
               if (next.length > 0 || images.length > 0) {
                 const nextIds = new Set(next.map(e => e.id))
                 const loadedIds = new Set<number>([...images.map(i => i.id), ...freshImages.map(i => i.id), ...savedFails.map(f => f.id)])
@@ -7516,15 +8540,7 @@ function ImageGrid({
               }
             } catch {}
           }
-          return (
-            <div className="flex gap-2 items-start">
-              {columns.map((colItems, i) => (
-                <div key={i} className="flex-1 min-w-0 flex flex-col gap-2">
-                  {colItems.map(it => it.node)}
-                </div>
-              ))}
-            </div>
-          )
+          return <FeedMasonry head={headNodes} body={nodes} n={n} />
         }
 
         // Masonry "Flow": CSS multi-column — packs top-to-bottom down each column.
@@ -8410,7 +9426,16 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
   // Layers are transparent sheets over the base canvas, each holding placed
   // images (items). Item rects are canvas fractions; selection gets crop-style
   // transform handles on the canvas.
-  const [stack, setStack] = useState<RefLayerStack | null>(normalizeStack(layerStack))
+  // AUTO layers (appended by finished generations under the old behavior) do
+  // NOT load into the editor — opening a reference shows the reference alone
+  // plus any layers the user placed deliberately. The gen-over-ref canvas is
+  // its own flow now (the info panel's Edit button injects the layer there).
+  const [stack, setStack] = useState<RefLayerStack | null>(() => {
+    const s = normalizeStack(layerStack)
+    if (!s) return null
+    const manual = s.layers.filter(l => !l.auto)
+    return manual.length === s.layers.length ? s : { ...s, layers: manual }
+  })
   const [layerBusy, setLayerBusy] = useState(false)
   const [layerError, setLayerError] = useState<string | null>(null)
   const [selLayerId, setSelLayerId] = useState<string | null>(null)
@@ -12990,7 +14015,7 @@ function CustomFluxPanel({
     const ckptShort = checkpoint.split('/').pop()?.replace(/\.[^.]+$/, '') ?? checkpoint
     onRemovePending(inpaintSlotId)
     setResultUrl(compositeB64)
-    onPrependImage({ id: Date.now(), imageUrl: compositeB64, prompt: prompt.trim(), model: 'custom-flux-lora', createdAt: new Date().toISOString(),
+    onPrependImage({ id: nextTempFeedId(), imageUrl: compositeB64, prompt: prompt.trim(), model: 'custom-flux-lora', createdAt: new Date().toISOString(),
       videoMetadata: { fluxCheckpoint: ckptShort, fluxWidth: reqWidth, fluxHeight: reqHeight, fluxSteps: steps, fluxGuidance: guidance, fluxSeed: seed === -1 ? 'random' : seed, fluxLoras: loras.filter(l => l.key).map(l => l.name || l.key.split('/').pop() || ''), fluxInpaintShapes: jobs.length } as Record<string, unknown> })
     setGenerating(false); setStatus('')
   }
@@ -13202,7 +14227,7 @@ function CustomFluxPanel({
       if (data.mode === 'local' && data.image_data_url) {
         // Local: show inline and also add to session feed
         setResultUrl(data.image_data_url)
-        onPrependImage({ id: Date.now(), imageUrl: data.image_data_url, prompt: prompt.trim(), model: 'custom-flux-lora', createdAt: new Date().toISOString(), videoMetadata: fluxMeta as Record<string, any> })
+        onPrependImage({ id: nextTempFeedId(), imageUrl: data.image_data_url, prompt: prompt.trim(), model: 'custom-flux-lora', createdAt: new Date().toISOString(), videoMetadata: fluxMeta as Record<string, any> })
       } else if (data.mode === 'runpod' && data.job_id) {
         // RunPod: hand off to parent's polling → image appears in feed when done
         const slotId = `flux-${Date.now()}-${gi}`
@@ -15473,6 +16498,7 @@ function PromptBox({
       onAddPending({ slotId, status: "loading", prompt: pendingLabel, modelId: model.apiId, aspectRatio: "1:1", quality: `${upscaleFactor}x` as Quality })
       try {
         const res = await fetch("/api/generate", {
+          signal: AbortSignal.timeout(90_000),
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -15517,6 +16543,13 @@ function PromptBox({
     slotIds.forEach(sid => onAddPending({ slotId: sid, status: "loading", prompt: currentPrompt, modelId: model.apiId, aspectRatio, quality, referenceImageUrls: permanentRefUrls }))
     const slotId = slotIds[0] // alias for single-image paths
 
+    // Free the Generate button NOW — the batch's slots exist and the rest of
+    // this function (ref encoding + submit requests) runs fine in the
+    // background. Holding `generating` until every submission returned meant
+    // one slow submit locked the button "forever" while the jobs were already
+    // visibly generating — and blocked queueing the next batch.
+    setGenerating(false)
+
     try {
       // Convert ref images to base64. Only encode as many as the model actually
       // uses (the server slices to this anyway) and do it ONE AT A TIME —
@@ -15556,6 +16589,7 @@ function PromptBox({
         await Promise.all(slotIds.map(async (sid) => {
           try {
             const res = await fetch("/api/admin/seedream-5-lite-submit", {
+              signal: AbortSignal.timeout(90_000),
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -15590,6 +16624,7 @@ function PromptBox({
         await Promise.all(slotIds.map(async (sid) => {
           try {
             const res = await fetch("/api/admin/seedream-5-pro-submit", {
+              signal: AbortSignal.timeout(90_000),
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -15623,6 +16658,7 @@ function PromptBox({
         await Promise.all(slotIds.map(async (sid) => {
           try {
             const res = await fetch("/api/admin/recraft-submit", {
+              signal: AbortSignal.timeout(90_000),
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -15712,6 +16748,7 @@ function PromptBox({
         await Promise.all(slotIds.map(async (sid) => {
           try {
             const res = await fetch("/api/admin/kling-image-submit", {
+              signal: AbortSignal.timeout(90_000),
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -15766,6 +16803,7 @@ function PromptBox({
         await Promise.all(slotIds.map(async (sid) => {
           try {
             const res = await fetch("/api/admin/kling-o3-submit", {
+              signal: AbortSignal.timeout(90_000),
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -15822,6 +16860,7 @@ function PromptBox({
         await Promise.all(slotIds.map(async (sid) => {
           try {
             const res = await fetch("/api/admin/wan-27-pro-submit", {
+              signal: AbortSignal.timeout(90_000),
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -15989,9 +17028,9 @@ function PromptBox({
                           } catch {}
                         }
                         const imgs = (event.images || []) as { url: string; dbId?: number | null }[]
-                        imgs.forEach((img, i) =>
+                        imgs.forEach((img) =>
                           onPrependImage({
-                            id: img.dbId ?? (Date.now() + i),
+                            id: img.dbId ?? nextTempFeedId(),
                             imageUrl: img.url,
                             prompt: currentPrompt,
                             model: "gpt-image-2",
@@ -16037,6 +17076,7 @@ function PromptBox({
         await Promise.all(slotIds.map(async (sid) => {
           try {
             const res = await fetch("/api/admin/gemini-submit", {
+              signal: AbortSignal.timeout(90_000),
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -16082,6 +17122,7 @@ function PromptBox({
         await Promise.all(slotIds.map(async (sid) => {
           try {
             const res = await fetch("/api/generate", {
+              signal: AbortSignal.timeout(90_000),
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ prompt: currentPrompt, model: model.apiId, quality, aspectRatio, referenceImages, loraUrl: selectedLoraUrl || undefined, loraName: selectedLoraUrl ? (loraJobs.find(j => j.loraUrl === selectedLoraUrl)?.name || undefined) : undefined, loraScale: selectedLoraUrl ? loraScale : undefined, loraGuidanceScale: selectedLoraUrl ? loraGuidanceScale : undefined, loraSteps: selectedLoraUrl ? loraSteps : undefined, ...(model.id === "seedream-4.5" ? { seedreamSafetyChecker } : {}), ...(model.id === "flux-1-dev" ? { fluxDevSafetyChecker } : {}) }),
@@ -16098,6 +17139,7 @@ function PromptBox({
       } else {
         // Single FAL request (count=1)
         const res = await fetch("/api/generate", {
+          signal: AbortSignal.timeout(90_000),
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: currentPrompt, model: model.apiId, quality, aspectRatio, referenceImages, loraUrl: selectedLoraUrl || undefined, loraName: selectedLoraUrl ? (loraJobs.find(j => j.loraUrl === selectedLoraUrl)?.name || undefined) : undefined, loraScale: selectedLoraUrl ? loraScale : undefined, loraGuidanceScale: selectedLoraUrl ? loraGuidanceScale : undefined, loraSteps: selectedLoraUrl ? loraSteps : undefined, ...(model.id === "seedream-4.5" ? { seedreamSafetyChecker } : {}), ...(model.id === "flux-1-dev" ? { fluxDevSafetyChecker } : {}) }),
@@ -18627,6 +19669,9 @@ function VideoTile({ natural, initialAspect, className, onClick, videoSrc, video
   children?: ReactNode
 }) {
   const [measured, setMeasured] = useState<string | null>(null)
+  // Locked at mount: recomputing per render would rewrite animation-delay on
+  // the running rim sweep and jump its phase
+  const [rimDelay] = useState(() => rimPhase())
   const vidRef = useRef<HTMLVideoElement>(null)
 
   // Autoplay is viewport-gated: only tiles actually on screen play (muted, looping),
@@ -18674,7 +19719,7 @@ function VideoTile({ natural, initialAspect, className, onClick, videoSrc, video
     >
       <span
         className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 aspect-square w-[300%] animate-spin pointer-events-none -z-10"
-        style={{ background: thick ? SILVER_RIM_CONIC_BRIGHT : SILVER_RIM_CONIC, animationDuration: "5s" }}
+        style={{ background: thick ? SILVER_RIM_CONIC_BRIGHT : SILVER_RIM_CONIC, animationDuration: "5s", animationDelay: rimDelay }}
       />
       <div className={`relative overflow-hidden ${thick ? "rounded-md" : "rounded-[7px]"}`}>{tile}</div>
     </div>
@@ -18700,6 +19745,7 @@ function VideoFeed({
   autoplay = false,
   onDismissFail,
   tileBorders = false,
+  modelFilter = null,
 }: {
   pendingSlots: VideoPendingSlot[]
   items: VideoItem[]
@@ -18719,8 +19765,12 @@ function VideoFeed({
   autoplay?: boolean
   onDismissFail?: (item: VideoItem) => void
   tileBorders?: false | "slim" | "fill" | "smart"
+  // Feed dropdown's per-model filter: explicit DB model ids, or null for all
+  modelFilter?: string[] | null
 }) {
   // Pull the same historical feed as the image scanner — with infinite scroll
+  // Stable identity for the model filter so effects don't churn on re-render
+  const modelFilterKey = (modelFilter ?? []).join(",")
   const [dbImages, setDbImages] = useState<ImageItem[]>([])
   const [dbLoading, setDbLoading] = useState(false)
   const videoSentinelRef = useRef<HTMLDivElement>(null)
@@ -18769,7 +19819,8 @@ function VideoFeed({
     try {
       const c = videoCursorRef.current
       const cursorQs = c ? `&before=${encodeURIComponent(c.before)}&beforeId=${c.beforeId}` : ""
-      const res = await fetch(`/api/my-images?limit=${videoPagLimitRef.current}&type=video&cursor=1${showHidden ? "&hidden=true" : ""}${cursorQs}`)
+      const modelQs = modelFilter && modelFilter.length > 0 ? `&models=${encodeURIComponent(modelFilter.join(","))}` : ""
+      const res = await fetch(`/api/my-images?limit=${videoPagLimitRef.current}&type=video&cursor=1${showHidden ? "&hidden=true" : ""}${cursorQs}${modelQs}`)
       if (!res.ok) return
       const data = await res.json()
       if (!data.images) return
@@ -18787,7 +19838,7 @@ function VideoFeed({
         setDbLoading(false)
       }
     }
-  }, [showHidden])
+  }, [showHidden, modelFilterKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Initial load + full reset when the hidden toggle changes
   useEffect(() => {
@@ -20719,6 +21770,51 @@ export default function PortalV2Page() {
   // Two styles: "slim" clings to the thumbnail, "fill" is a thick full frame.
   const [feedTileBorders, setFeedTileBorders] = useState(false)
   const [feedBorderMode, setFeedBorderMode] = useState<"slim" | "fill" | "smart">("slim")
+  // Per-model feed filter — EXCLUSION lists of taskbar model NAMES (empty =
+  // show everything). Stored as exclusions so newly added models appear by
+  // default instead of silently vanishing from the feed.
+  const [feedHiddenImageModels, setFeedHiddenImageModels] = useState<string[]>([])
+  const [feedHiddenVideoModels, setFeedHiddenVideoModels] = useState<string[]>([])
+
+  useEffect(() => {
+    try {
+      const hi = JSON.parse(localStorage.getItem("pv2-feed-hidden-image-models") || "[]")
+      if (Array.isArray(hi)) setFeedHiddenImageModels(hi.filter((x): x is string => typeof x === "string"))
+      const hv = JSON.parse(localStorage.getItem("pv2-feed-hidden-video-models") || "[]")
+      if (Array.isArray(hv)) setFeedHiddenVideoModels(hv.filter((x): x is string => typeof x === "string"))
+    } catch {}
+  }, [])
+
+  // Exclusions → the explicit id list the API filters on (null = no filter)
+  const buildModelParam = (allNames: string[], hidden: string[]): string[] | null => {
+    if (hidden.length === 0) return null
+    const visible = allNames.filter(n => !hidden.includes(n))
+    if (visible.length === allNames.length) return null
+    return [...new Set(visible.flatMap(modelDbKeysForName))]
+  }
+  // Admin-only models only count toward the filter math for admins — a regular
+  // user's "all models" universe is just the public list
+  const allImageModelNames = useMemo(
+    () => [...IMAGE_MODEL_GROUPS, ...(isAdminAccount ? ADMIN_IMAGE_MODEL_GROUPS : [])]
+      .flatMap(g => g.items as unknown as string[]), [isAdminAccount])
+  const allVideoModelNames = useMemo(
+    () => [...VIDEO_MODEL_GROUPS, ...(isAdminAccount ? ADMIN_VIDEO_MODEL_GROUPS : [])]
+      .flatMap(g => g.items as unknown as string[]), [isAdminAccount])
+  const imageModelFilter = useMemo(
+    () => buildModelParam(allImageModelNames, feedHiddenImageModels),
+    [allImageModelNames, feedHiddenImageModels])
+  const videoModelFilter = useMemo(
+    () => buildModelParam(allVideoModelNames, feedHiddenVideoModels),
+    [allVideoModelNames, feedHiddenVideoModels])
+
+  const handleHiddenImageModelsChange = (next: string[]) => {
+    setFeedHiddenImageModels(next)
+    try { localStorage.setItem("pv2-feed-hidden-image-models", JSON.stringify(next)) } catch {}
+  }
+  const handleHiddenVideoModelsChange = (next: string[]) => {
+    setFeedHiddenVideoModels(next)
+    try { localStorage.setItem("pv2-feed-hidden-video-models", JSON.stringify(next)) } catch {}
+  }
 
   useEffect(() => {
     try {
@@ -20729,10 +21825,8 @@ export default function PortalV2Page() {
       // Only override the default when the user has an explicit stored choice
       const fs = localStorage.getItem("pv2-feed-fullsize")
       if (fs !== null) setFeedFullSize(fs === "true")
-      const layout = localStorage.getItem("pv2-feed-fullsize-layout")
-      if (layout === "masonry" || layout === "grid") setFeedFullSizeLayout(layout)
-      const mm = localStorage.getItem("pv2-feed-masonry-mode")
-      if (mm === "flow" || mm === "rows") setFeedMasonryMode(mm)
+      // Layout is FIXED at masonry-rows now — stored "grid"/"flow" choices
+      // from before the options were removed are ignored (not restored)
       const tr = localStorage.getItem("pv2-feed-tile-res")
       if (tr === "thumb" || tr === "full") setFeedTileRes(tr)
       if (localStorage.getItem("pv2-feed-video-autoplay") === "true") setFeedVideoAutoplay(true)
@@ -21043,15 +22137,35 @@ export default function PortalV2Page() {
   const [seedance15VideoSafetyChecker, setSeedance15VideoSafetyChecker] = useState(false)
   const [wan27VideoSafetyChecker, setWan27VideoSafetyChecker] = useState(false)
 
-  const handleAddPending    = useCallback((slot: PendingSlot) => setPendingSlots(p => [slot, ...p]), [])
+  // Flux jobs this device has already adopted from the cross-device /active
+  // list. Once seen (or dismissed) a job is never re-adopted, so a dismissed
+  // tile stays dismissed instead of reappearing on the next 20s poll.
+  const adoptedFluxJobsRef = useRef<Set<string>>(new Set())
+  const handleAddPending    = useCallback((slot: PendingSlot) =>
+    setPendingSlots(p => [{ ...slot, queuedAtMs: slot.queuedAtMs ?? Date.now() }, ...p]), [])
+  // Slots whose failure has ALREADY produced an error card + server record —
+  // repeat failure reports for the same slot (double-firing pollers, races)
+  // must only update the slot, never mint another card or POST another row
+  const failHandledRef = useRef<Set<string>>(new Set())
   const handleUpdatePending = useCallback((slotId: string, update: Partial<PendingSlot>) => {
+    if (update.status === "failed" && failHandledRef.current.has(slotId)) {
+      setPendingSlots(p => p.map(s => s.slotId === slotId ? { ...s, ...update, status: "failed" as const } : s))
+      return
+    }
     if (update.status === "failed") {
+      failHandledRef.current.add(slotId)
       // Compute the ID outside the updater — React Strict Mode double-invokes updaters,
       // so creating it inside would produce two different timestamps and two duplicate tiles.
-      const failId = -Date.now()
+      // Negative + sequential: several slots failing in the same millisecond
+      // used to share one id, which collided as React keys.
+      const failId = -nextTempFeedId()
       const failedAt = new Date().toISOString()
       setPendingSlots(prev => {
-        const slot = prev.find(s => s.slotId === slotId)
+        // Fall back to the update's own fields when the slot is gone (cleared
+        // by a refresh or a competing path) — the error must STILL be recorded.
+        // "if (slot)" alone silently swallowed these failures: the tile just
+        // vanished until the next reload pulled the server-side fail row.
+        const slot = prev.find(s => s.slotId === slotId) ?? (update.prompt || update.error ? update as PendingSlot : null)
         if (slot) {
           // Identity linking the optimistic tile to its server GenerationQueue row —
           // fails persist per-account until dismissed (see /api/user/failed-generations)
@@ -21060,16 +22174,19 @@ export default function PortalV2Page() {
           const failedItem: ImageItem = {
             id: failId,
             imageUrl: '',
-            prompt: slot.prompt,
-            model: slot.modelId || '',
+            prompt: slot.prompt || update.prompt || '',
+            model: slot.modelId || update.modelId || '',
             failed: true,
             failError: update.error,
             queueRowId: rowId ?? undefined,
             failKey,
-            createdAt: failedAt,
-            aspectRatio: slot.nb2AspectRatio || slot.aspectRatio,
-            quality: slot.nb2Quality || slot.quality,
-            referenceImageUrls: slot.referenceImageUrls || [],
+            // Queue time, not failure time — the error card must hold the spot
+            // where the generation was queued, live and after a refresh
+            createdAt: slot.queuedAtMs ? new Date(slot.queuedAtMs).toISOString() : failedAt,
+            aspectRatio: slot.nb2AspectRatio || slot.aspectRatio || update.aspectRatio,
+            quality: slot.nb2Quality || slot.quality || update.quality,
+            referenceImageUrls: slot.referenceImageUrls || update.referenceImageUrls || [],
+            videoMetadata: (slot.videoMetadata || update.videoMetadata) as Record<string, any> | undefined,
           }
           // No QUEUE row — create a server row so the tile survives reloads.
           // This covers submit-request deaths (no failKey at all) AND RunPod
@@ -21085,6 +22202,11 @@ export default function PortalV2Page() {
                 aspectRatio: slot.nb2AspectRatio || slot.aspectRatio,
                 quality: slot.nb2Quality || slot.quality,
                 referenceImageUrls: slot.referenceImageUrls || [],
+                // Queue time — keeps the persisted fail row at the same feed
+                // position as the live error card (see route comment)
+                queuedAt: slot.queuedAtMs,
+                // Dedupe key: the same dead job must never create two rows
+                falRequestId: slot.nb2RequestId,
               }),
             }).then(r => r.json()).then(d => {
               if (d.id) setSavedFails(sf => sf.map(f => f.id === failId ? { ...f, queueRowId: d.id, failKey: `qf-${d.id}` } : f))
@@ -21097,7 +22219,12 @@ export default function PortalV2Page() {
             setSavedFails(sf => sf.some(i => i.id === failedItem.id || (failKey && i.failKey === failKey)) ? sf : [failedItem, ...sf])
           }, 0)
         }
-        return prev.filter(s => s.slotId !== slotId)
+        // KEEP the slot and flip it to "failed" in place. Removing it made the
+        // error re-enter the feed as a separate, time-sorted body item, which
+        // is why errors jumped away from where the generation was queued.
+        return prev.map(s => s.slotId === slotId
+          ? { ...s, ...update, status: "failed" as const, failItemId: failId }
+          : s)
       })
     } else {
       setPendingSlots(p => p.map(s => s.slotId === slotId ? { ...s, ...update } : s))
@@ -21127,29 +22254,9 @@ export default function PortalV2Page() {
   const handlePrependImage = useCallback((img: ImageItem) => {
     setFreshImages(p => {
       if (p.some(i => i.id === img.id || i.imageUrl === img.imageUrl)) return p
-      // Dev-Tier multi-layer refs: the finished generation lands as a new layer
-      // on every multi-layer ref that guided it (matched by base URL). Deferred
-      // out of the updater — state updaters must stay pure.
-      if (img.referenceImageUrls?.length && typeof img.imageUrl === "string" && img.imageUrl.startsWith("https://")) {
-        const used = new Set(img.referenceImageUrls)
-        for (const r of refLibraryRef.current) {
-          if (!r.layers?.enabled || !used.has(r.url) || !/^\d+$/.test(r.id)) continue
-          if (r.layers.layers.some(l => l.items?.some(it => it.url === img.imageUrl) ?? false)) continue
-          const stack: RefLayerStack = {
-            enabled: true,
-            layers: [...r.layers.layers, { id: `gen-${img.id}`, name: `Generation ${img.id}`, visible: true, opacity: 1, auto: true, items: [{ id: `gen-${img.id}-0`, url: img.imageUrl }] }].slice(-20),
-          }
-          const refId = r.id
-          setTimeout(() => {
-            setRefLibrary(prev => prev.map(x => x.id === refId ? { ...x, layers: stack } : x))
-            fetch("/api/user/ref-layers", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ refId: Number(refId), stack }),
-            }).catch(() => {})
-          }, 0)
-        }
-      }
+      // (Generations no longer auto-append themselves as layers on the refs
+      // that guided them — the gen-over-ref canvas is opt-in now, via the
+      // info panel's Edit button. Auto layers polluted the ref editor.)
       return [img, ...p]
     })
   }, [])
@@ -21160,6 +22267,71 @@ export default function PortalV2Page() {
   useEffect(() => {
     localStorage.removeItem("pv2-flux-images")
   }, [])
+
+  // Flux self-heal: a finished RunPod job only got its DB row if a browser was
+  // polling at that exact moment — close the tab or switch devices mid-run and
+  // the image was orphaned in R2. On load, ask the server to reconcile any
+  // outputs that never got saved (idempotent; admin-only, no-ops for others).
+  useEffect(() => {
+    if (!isAdminAccount) return
+    fetch("/api/admin/flux-inference/reconcile?hours=48", { method: "POST" })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (d?.recovered > 0) {
+          console.log(`[flux] recovered ${d.recovered} orphaned generation(s)`)
+          setImageGridKey(k => k + 1) // remount the feed so they appear now
+        }
+      })
+      .catch(() => {})
+  }, [isAdminAccount])
+
+  // Cross-device loading tiles: in-flight flux jobs are discovered from their
+  // server-side metadata sidecars, so a run started on the desktop shows its
+  // spinner on the iPad/phone too. Adopting a job just means adding a pending
+  // slot + starting the normal poller, which then saves it like any other run.
+  useEffect(() => {
+    if (!isAdminAccount) return
+    let stopped = false
+    const adopt = async () => {
+      try {
+        const res = await fetch("/api/admin/flux-inference/active?hours=3", { signal: AbortSignal.timeout(20000) })
+        if (!res.ok || stopped) return
+        const d = await res.json() as { jobs?: { jobId: string; prompt: string; startedAt: number; width: number; height: number }[] }
+        for (const j of d.jobs ?? []) {
+          // Never re-adopt a job whose tile the user already dismissed, or one
+          // this device has already seen — otherwise dismissing is futile and
+          // the tile reappears on the next poll.
+          if (adoptedFluxJobsRef.current.has(j.jobId)) continue
+          if (pendingSlotsRef.current.some(s => s.nb2RequestId === j.jobId)) continue
+          if (nb2PollingIntervals.current[j.jobId]) continue
+          const slotId = `flux-remote-${j.jobId}`
+          if (pendingSlotsRef.current.some(s => s.slotId === slotId)) continue
+          adoptedFluxJobsRef.current.add(j.jobId)
+          const vm = { fluxWidth: j.width, fluxHeight: j.height }
+          handleAddPending({
+            slotId,
+            status: "loading",
+            prompt: j.prompt || "Generating…",
+            modelId: "custom-flux-lora",
+            nb2RequestId: j.jobId,
+            nb2FalEndpoint: "",
+            nb2StatusUrl: "/api/admin/flux-inference/nb2-status",
+            videoMetadata: vm,
+            execStartMs: j.startedAt,
+          })
+          startNb2SlotPolling(
+            j.jobId, "", [slotId], j.prompt || "", "png",
+            `${j.width}x${j.height}`, "/api/admin/flux-inference/nb2-status",
+            undefined, 0, [], vm,
+          )
+        }
+      } catch {}
+    }
+    adopt()
+    const t = setInterval(adopt, 20000)
+    return () => { stopped = true; clearInterval(t) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdminAccount])
 
   // --- Video handlers ---
   // Uploads go THROUGH THE SERVER (multipart → R2). The old presigned direct
@@ -21715,6 +22887,9 @@ export default function PortalV2Page() {
     if (nb2PollingIntervals.current[requestId]) return
     let pollCount = 0
     let pollInFlight = false
+    // Random phase so striding (below) doesn't sync every poller onto the
+    // same tick when a big batch is queued at once
+    const pollPhase = Math.floor(Math.random() * 89)
     let notFoundStreak = 0  // consecutive RunPod-404 responses (job purged or not yet registered)
     // Cold-start bookkeeping: a queue-wait flag is PROVISIONAL — the workerId
     // decision (once the job is picked up) is authoritative and may correct it
@@ -21724,10 +22899,33 @@ export default function PortalV2Page() {
     // heavy pipeline runs — give them 3h before declaring a timeout (other
     // models keep the 30-min cap; their queues never run that long)
     const maxPolls = statusUrl.includes('flux-inference') ? 2160 : 360
+    // Failure updates carry the full generation context — if the slot object
+    // is gone by the time the failure lands, the error card is built from
+    // these fields instead of silently vanishing (and settings still display)
+    const failWith = (error: string): Partial<PendingSlot> => ({
+      status: "failed", error, prompt, aspectRatio, quality,
+      referenceImageUrls, videoMetadata: videoMetadata as Record<string, unknown> | undefined,
+      modelId: statusUrl.includes("flux-inference") ? "custom-flux-lora"
+        : statusUrl.includes("kling-o3") ? "kling-o3-image"
+        : statusUrl.includes("kling-image") ? "kling-v3-image"
+        : statusUrl.includes("wan-27-pro") ? "wan-2.7-pro"
+        : statusUrl.includes("gpt-image-2") ? "gpt-image-2"
+        : "nano-banana-pro-2",
+    })
     const interval = setInterval(async () => {
       if (pollInFlight) return
       pollInFlight = true
       pollCount++
+      // Adaptive cadence: a fixed 5s per job means 40 queued jobs fire 8
+      // requests/second — enough to jam the tab and the server. Stride the
+      // polls so the TOTAL rate stays roughly capped (~8 jobs' worth); each
+      // job still polls, just proportionally less often while the queue is big.
+      const activePollers = Object.keys(nb2PollingIntervals.current).length
+      const stride = Math.max(1, Math.ceil(activePollers / 8))
+      if (stride > 1 && (pollCount + pollPhase) % stride !== 0 && pollCount <= maxPolls) {
+        pollInFlight = false
+        return
+      }
       if (pollCount > maxPolls) {
         clearInterval(interval)
         delete nb2PollingIntervals.current[requestId]
@@ -21735,7 +22933,7 @@ export default function PortalV2Page() {
           setUser(prev => prev ? { ...prev, ticketBalance: prev.ticketBalance + ticketCost } : prev)
           fetch("/api/admin/use-tickets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "refund", amount: ticketCost }) }).catch(() => {})
         }
-        slotIds.forEach(sid => handleUpdatePending(sid, { status: "failed", error: "Generation timed out" }))
+        slotIds.forEach(sid => handleUpdatePending(sid, failWith("Generation timed out")))
         // Clear from sessionStorage so they don't come back on refresh
         try {
           const stored = localStorage.getItem("pv2-pending-slots")
@@ -21748,10 +22946,14 @@ export default function PortalV2Page() {
         return
       }
       try {
+        // queuedAt + videoMetadata ride along so the server-side DB save can
+        // (a) backdate createdAt to QUEUE time — the feed's ordering key —
+        // and (b) record the generation settings for the info panel
+        const pollSlot = pendingSlotsRef.current.find(s => slotIds.includes(s.slotId))
         const statusRes = await fetch(statusUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ requestId, falEndpoint, prompt, outputFormat, aspectRatio, quality, referenceImageUrls, ticketCost }),
+          body: JSON.stringify({ requestId, falEndpoint, prompt, outputFormat, aspectRatio, quality, referenceImageUrls, ticketCost, queuedAt: pollSlot?.queuedAtMs, videoMetadata }),
           signal: AbortSignal.timeout(15000),
         })
         const statusData = await statusRes.json()
@@ -21811,7 +23013,7 @@ export default function PortalV2Page() {
                 localStorage.setItem("pv2-pending-slots", JSON.stringify(slots.filter(s => !slotIds.includes(s.slotId))))
               }
             } catch {}
-            slotIds.forEach(sid => handleUpdatePending(sid, { status: "failed", error: "RunPod job result expired — generation may have completed. Check the image in your R2 storage." }))
+            slotIds.forEach(sid => handleUpdatePending(sid, failWith("RunPod job result expired — generation may have completed. Check the image in your R2 storage.")))
             pollInFlight = false
             return
           }
@@ -21846,9 +23048,29 @@ export default function PortalV2Page() {
             : statusUrl.includes("wan-27-pro") ? "wan-2.7-pro"
             : statusUrl.includes("gpt-image-2") ? "gpt-image-2"
             : "nano-banana-pro-2"
-          const createdAt = new Date().toISOString()
-          completedImgs.forEach((img, i) => {
-            const tempId = img.dbId ?? (Date.now() + i)
+          completedImgs.forEach((img, imgIdx) => {
+            const tempId = img.dbId ?? nextTempFeedId()
+            // ORDER BY QUEUE TIME: the item inherits the moment its generation
+            // was queued, not when it finished — so a slow flux run and a fast
+            // NB2 run keep their original feed order, live and after refresh
+            const targetSlotObj = pendingSlotsRef.current.find(s => s.slotId === slotIds[imgIdx])
+            const createdAt = new Date(targetSlotObj?.queuedAtMs ?? Date.now()).toISOString()
+            const item: ImageItem = {
+              id: tempId,
+              imageUrl: img.url,
+              r2Key: img.r2Key,
+              prompt,
+              model: modelId,
+              createdAt,
+              aspectRatio,
+              quality,
+              referenceImageUrls: referenceImageUrls.length > 0 ? referenceImageUrls : undefined,
+              videoMetadata: videoMetadata as Record<string, any> | undefined,
+            }
+            // Hand the result to its OWN slot so the existing card just swaps
+            // spinner → image in place (no remount, no reposition)
+            const targetSlot = slotIds[imgIdx]
+            if (targetSlot) handleUpdatePending(targetSlot, { status: "done", doneImage: item })
             handlePrependImage({
               id: tempId,
               imageUrl: img.url,
@@ -21867,7 +23089,7 @@ export default function PortalV2Page() {
               fetch('/api/admin/flux-inference/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...(pass ? { 'x-admin-password': pass } : {}) },
-                body: JSON.stringify({ r2Key: img.r2Key, prompt, videoMetadata, referenceImageUrls }),
+                body: JSON.stringify({ r2Key: img.r2Key, prompt, videoMetadata, referenceImageUrls, createdAt }),
               }).then(r => r.json()).then((data: { id?: number }) => {
                 if (data.id) {
                   setFreshImages(prev => prev.map(fi => fi.id === tempId ? { ...fi, id: data.id! } : fi))
@@ -21875,7 +23097,10 @@ export default function PortalV2Page() {
               }).catch(() => {})
             }
           })
-          slotIds.forEach(sid => handleRemovePending(sid))
+          // Slots are NOT removed here — each one now holds its finished image
+          // (status "done"). Any slot that got no image (fewer results than
+          // slots) is cleared so it doesn't spin forever.
+          slotIds.slice(completedImgs.length).forEach(sid => handleRemovePending(sid))
         } else if (statusData.status === "failed") {
           clearInterval(interval)
           delete nb2PollingIntervals.current[requestId]
@@ -21890,7 +23115,7 @@ export default function PortalV2Page() {
               localStorage.setItem("pv2-pending-slots", JSON.stringify(slots.filter(s => !slotIds.includes(s.slotId))))
             }
           } catch {}
-          slotIds.forEach(sid => handleUpdatePending(sid, { status: "failed", error: statusData.error || "Generation failed" }))
+          slotIds.forEach(sid => handleUpdatePending(sid, failWith(statusData.error || "Generation failed")))
         }
       } catch { /* keep polling on transient error */ } finally { pollInFlight = false }
     }, 5000)
@@ -22335,7 +23560,18 @@ export default function PortalV2Page() {
     let done = 0
     const settled = await runWithConcurrency(toProcess, 4, async (input) => {
       let url: string
-      if (input instanceof File) {
+      if (input instanceof File && input.type.startsWith("video/")) {
+        // Reference VIDEO: through the server video route as-is (100MB cap,
+        // extension preserved — the library detects videos by extension)
+        if (input.size > 100 * 1024 * 1024) throw new Error("Video too large (max 100MB)")
+        const fd = new FormData()
+        fd.append("file", input)
+        const res = await fetch("/api/upload-video-media", { method: "POST", body: fd })
+        if (!res.ok) throw new Error(`Video upload failed (${res.status})`)
+        const data = await res.json()
+        if (!data?.url) throw new Error("Video upload returned no URL")
+        url = data.url as string
+      } else if (input instanceof File) {
         const blob = await prepareRefUpload(input) // full-quality pass-through when possible
         url = await uploadRefBlob(blob)
       } else if (input.url.startsWith("data:")) {
@@ -22431,25 +23667,128 @@ export default function PortalV2Page() {
   // (library refs are permanent R2 URLs — no re-upload needed). Active state is
   // derived from the video ref list, so panel removals un-check the dropdown too.
   const videoRefsEnabled = scannerMode === "video" && !!selectedVideoModel.supportsReferenceVideo
+  // Kling Motion Control: the refs library can supply its motion video
+  const motionRefsEnabled = scannerMode === "video" && !!selectedVideoModel.supportsMotionControl
   const videoActiveRefIds = useMemo(
-    () => refLibrary.filter(r => videoRefImageUrls.includes(r.url)).map(r => r.id),
-    [refLibrary, videoRefImageUrls]
+    () => refLibrary.filter(r =>
+      videoRefImageUrls.includes(r.url) ||
+      videoRefVideoUrls.includes(r.url)
+    ).map(r => r.id),
+    [refLibrary, videoRefImageUrls, videoRefVideoUrls]
   )
+  const motionActiveRefIds = useMemo(
+    () => refLibrary.filter(r => r.url === videoMotionVideoUrl).map(r => r.id),
+    [refLibrary, videoMotionVideoUrl]
+  )
+  // Library video → model input, enforcing each model's duration window.
+  // Too long → the trim popup opens with that model's min/max window.
+  const [refTrim, setRefTrim] = useState<{ url: string; minSec: number; maxSec: number; target: "sd20" | "motion" } | null>(null)
+  const [refVideoNotice, setRefVideoNotice] = useState<string | null>(null)
+  const SD20_REF_MIN_SEC = 2, SD20_REF_MAX_SEC = 15
+  const addLibraryVideoToSD20 = useCallback((url: string, duration: number) => {
+    const label = decodeURIComponent(url.split("/").pop() || "library clip").slice(0, 28)
+    setVideoRefVideoFilenames(f => [...f, label])
+    setVideoRefVideoUrls(u => [...u, url])
+    setVideoRefVideoDuration(d => d + duration)
+  }, [])
+  const activateLibraryVideo = useCallback(async (url: string) => {
+    try {
+      const meta = await measureVideoRef(url)
+      if (videoRefsEnabled) {
+        if (meta.w > 0 && meta.h > 0 && Math.max(meta.w, meta.h) / Math.min(meta.w, meta.h) > 2.5) {
+          setRefVideoNotice(`This clip's shape (${meta.w}×${meta.h}) is outside SeeDance's supported range — clips must be no wider than 2.5:1 and no taller than 1:2.5.`)
+          return
+        }
+        if (videoRefVideoUrls.filter(Boolean).length >= 3) {
+          setRefVideoNotice("SeeDance takes up to 3 reference videos — remove one first.")
+          return
+        }
+        const remaining = SD20_REF_MAX_SEC - videoRefVideoDuration
+        if (remaining < SD20_REF_MIN_SEC) {
+          setRefVideoNotice(`Reference videos are capped at ${SD20_REF_MAX_SEC}s combined and only ${Math.max(0, remaining).toFixed(1)}s is left — remove a clip first.`)
+          return
+        }
+        if (meta.duration <= remaining + 0.25) addLibraryVideoToSD20(url, meta.duration)
+        else setRefTrim({ url, minSec: SD20_REF_MIN_SEC, maxSec: Math.floor(remaining * 10) / 10, target: "sd20" })
+      } else if (motionRefsEnabled) {
+        const maxSec = videoCharacterOrientation === "video" ? 30 : 10
+        if (meta.duration <= maxSec + 0.25) {
+          setVideoMotionVideoPreview(url)
+          setVideoMotionVideoUrl(url)
+          setVideoMotionVideoDuration(meta.duration)
+        } else {
+          setRefTrim({ url, minSec: 2, maxSec, target: "motion" })
+        }
+      }
+    } catch {
+      setRefVideoNotice("Couldn't read that video's metadata — try re-uploading it.")
+    }
+  }, [videoRefsEnabled, motionRefsEnabled, videoRefVideoUrls, videoRefVideoDuration, videoCharacterOrientation, addLibraryVideoToSD20])
+  // Trim finished: route the shortened clip to whichever model asked for it
+  const handleTrimmed = useCallback((url: string, duration: number) => {
+    const target = refTrim?.target
+    setRefTrim(null)
+    if (target === "sd20") addLibraryVideoToSD20(url, duration)
+    else if (target === "motion") {
+      setVideoMotionVideoPreview(url)
+      setVideoMotionVideoUrl(url)
+      setVideoMotionVideoDuration(duration)
+    }
+  }, [refTrim, addLibraryVideoToSD20])
   const handleActivateRefVideo = useCallback((id: string) => {
     const img = refLibrary.find(r => r.id === id)
     if (!img) return
+    // VIDEO refs go to the model's video inputs (duration-gated, may open trim)
+    if (isVideoRefUrl(img.url)) { void activateLibraryVideo(img.url); return }
     if (videoRefImageUrls.includes(img.url)) return
     if (videoRefImageUrls.filter(Boolean).length >= 9) return
     setVideoRefImagePreviews(p => [...p, img.url])
     setVideoRefImageUrls(u => [...u, img.url])
-  }, [refLibrary, videoRefImageUrls])
+  }, [refLibrary, videoRefImageUrls, activateLibraryVideo])
   const handleDeactivateRefVideo = useCallback((id: string) => {
     const img = refLibrary.find(r => r.id === id)
     if (!img) return
+    if (isVideoRefUrl(img.url)) {
+      const vIdx = videoRefVideoUrls.findIndex(u => u === img.url)
+      if (vIdx !== -1) {
+        const dur = videoRefMetaCache.get(img.url)?.duration ?? 0
+        setVideoRefVideoFilenames(f => f.filter((_, j) => j !== vIdx))
+        setVideoRefVideoUrls(u => u.filter((_, j) => j !== vIdx))
+        setVideoRefVideoDuration(d => Math.max(0, d - dur))
+      }
+      return
+    }
     const idx = videoRefImageUrls.findIndex(u => u === img.url)
     if (idx === -1) return
     handleRemoveRefImage(idx) // reuses index-shift logic (keeps S/E frame tags aligned)
-  }, [refLibrary, videoRefImageUrls, handleRemoveRefImage])
+  }, [refLibrary, videoRefImageUrls, videoRefVideoUrls, handleRemoveRefImage])
+  // Image models: video refs can't be image references — explain instead of
+  // silently attaching a video URL the model would reject
+  const handleActivateRefImageOnly = useCallback((id: string) => {
+    const img = refLibrary.find(r => r.id === id)
+    if (img && isVideoRefUrl(img.url)) {
+      setRefVideoNotice("Video references work with video models — switch to SeeDance 2.0 or Kling Motion Control to use this clip.")
+      return
+    }
+    handleActivateRef(id)
+  }, [refLibrary, handleActivateRef])
+  // Kling Motion Control: only VIDEO refs activate (its motion source); the
+  // character image comes from the model panel's own upload
+  const handleActivateRefMotion = useCallback((id: string) => {
+    const img = refLibrary.find(r => r.id === id)
+    if (!img) return
+    if (isVideoRefUrl(img.url)) { void activateLibraryVideo(img.url); return }
+    setRefVideoNotice("Motion Control takes a motion VIDEO from the library — use the Character Image upload in the model panel for images.")
+  }, [refLibrary, activateLibraryVideo])
+  const handleDeactivateRefMotion = useCallback((id: string) => {
+    const img = refLibrary.find(r => r.id === id)
+    if (!img) return
+    if (img.url === videoMotionVideoUrl) {
+      setVideoMotionVideoPreview(null)
+      setVideoMotionVideoUrl(null)
+      setVideoMotionVideoDuration(null)
+    }
+  }, [refLibrary, videoMotionVideoUrl])
 
   // Edited image: free the old slot first (soft clear — admin keeps the original),
   // then upload the edited version and swap it into the same position.
@@ -22502,6 +23841,32 @@ export default function PortalV2Page() {
   // Dev-Tier multi-layer stacks: optimistic state update + debounced persist
   // (opacity sliders fire continuously — one POST per ref after the drag settles)
   const layersSaveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  // Info panel "Edit" (Dev Tier): open the layer canvas with the generation
+  // stacked over the reference that guided it. Uses the library ref as the
+  // base when it still exists (its manual layers preserved, the generation
+  // injected on top); the injected layer stays transient until saved.
+  const [genEditCanvas, setGenEditCanvas] = useState<{ ref: RefImage; stack: RefLayerStack } | null>(null)
+  // Frame Extractor (taskbar "Frames" button)
+  const [framesOpen, setFramesOpen] = useState(false)
+  const handleEditCanvas = useCallback((img: ImageItem) => {
+    const refUrl = img.referenceImageUrls?.[0]
+    if (!refUrl || !img.imageUrl?.startsWith("https://")) return
+    const libRef = refLibraryRef.current.find(r => r.url === refUrl)
+    const base: RefImage = libRef ?? { id: `transient-${Date.now()}`, url: refUrl }
+    const manual = (libRef?.layers?.layers ?? []).filter(l => !l.auto)
+    const stack: RefLayerStack = {
+      enabled: true,
+      ...(libRef?.layers?.baseInLayer
+        ? { baseInLayer: true, baseW: libRef.layers.baseW, baseH: libRef.layers.baseH }
+        : {}),
+      layers: [...manual, {
+        id: `gen-${img.id}`, name: `Generation ${img.id}`, visible: true, opacity: 1,
+        items: [{ id: `gen-${img.id}-0`, url: img.imageUrl }],
+      }],
+    }
+    setGenEditCanvas({ ref: base, stack })
+  }, [])
+
   const handleSaveRefLayers = useCallback((id: string, stack: RefLayerStack | null) => {
     setRefLibrary(prev => prev.map(r => r.id === id ? { ...r, layers: stack } : r))
     if (!/^\d+$/.test(id)) return
@@ -22691,9 +24056,16 @@ export default function PortalV2Page() {
           // request id) — the submit died before returning one, so nothing can
           // ever resolve them and they'd spin forever. Their real outcome is
           // already captured by the server-side fails / images feeds.
+          // ALSO drop slots older than 3h (or with no recorded queue time):
+          // stale slots from interrupted sessions were re-polling long-expired
+          // jobs on every load, failing one by one — a steady drip of new
+          // error cards while the user wasn't generating anything at all.
+          const cutoff = Date.now() - 3 * 3600 * 1000
           const slots = (JSON.parse(stored) as PendingSlot[])
             .filter(s => s.queueId != null || s.queueJobId != null || !!s.nb2RequestId)
+            .filter(s => s.queuedAtMs != null && s.queuedAtMs > cutoff)
           setPendingSlots(slots)
+          try { localStorage.setItem("pv2-pending-slots", JSON.stringify(slots)) } catch {}
         }
       } catch {}
       // Failed tiles now come from the server per-account (see the
@@ -22788,6 +24160,9 @@ export default function PortalV2Page() {
   // Dismiss a failed tile — removes it from the feed permanently (per-account)
   const handleDismissFail = useCallback((item: ImageItem) => {
     setSavedFails(prev => prev.filter(f => f.id !== item.id))
+    // A failed generation now keeps its original card (the pending slot), so
+    // dismissing has to retire that too — otherwise the error tile stays put
+    setPendingSlots(prev => prev.filter(s => s.failItemId !== item.id))
     const ids = item.queueRowId ? [item.queueRowId] : []
     const falRequestIds = !item.queueRowId && item.failKey?.startsWith('rf-') ? [item.failKey.slice(3)] : []
     if (ids.length || falRequestIds.length) {
@@ -22798,6 +24173,37 @@ export default function PortalV2Page() {
       }).catch(() => {})
     }
   }, [])
+
+  // Feed dropdown "Clear Errors": dismiss EVERY error card in one click —
+  // saved fails (image + video), failed pending slots, and failed session
+  // items — locally and server-side (dismissedAt), so they don't come back
+  // on refresh or on another device.
+  const handleClearAllErrors = useCallback(() => {
+    const ids: number[] = []
+    const falRequestIds: string[] = []
+    const collect = (queueRowId?: number, failKey?: string, nb2RequestId?: string) => {
+      if (queueRowId != null) ids.push(queueRowId)
+      else if (failKey?.startsWith('rf-')) falRequestIds.push(failKey.slice(3))
+      else if (nb2RequestId) falRequestIds.push(nb2RequestId)
+    }
+    savedFails.forEach(f => collect(f.queueRowId, f.failKey))
+    savedVideoFails.forEach(f => collect(f.queueRowId, f.failKey))
+    pendingSlots.forEach(s => {
+      if (s.status === 'failed') collect(s.queueId ?? s.queueJobId ?? undefined, undefined, s.nb2RequestId)
+    })
+    setSavedFails([])
+    setSavedVideoFails([])
+    setVideoItems(prev => prev.filter(v => !v.failed))
+    setFreshImages(prev => prev.filter(i => !i.failed))
+    setPendingSlots(prev => prev.filter(s => s.status !== 'failed'))
+    if (ids.length || falRequestIds.length) {
+      fetch('/api/user/failed-generations', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: [...new Set(ids)], falRequestIds: [...new Set(falRequestIds)] }),
+      }).catch(() => {})
+    }
+  }, [savedFails, savedVideoFails, pendingSlots])
 
   const handleDismissVideoFail = useCallback((item: VideoItem) => {
     setSavedVideoFails(prev => prev.filter(f => f.id !== item.id))
@@ -23337,14 +24743,14 @@ export default function PortalV2Page() {
               open={openDropdown === "refs"}
               onToggle={() => toggle("refs")}
               library={refLibrary}
-              activeIds={videoRefsEnabled ? videoActiveRefIds : activeRefIds}
-              modelMaxRefs={scannerMode === "chat" ? (chatRefCap ?? 20) : videoRefsEnabled ? 9 : selectedModel.maxReferenceImages}
+              activeIds={videoRefsEnabled ? videoActiveRefIds : motionRefsEnabled ? motionActiveRefIds : activeRefIds}
+              modelMaxRefs={scannerMode === "chat" ? (chatRefCap ?? 20) : videoRefsEnabled ? 12 : motionRefsEnabled ? 1 : selectedModel.maxReferenceImages}
               onUploadFiles={handleLibraryUploadFiles}
               onDelete={handleLibraryDelete}
               onDeleteMultiple={handleLibraryDeleteMultiple}
               onClearAll={handleLibraryClearAll}
-              onActivate={videoRefsEnabled ? handleActivateRefVideo : handleActivateRef}
-              onDeactivate={videoRefsEnabled ? handleDeactivateRefVideo : handleDeactivateRef}
+              onActivate={videoRefsEnabled ? handleActivateRefVideo : motionRefsEnabled ? handleActivateRefMotion : handleActivateRefImageOnly}
+              onDeactivate={videoRefsEnabled ? handleDeactivateRefVideo : motionRefsEnabled ? handleDeactivateRefMotion : handleDeactivateRef}
               onEditSave={handleEditRef}
               canUseLayers={hasEffectiveDevAccess}
               onSaveLayers={handleSaveRefLayers}
@@ -23354,7 +24760,7 @@ export default function PortalV2Page() {
               onCreateFolder={handleCreateRefFolder}
               onRenameFolder={handleRenameRefFolder}
               onDeleteFolder={handleDeleteRefFolder}
-              disabled={scannerMode === "video" && !videoRefsEnabled}
+              disabled={scannerMode === "video" && !videoRefsEnabled && !motionRefsEnabled}
               libraryLimit={refLibraryLimit}
             />
             <ShopDropdown
@@ -23403,7 +24809,32 @@ export default function PortalV2Page() {
               adminFilterCount={adminFeedFilterCount}
               adminFilters={adminFeedFilters}
               onApplyAdminFilters={applyAdminFeedFilters}
+              imageModelGroups={IMAGE_MODEL_GROUPS}
+              videoModelGroups={VIDEO_MODEL_GROUPS}
+              adminImageModelGroups={isAdminAccount ? ADMIN_IMAGE_MODEL_GROUPS : []}
+              adminVideoModelGroups={isAdminAccount ? ADMIN_VIDEO_MODEL_GROUPS : []}
+              hiddenImageModels={feedHiddenImageModels}
+              onHiddenImageModelsChange={handleHiddenImageModelsChange}
+              hiddenVideoModels={feedHiddenVideoModels}
+              onHiddenVideoModelsChange={handleHiddenVideoModelsChange}
+              errorCount={
+                savedFails.length + savedVideoFails.length
+                + pendingSlots.filter(s => s.status === "failed" && !savedFails.some(f => f.id === s.failItemId)).length
+              }
+              onClearErrors={handleClearAllErrors}
             />
+            {/* Frame Extractor — pull the sharpest frames out of a video */}
+            <div className="relative flex-none min-w-[90px] sm:flex-1">
+              <button
+                onClick={() => setFramesOpen(true)}
+                title="Extract frames from a video — auto-ranked by sharpness"
+                className={`flex items-center justify-center gap-2 w-full py-2 rounded-lg text-sm font-bold tracking-wide text-white transition-all ${
+                  framesOpen ? "bg-white/15" : "hover:bg-white/5"}`}
+              >
+                <Film size={15} className="text-slate-300" />
+                Frames
+              </button>
+            </div>
             {/* AI Chat Hub moved to the logo dropdown's admin-only section */}
             </div>
           </div>
@@ -23475,6 +24906,69 @@ export default function PortalV2Page() {
         />
       )}
 
+      {/* Frame Extractor — taskbar "Frames" button */}
+      {framesOpen && (
+        <FrameExtractorModal
+          onClose={() => setFramesOpen(false)}
+          onAddRefs={(files) => addRefsToAccount(files, null, {})}
+        />
+      )}
+
+      {/* Dev Tier gen-over-ref canvas: opened from the info panel's Edit
+          button — the generation layered over its reference image */}
+      {genEditCanvas && (
+        <RefImageEditorModal
+          image={genEditCanvas.ref}
+          canUseLayers={hasEffectiveDevAccess}
+          layerStack={genEditCanvas.stack}
+          onLayerStackChange={(st) => {
+            if (/^\d+$/.test(genEditCanvas.ref.id)) handleSaveRefLayers(genEditCanvas.ref.id, st)
+            setGenEditCanvas(cur => cur ? { ...cur, stack: st ?? { enabled: true, layers: [] } } : cur)
+          }}
+          onApply={(newUrl) => {
+            if (/^\d+$/.test(genEditCanvas.ref.id)) {
+              // Library ref: Apply flattens into a re-created reference (same
+              // flow as the dropdown editor)
+              void Promise.resolve(handleEditRef(genEditCanvas.ref.id, newUrl)).then(next => {
+                if (next) setGenEditCanvas(cur => cur ? { ...cur, ref: next } : cur)
+                else setGenEditCanvas(null)
+              })
+            } else {
+              // Transient base (ref no longer in the library): save the
+              // flattened result as a new library reference
+              void addRefsToAccount([{ url: newUrl }], null, { autoActivate: true })
+              setGenEditCanvas(null)
+            }
+          }}
+          onClose={() => setGenEditCanvas(null)}
+        />
+      )}
+
+      {/* Reference-video trim popup: a library clip longer than the selected
+          model's input window gets shortened here before activating */}
+      {refTrim && (
+        <VideoTrimModal
+          url={refTrim.url}
+          minSec={refTrim.minSec}
+          maxSec={refTrim.maxSec}
+          modelName={selectedVideoModel.name}
+          onCancel={() => setRefTrim(null)}
+          onDone={handleTrimmed}
+        />
+      )}
+      {/* Reference-video notices (wrong model, limits, unreadable file) */}
+      {refVideoNotice && (
+        <div className="fixed inset-0 z-[300] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setRefVideoNotice(null)}>
+          <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#0a101d] p-4 space-y-3" onClick={e => e.stopPropagation()}>
+            <p className="text-[12px] text-slate-300 leading-relaxed">{refVideoNotice}</p>
+            <button onClick={() => setRefVideoNotice(null)}
+              className="w-full py-2 rounded-lg bg-white/10 border border-white/25 text-[12px] font-bold text-white hover:bg-white/15 transition-all">
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Admin only: shared Add to Bucket modal (same one as /admin/dataset) */}
       {addToBucketOpen && isAdminAccount && (
         <AddToBucketModal
@@ -23537,6 +25031,7 @@ export default function PortalV2Page() {
           <div className="pb-36">
             <ImageGrid
               key={imageGridKey}
+              modelFilter={imageModelFilter}
               signedIn={user !== null}
               pendingSlots={pendingSlots}
               freshImages={freshImages}
@@ -23544,7 +25039,7 @@ export default function PortalV2Page() {
               onDismissFail={handleDismissFail}
               onRetryFail={handleRetryFail}
               onRetryPending={handleRetryPendingSlot}
-              tileBorders={feedTileBorders ? feedBorderMode : false}
+              tileBorders={isAdminAccount && feedTileBorders ? feedBorderMode : false}
               onImageClick={setSelectedImage}
               onPendingClick={setPendingDetail}
               selectMode={selectMode}
@@ -23701,6 +25196,7 @@ export default function PortalV2Page() {
           {/* Feed — full width on mobile, flex-1 on desktop */}
           <div className="flex-1 overflow-y-auto pb-24">
             <VideoFeed
+              modelFilter={videoModelFilter}
               pendingSlots={videoPendingSlots}
               items={videoItems}
               savedFails={savedVideoFails}
@@ -23719,7 +25215,7 @@ export default function PortalV2Page() {
               masonryMode={feedMasonryMode}
               tileRes={feedTileRes}
               autoplay={feedVideoAutoplay}
-              tileBorders={feedTileBorders ? feedBorderMode : false}
+              tileBorders={isAdminAccount && feedTileBorders ? feedBorderMode : false}
             />
           </div>
 
@@ -23875,6 +25371,8 @@ export default function PortalV2Page() {
           onRescan={handleRescan}
           onUsePrompt={(text) => { handleUsePrompt(text); setSelectedImage(null) }}
           onDismissFail={handleDismissFail}
+          onEditCanvas={handleEditCanvas}
+          editCanvasLocked={!hasEffectiveDevAccess}
           navList={imageNavList}
           navIndex={imageNavList.findIndex(img => img.id === selectedImage.id)}
           onNavigate={setSelectedImage}

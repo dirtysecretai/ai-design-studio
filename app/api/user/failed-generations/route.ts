@@ -106,10 +106,29 @@ export async function POST(request: NextRequest) {
     const user = await requireUser()
     if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
 
-    const { prompt, modelId, modelType, error, aspectRatio, quality, referenceImageUrls } = await request.json()
+    const { prompt, modelId, modelType, error, aspectRatio, quality, referenceImageUrls, queuedAt, falRequestId } = await request.json()
     if (!prompt || !modelId || (modelType !== 'image' && modelType !== 'video')) {
       return NextResponse.json({ error: 'Invalid payload' }, { status: 400 })
     }
+
+    // Idempotency: repeat reports of the same dead job (client retries, stale
+    // slots re-failing after a reload) return the EXISTING row instead of
+    // piling up duplicate error cards in the account's feed.
+    if (typeof falRequestId === 'string' && falRequestId.length > 0 && falRequestId.length < 200) {
+      const existing = await prisma.generationQueue.findFirst({
+        where: { userId: user.id, falRequestId, status: 'failed' },
+        select: { id: true },
+      })
+      if (existing) return NextResponse.json({ success: true, id: existing.id, deduped: true })
+    }
+
+    // createdAt = when the generation was QUEUED, not when the failure was
+    // reported. Images are backdated to queue time; if fails were stamped at
+    // failure time instead, a batch's errors would all sort ABOVE its images
+    // after a refresh (fail time > queue time) and bury the real generations.
+    const createdAtOverride = typeof queuedAt === 'number'
+      && queuedAt > Date.now() - 24 * 3600 * 1000 && queuedAt <= Date.now() + 60_000
+      ? new Date(queuedAt) : null
 
     const row = await prisma.generationQueue.create({
       data: {
@@ -130,6 +149,9 @@ export async function POST(request: NextRequest) {
         ticketCost: 0,
         errorMessage: String(error || 'Generation failed').slice(0, 2000),
         completedAt: new Date(),
+        ...(createdAtOverride ? { createdAt: createdAtOverride } : {}),
+        ...(typeof falRequestId === 'string' && falRequestId.length > 0 && falRequestId.length < 200
+          ? { falRequestId } : {}),
       },
       select: { id: true },
     })

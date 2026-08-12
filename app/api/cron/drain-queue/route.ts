@@ -4,9 +4,14 @@ import { promoteNextQueuedJob, FAL_GLOBAL_ID } from '@/lib/fal-queue'
 import { syncActiveCounters } from '@/app/api/admin/queue/stats/route'
 import { processChunk, getBaseUrl } from '@/app/api/admin/auto-caption/jobs/_processor'
 
-// Jobs stuck in 'processing' longer than this are considered dead and are
-// automatically reset so their slots can be reused.
-const STALE_MINUTES = 10
+// Jobs stuck in 'processing' longer than this are CANDIDATES for being reset.
+// Was 10 minutes, which force-failed jobs fal was still happily running —
+// NB2 edit jobs routinely take 6-11 min and video models far longer, so live
+// work was being destroyed and refunded. Nothing is failed now without asking
+// fal first (see verifyWithFal below); this is just the "worth checking" line.
+const STALE_MINUTES = 25
+// Video generation is legitimately slow — give it a much longer leash
+const STALE_MINUTES_VIDEO = 60
 
 /**
  * GET /api/cron/drain-queue
@@ -36,25 +41,61 @@ export async function GET(request: Request) {
     // sync the counter because no in-flight webhook decrements exist for them.
     const staleThreshold = new Date(Date.now() - STALE_MINUTES * 60 * 1000)
 
-    const staleJobs = await prisma.generationQueue.findMany({
+    const staleCandidates = await prisma.generationQueue.findMany({
       where: { status: 'processing', startedAt: { lt: staleThreshold } },
-      select: { id: true },
+      select: { id: true, modelType: true, startedAt: true, falRequestId: true, parameters: true },
     })
 
+    // NEVER fail a job fal is still running (or has finished). Ask fal for the
+    // truth first — a "stuck" job is usually just slow, and killing it threw
+    // away a completed image AND refunded the user for work we actually paid
+    // for. Only jobs fal reports as gone/failed (or that we can't identify) are
+    // reset. Unreachable fal = leave it alone and re-check next minute.
+    const verifyWithFal = async (j: typeof staleCandidates[number]): Promise<'alive' | 'dead' | 'unknown'> => {
+      const params = j.parameters as { falEndpoint?: string } | null
+      const ep = params?.falEndpoint
+      if (!j.falRequestId || !ep || !process.env.FAL_KEY) return 'dead' // never submitted → safe to fail
+      try {
+        // fal status lives under owner/app — sub-paths like /edit 405
+        const baseApp = ep.split('/').slice(0, 2).join('/')
+        const res = await fetch(`https://queue.fal.run/${baseApp}/requests/${j.falRequestId}/status`, {
+          headers: { Authorization: `Key ${process.env.FAL_KEY}` },
+          signal: AbortSignal.timeout(8000),
+        })
+        if (!res.ok) return res.status === 404 ? 'dead' : 'unknown'
+        const d = await res.json() as { status?: string }
+        if (d.status === 'COMPLETED' || d.status === 'IN_PROGRESS' || d.status === 'IN_QUEUE') return 'alive'
+        return 'dead'
+      } catch { return 'unknown' }
+    }
+
+    const toFail: number[] = []
+    let sparedAlive = 0
+    for (const j of staleCandidates) {
+      // Video gets a much longer grace period before we even consider it stale
+      const limitMin = j.modelType === 'video' ? STALE_MINUTES_VIDEO : STALE_MINUTES
+      if (j.startedAt && Date.now() - j.startedAt.getTime() < limitMin * 60 * 1000) continue
+      const verdict = await verifyWithFal(j)
+      if (verdict === 'dead') toFail.push(j.id)
+      else sparedAlive++
+    }
+
     let staleReset = 0
-    if (staleJobs.length > 0) {
+    if (toFail.length > 0) {
       await prisma.generationQueue.updateMany({
-        where: { id: { in: staleJobs.map(j => j.id) } },
+        where: { id: { in: toFail } },
         data: {
           status: 'failed',
           completedAt: new Date(),
-          errorMessage: `Auto-reset by cron: stuck in processing for ${STALE_MINUTES}+ minutes`,
+          errorMessage: 'Auto-reset by cron: provider reports the job is no longer running',
         },
       })
       // Safe to sync here — no pending webhook decrements for these dead jobs
       await syncActiveCounters()
-      staleReset = staleJobs.length
-      console.log(`[cron-drain] Reset ${staleReset} stale job(s) and synced counters`)
+      staleReset = toFail.length
+      console.log(`[cron-drain] Reset ${staleReset} confirmed-dead job(s); spared ${sparedAlive} still live at fal`)
+    } else if (sparedAlive > 0) {
+      console.log(`[cron-drain] ${sparedAlive} long-running job(s) still alive at fal — left running`)
     }
 
     // ── 2. Promote queued jobs into free slots ───────────────────────────────

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { getUserFromSession } from '@/lib/auth'
 import { cookies } from 'next/headers'
 import { checkIsAdmin } from '@/lib/admin-check'
+import { uploadToR2 } from '@/lib/r2'
 
 const RUNPOD_API   = 'https://api.runpod.ai/v2'
 const COMFYUI_URL  = 'http://localhost:8188'
@@ -262,6 +263,35 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `RunPod error: ${err}` }, { status: res.status })
     }
     const data = await res.json() as { id: string }
+
+    // METADATA SIDECAR — the DB row used to be written only by the browser when
+    // its poller saw "completed". Close the tab, sleep the phone, or switch
+    // devices and the finished image was orphaned in R2 forever. Writing the
+    // prompt + settings here lets /reconcile rebuild the row server-side from
+    // the deterministic output key, with no browser involved.
+    try {
+      await uploadToR2(
+        `inference/meta/${data.id}.json`,
+        Buffer.from(JSON.stringify({
+          jobId:      data.id,
+          prompt:     body.prompt ?? '',
+          createdAt:  new Date().toISOString(),
+          seed,
+          width, height,
+          checkpoint: body.checkpoint ?? '',
+          loras:      loras.map(l => ({ key: l.r2_key ?? l.name, strength: l.strength })),
+          steps:      body.steps, guidance: body.guidance,
+          sampler:    body.sampler, upscale: body.upscale,
+          pipeline_steps: body.pipeline_steps ?? [],
+          adetailer:  body.adetailer, adetailer_strength: body.adetailer_strength,
+          img2img:    !!body.img2img_image, img2img_strength: body.img2img_strength,
+        })),
+        'application/json',
+      )
+    } catch (e) {
+      console.error('[flux/generate] sidecar write failed (non-fatal):', e)
+    }
+
     // Return the resolved seed so the client can record it (a -1/"random"
     // request gets its actual value here) — enables exact rescan later
     return NextResponse.json({ mode: 'runpod', job_id: data.id, seed })

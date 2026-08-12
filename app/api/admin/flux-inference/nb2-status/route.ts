@@ -1,4 +1,4 @@
-﻿import { NextResponse } from 'next/server'
+import { NextResponse } from 'next/server'
 import { S3Client, HeadObjectCommand } from '@aws-sdk/client-s3'
 import { checkAdminRequest } from '@/lib/admin-check'
 
@@ -9,7 +9,7 @@ const PUBLIC_URL = (process.env.R2_PUBLIC_URL || '').replace(/\/$/, '')
 // DETERMINISTIC key (inference/outputs/<jobId>.png). RunPod purges job status
 // shortly after workers scale down, so a finished job can 404 before the
 // client ever saw "completed" (tab asleep, page closed). The file in R2 is
-// the truth â€” if it exists, the job completed.
+// the truth — if it exists, the job completed.
 async function r2OutputCheck(jobId: string): Promise<string | null> {
   if (!process.env.R2_ENDPOINT || !process.env.R2_ACCESS_KEY_ID || !process.env.R2_BUCKET_NAME) return null
   try {
@@ -28,7 +28,7 @@ async function r2OutputCheck(jobId: string): Promise<string | null> {
   } catch { return null }
 }
 
-// POST â€” called by startNb2SlotPolling with { requestId, ... }
+// POST — called by startNb2SlotPolling with { requestId, ... }
 // Returns { status: 'processing' | 'completed' | 'failed', images?: [{url, dbId}], error? }
 export async function POST(req: Request) {
   if (!await checkAdminRequest(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -45,7 +45,7 @@ export async function POST(req: Request) {
   })
   if (!res.ok) {
     // 404: either brief registration delay after /run submit, or job was purged
-    // post-completion. Check R2 for the output first â€” if the file exists the
+    // post-completion. Check R2 for the output first — if the file exists the
     // job COMPLETED and this must not be reported as missing.
     if (res.status === 404) {
       const r2Key = await r2OutputCheck(jobId)
@@ -82,7 +82,7 @@ export async function POST(req: Request) {
   if (status === 'completed') {
     const r2Key = data.output?.output_r2_key
     if (!r2Key) {
-      // Handler returned success=False â€” surface its error message, not a generic one
+      // Handler returned success=False — surface its error message, not a generic one
       const handlerErr = data.output?.error ?? 'Job completed but produced no output (check worker logs)'
       return NextResponse.json({ status: 'failed', error: handlerErr })
     }
@@ -95,7 +95,7 @@ export async function POST(req: Request) {
   }
 
   // queued: still IN_QUEUE (no worker assigned yet). That alone is NOT a cold
-  // start â€” the queue also backs up when every warm worker is busy. Check the
+  // start — the queue also backs up when every warm worker is busy. Check the
   // endpoint health: only report coldBooting when a worker is initializing.
   if (data.status === 'IN_QUEUE') {
     let coldBooting = false
@@ -108,7 +108,7 @@ export async function POST(req: Request) {
         const hd = await h.json() as { workers?: { initializing?: number } }
         coldBooting = (hd.workers?.initializing ?? 0) > 0
       }
-    } catch { /* health unavailable â€” don't guess cold */ }
+    } catch { /* health unavailable — don't guess cold */ }
     return NextResponse.json({ status: 'processing', workerId, queued: true, coldBooting })
   }
   return NextResponse.json({ status: 'processing', workerId })
