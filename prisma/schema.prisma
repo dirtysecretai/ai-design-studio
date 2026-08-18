@@ -223,6 +223,7 @@ model GeneratedImage {
   markedForTraining  Boolean  @default(false)
   adminTags          String[]
   adminCaption       String?  @db.Text
+  captionSections    Json?    // { prompt?, tags?, noteOn?, note? } — composable training-caption sections (DDL out-of-band via add-caption-sections.js)
 
   bucketImages       DatasetBucketImage[]
   contentReports     ContentReport[]

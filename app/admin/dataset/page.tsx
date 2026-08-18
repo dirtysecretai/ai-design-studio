@@ -14,6 +14,7 @@ import { AddToBucketModal, type Bucket, type BucketFolder } from "@/components/A
 import { MultiFilterSelect } from "@/components/MultiFilterSelect"
 import { ReferencePanel } from "./ReferencePanel"
 import { SiteLogoBox } from "@/components/SitePageHeader"
+import { AUTOFILL_MODELS, autofillModelLabel } from "@/lib/autofill-models"
 
 const UPLOADS_BUCKET_NAME = '__uploads__'
 
@@ -93,6 +94,8 @@ interface ImageRecord {
     feedbackText: string | null
     createdAt: string
   } | null
+  // Composable training-caption sections (null = autofill caption only)
+  captionSections?: { prompt?: boolean; tags?: boolean; noteOn?: boolean; note?: string } | null
 }
 
 // Bucket / BucketFolder types + AddToBucketModal are shared with portal-v2
@@ -572,25 +575,44 @@ function DetailModal({ img, suggestions, onClose, onSave }: {
   img: ImageRecord
   suggestions: string[]
   onClose: () => void
-  onSave: (id: number, tags: string[], caption: string | null, marked: boolean) => Promise<void>
+  onSave: (id: number, tags: string[], caption: string | null, marked: boolean, sections: ImageRecord['captionSections']) => Promise<void>
 }) {
   const [tags,    setTags]    = useState<string[]>(img.adminTags)
   const [caption, setCaption] = useState(img.adminCaption ?? "")
   const [marked,  setMarked]  = useState(img.markedForTraining)
+  // Composable training-caption sections (autofill caption is always the base)
+  const [secPrompt, setSecPrompt] = useState(!!img.captionSections?.prompt)
+  const [secTags,   setSecTags]   = useState(!!img.captionSections?.tags)
+  const [secNoteOn, setSecNoteOn] = useState(!!img.captionSections?.noteOn)
+  const [secNote,   setSecNote]   = useState(img.captionSections?.note ?? "")
   const [saving,  setSaving]  = useState(false)
   const [imgErr,  setImgErr]  = useState(false)
   const [copied,  setCopied]  = useState<string | null>(null)
   const isVideo = img.imageUrl?.match(/\.(mp4|webm|mov)$/i)
 
+  const sectionsOut: ImageRecord['captionSections'] =
+    (secPrompt || secTags || secNoteOn || secNote.trim())
+      ? { ...(secPrompt ? { prompt: true } : {}), ...(secTags ? { tags: true } : {}), ...(secNoteOn ? { noteOn: true } : {}), ...(secNote.trim() ? { note: secNote } : {}) }
+      : null
+
   const dirty = JSON.stringify(tags) !== JSON.stringify(img.adminTags)
     || (caption.trim() || null) !== img.adminCaption
     || marked !== img.markedForTraining
+    || JSON.stringify(sectionsOut) !== JSON.stringify(img.captionSections ?? null)
 
   async function handleSave() {
     setSaving(true)
-    await onSave(img.id, tags, caption.trim() || null, marked)
+    await onSave(img.id, tags, caption.trim() || null, marked, sectionsOut)
     setSaving(false)
   }
+
+  // Live preview of the composed training txt (mirrors lib/caption-compose)
+  const composedPreview = [
+    caption.trim(),
+    ...(secPrompt && img.prompt?.trim() ? [img.prompt.trim()] : []),
+    ...(secNoteOn && secNote.trim() ? [secNote.trim()] : []),
+    ...(secTags && tags.length ? [tags.join(", ")] : []),
+  ].filter(Boolean).join("\n\n")
 
   function copyText(text: string, key: string) {
     navigator.clipboard.writeText(text).then(() => {
@@ -848,6 +870,48 @@ function DetailModal({ img, suggestions, onClose, onSave }: {
                     className="w-full rounded-lg bg-white/[0.05] border border-white/[0.08] px-3 py-2 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-cyan-500/40 resize-none"
                   />
                 </div>
+
+                {/* ── Training txt sections — per-image composition toggles ── */}
+                <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5 space-y-2">
+                  <p className="text-[10px] text-slate-500 uppercase tracking-wider">Training txt sections</p>
+                  <p className="text-[9.5px] text-slate-600 leading-relaxed">
+                    The caption above is always the base. Toggle extra sections into this image&apos;s training txt — clean paragraphs, no labels.
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button onClick={() => setSecPrompt(v => !v)}
+                      title={img.prompt ? `Original prompt: ${img.prompt.slice(0, 140)}` : "No original prompt stored"}
+                      className={`px-2 py-1 rounded-md border text-[10px] transition-colors ${
+                        secPrompt ? "bg-cyan-500/15 border-cyan-500/30 text-cyan-300" : "bg-white/[0.03] border-white/[0.08] text-slate-500 hover:text-white"}`}>
+                      + Original prompt
+                    </button>
+                    <button onClick={() => setSecTags(v => !v)}
+                      className={`px-2 py-1 rounded-md border text-[10px] transition-colors ${
+                        secTags ? "bg-cyan-500/15 border-cyan-500/30 text-cyan-300" : "bg-white/[0.03] border-white/[0.08] text-slate-500 hover:text-white"}`}>
+                      + Tags
+                    </button>
+                    <button onClick={() => setSecNoteOn(v => !v)}
+                      className={`px-2 py-1 rounded-md border text-[10px] transition-colors ${
+                        secNoteOn ? "bg-cyan-500/15 border-cyan-500/30 text-cyan-300" : "bg-white/[0.03] border-white/[0.08] text-slate-500 hover:text-white"}`}>
+                      + Curator note
+                    </button>
+                  </div>
+                  {secNoteOn && (
+                    <textarea value={secNote} onChange={e => setSecNote(e.target.value)}
+                      placeholder="Your natural phrasing for this image — e.g. Tony Bulgoni in his red and white super suit…"
+                      rows={2}
+                      className="w-full rounded-lg bg-white/[0.05] border border-cyan-500/20 px-2.5 py-1.5 text-[11px] text-white placeholder:text-slate-600 focus:outline-none focus:border-cyan-500/40 resize-none"
+                    />
+                  )}
+                  {(secPrompt || secTags || (secNoteOn && secNote.trim())) && (
+                    <div>
+                      <p className="text-[9px] text-slate-600 uppercase tracking-wider mb-1">Composed preview</p>
+                      <pre className="max-h-32 overflow-y-auto whitespace-pre-wrap rounded-lg bg-black/40 border border-white/[0.06] px-2.5 py-2 text-[10px] leading-relaxed text-slate-300 font-sans">
+                        {composedPreview || "(empty)"}
+                      </pre>
+                    </div>
+                  )}
+                </div>
+
                 <button onClick={() => setMarked(v => !v)}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs transition-all
                     ${marked
@@ -969,8 +1033,8 @@ function BulkModal({ mode, count, suggestions, onClose, onApply }: {
 
 // ─── Auto-fill panel ──────────────────────────────────────────────────────────
 
-type AutoFillMode  = 'caption' | 'tags' | 'flux'
-type AutoFillModel = 'pro' | 'flash'
+type AutoFillMode  = 'caption' | 'tags' | 'flux' | 'append'
+type AutoFillModel = string // key into AUTOFILL_MODELS (lib/autofill-models)
 
 interface AutoFillEvent {
   type:       'start' | 'processing' | 'result' | 'skip' | 'error' | 'done'
@@ -1092,7 +1156,7 @@ function AutoFillPanel({ selected, imageUrlById, onClose, onItemSaved, onJobChan
         const entries: RunEntry[] = jobs
           .filter((j: any) => j.status !== 'done' && j.status !== 'cancelled')
           .map((j: any) => {
-            const modeLabel = j.mode === 'flux' ? 'FLUX' : j.mode === 'caption' ? 'Caption' : 'Tags'
+            const modeLabel = j.mode === 'flux' ? 'FLUX' : j.mode === 'append' ? 'Append' : j.mode === 'caption' ? 'Caption' : 'Tags'
             const tag = j.triggerWord || (j.curatorContext ? j.curatorContext.slice(0, 24) : null)
             return {
               jobId:          j.id,
@@ -1195,7 +1259,7 @@ function AutoFillPanel({ selected, imageUrlById, onClose, onItemSaved, onJobChan
   async function addToQueue() {
     if (count === 0) return
     const ids = Array.from(selected)
-    const modeLabel    = mode === 'flux' ? 'FLUX' : mode === 'caption' ? 'Caption' : 'Tags'
+    const modeLabel    = mode === 'flux' ? 'FLUX' : mode === 'append' ? 'Append' : mode === 'caption' ? 'Caption' : 'Tags'
     const triggerLabel = contextTags.length ? contextTags[0] : ''
     const label        = triggerLabel ? `${modeLabel} · ${triggerLabel}` : `${modeLabel} · ${ids.length} images`
 
@@ -1461,14 +1525,19 @@ function AutoFillPanel({ selected, imageUrlById, onClose, onItemSaved, onJobChan
         <div className="px-4 pt-3 pb-3 space-y-2.5 border-b border-white/[0.05]">
 
           {/* Mode */}
-          <div className="flex gap-1.5">
+          <div className="grid grid-cols-2 gap-1.5">
             {([
               { id: 'caption', label: 'Caption',      active: 'bg-white/[0.12] border-white/30 text-white' },
               { id: 'tags',    label: 'Tags',         active: 'bg-white/[0.12] border-white/30 text-white' },
               { id: 'flux',    label: 'FLUX Caption', active: 'bg-amber-500/15 border-amber-500/30 text-amber-300' },
+              { id: 'append',  label: 'Append Edit',  active: 'bg-violet-500/15 border-violet-500/30 text-violet-300' },
             ] as const).map(m => (
-              <button key={m.id} onClick={() => setMode(m.id)}
-                className={`flex-1 py-1.5 rounded-lg border text-[10px] font-medium transition-all
+              <button key={m.id} onClick={() => {
+                  setMode(m.id)
+                  // Append reuses `advanced` as its naming flag — default it ON
+                  if (m.id === 'append') setAdvanced(true)
+                }}
+                className={`py-1.5 rounded-lg border text-[10px] font-medium transition-all
                   ${mode === m.id ? m.active : 'bg-white/[0.03] border-white/[0.07] text-slate-500 hover:text-white'}`}>
                 {m.label}
               </button>
@@ -1477,14 +1546,13 @@ function AutoFillPanel({ selected, imageUrlById, onClose, onItemSaved, onJobChan
 
           {/* Model + advanced */}
           <div className="flex gap-1.5">
-            {([{ key: 'flash', label: 'Flash Lite' }, { key: 'pro', label: 'Pro' }] as const).map(m => (
-              <button key={m.key} onClick={() => setModel(m.key)}
-                className={`flex-1 py-1.5 rounded-lg border text-[11px] transition-all
-                  ${model === m.key ? 'bg-white/[0.12] border-white/30 text-white' : 'bg-white/[0.03] border-white/[0.07] text-slate-500 hover:text-white'}`}>
-                {m.label}
-              </button>
-            ))}
-            {mode !== 'flux' && ([{ key: false, label: 'Basic' }, { key: true, label: 'Advanced' }] as const).map(m => (
+            <select value={model} onChange={e => setModel(e.target.value)}
+              className="flex-1 py-1.5 px-2 rounded-lg border border-white/[0.07] bg-[#0a101d] text-[11px] text-white focus:outline-none focus:border-white/30 cursor-pointer">
+              {AUTOFILL_MODELS.map(m => (
+                <option key={m.key} value={m.key}>{m.label}</option>
+              ))}
+            </select>
+            {mode !== 'flux' && mode !== 'append' && ([{ key: false, label: 'Basic' }, { key: true, label: 'Advanced' }] as const).map(m => (
               <button key={String(m.key)} onClick={() => setAdvanced(m.key)}
                 className={`flex-1 py-1.5 rounded-lg border text-[11px] transition-all
                   ${advanced === m.key ? 'bg-white/[0.12] border-white/30 text-white' : 'bg-white/[0.03] border-white/[0.07] text-slate-500 hover:text-white'}`}>
@@ -1498,6 +1566,22 @@ function AutoFillPanel({ selected, imageUrlById, onClose, onItemSaved, onJobChan
             <p className="text-[10px] text-amber-400/70">
               First tag = trigger word (e.g. <span className="font-mono text-amber-300">DARTHVADER</span>). Additional tags = context.
             </p>
+          )}
+          {mode === 'append' && (
+            <>
+              <p className="text-[10px] text-violet-300/80 leading-relaxed">
+                Rewrites the <span className="text-violet-200">existing</span> caption using your description below.
+                Images with no caption are skipped. First tag = trigger word to preserve.
+              </p>
+              {/* `advanced` doubles as the naming flag in append mode */}
+              <div className="flex items-center gap-2">
+                <button onClick={() => setAdvanced(v => !v)}
+                  className={`w-7 h-3.5 rounded-full transition-colors relative shrink-0 ${advanced ? 'bg-violet-400' : 'bg-white/[0.1]'}`}>
+                  <span className={`absolute top-0.5 left-0.5 w-2.5 h-2.5 rounded-full transition-transform ${advanced ? 'translate-x-3.5 bg-[#05080f]' : 'translate-x-0 bg-white'}`} />
+                </button>
+                <span className="text-[10px] text-slate-400">Curated naming {advanced ? '(names + titles become prompt handles)' : '(strict visual only)'}</span>
+              </div>
+            </>
           )}
           <div className={`flex flex-wrap gap-1 min-h-[26px] rounded-lg border px-2 py-1.5 ${mode === 'flux' ? 'border-amber-500/25 bg-amber-500/[0.03]' : 'border-white/[0.07] bg-white/[0.02]'}`}>
             {contextTags.map((tag, i) => (
@@ -1530,33 +1614,53 @@ function AutoFillPanel({ selected, imageUrlById, onClose, onItemSaved, onJobChan
               className="flex-1 min-w-[80px] bg-transparent text-[11px] text-white placeholder-slate-600 outline-none"
             />
           </div>
-          {mode !== 'flux' && (context || contextTags.length === 0) && (
+          {mode !== 'flux' && mode !== 'append' && (context || contextTags.length === 0) && (
             <textarea value={context} onChange={e => setContext(e.target.value)}
               placeholder="Optional: full context sentence…"
               rows={1}
               className="w-full rounded-lg border border-white/[0.07] bg-white/[0.02] px-2 py-1.5 text-[11px] text-slate-300 placeholder-slate-700 outline-none resize-none"
             />
           )}
+          {mode === 'append' && (
+            <>
+              <textarea value={context} onChange={e => setContext(e.target.value)}
+                placeholder={'Describe the edit in your own words…\n\ne.g. Tony Bulgoni wearing his red and white super suit — call the suit "red and white super suit" every time'}
+                rows={4}
+                className="w-full rounded-lg border border-violet-500/25 bg-violet-500/[0.03] px-2 py-1.5 text-[11px] text-slate-200 placeholder-slate-600 outline-none resize-y"
+              />
+              <p className="text-[9.5px] text-slate-600 leading-relaxed">
+                {advanced
+                  ? <>Your names and titles are used <span className="text-slate-400">verbatim</span> so they become prompt handles — but only on images where the thing they name is actually visible. Phrase edits conditionally (&ldquo;if the suit is visible, call it…&rdquo;) so the handle stays sharp.</>
+                  : <>Only what is <span className="text-slate-400">visible</span> is described. Titles and backstory are left out rather than asserted as visual facts.</>}
+              </p>
+            </>
+          )}
 
-          {/* Overwrite toggle */}
-          <div className="flex items-center gap-2">
-            <button onClick={() => setOverwrite(v => !v)}
-              className={`w-7 h-3.5 rounded-full transition-colors relative shrink-0 ${overwrite ? 'bg-white/80' : 'bg-white/[0.1]'}`}>
-              <span className={`absolute top-0.5 left-0.5 w-2.5 h-2.5 rounded-full transition-transform ${overwrite ? 'translate-x-3.5 bg-[#05080f]' : 'translate-x-0 bg-white'}`} />
-            </button>
-            <span className="text-[10px] text-slate-600">Overwrite existing</span>
-          </div>
+          {/* Overwrite toggle — append always rewrites, so it doesn't apply */}
+          {mode !== 'append' && (
+            <div className="flex items-center gap-2">
+              <button onClick={() => setOverwrite(v => !v)}
+                className={`w-7 h-3.5 rounded-full transition-colors relative shrink-0 ${overwrite ? 'bg-white/80' : 'bg-white/[0.1]'}`}>
+                <span className={`absolute top-0.5 left-0.5 w-2.5 h-2.5 rounded-full transition-transform ${overwrite ? 'translate-x-3.5 bg-[#05080f]' : 'translate-x-0 bg-white'}`} />
+              </button>
+              <span className="text-[10px] text-slate-600">Overwrite existing</span>
+            </div>
+          )}
 
           {/* Add to queue button */}
           <button
             onClick={addToQueue}
-            disabled={count === 0}
+            disabled={count === 0 || (mode === 'append' && !context.trim())}
             className="relative overflow-hidden w-full py-2 rounded-lg bg-white/10 border border-white/25 text-white text-xs font-bold hover:bg-white/15 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
           >
-            {count > 0 && (
+            {count > 0 && !(mode === 'append' && !context.trim()) && (
               <span className="absolute inset-y-0 left-0 w-1/3 bg-gradient-to-r from-transparent via-white/30 to-transparent pointer-events-none" style={{ animation: 'sheen-sweep 2.6s infinite' }} />
             )}
-            {count === 0 ? 'Select images on the right →' : `Add to Queue (${count} images)`}
+            {count === 0
+              ? 'Select images on the right →'
+              : mode === 'append' && !context.trim()
+                ? 'Describe the edit above'
+                : `Add to Queue (${count} images)`}
           </button>
         </div>
 
@@ -1602,8 +1706,8 @@ function AutoFillPanel({ selected, imageUrlById, onClose, onItemSaved, onJobChan
                           <span className="text-[10px] text-slate-300 truncate font-medium">{run.label}</span>
                         </div>
                         <p className="text-[10px] text-slate-600">
-                          {run.mode === 'flux' ? 'FLUX' : run.mode === 'caption' ? 'Caption' : 'Tags'}
-                          {' · '}{run.modelKey === 'flash' ? 'Flash Lite' : 'Pro'}
+                          {run.mode === 'flux' ? 'FLUX' : run.mode === 'append' ? 'Append' : run.mode === 'caption' ? 'Caption' : 'Tags'}
+                          {' · '}{autofillModelLabel(run.modelKey)}
                           {isQueued ? ` · ${run.totalCount} images` : ` · ${run.nextIndex}/${run.totalCount}`}
                         </p>
                       </div>
@@ -2295,12 +2399,12 @@ export default function DatasetPage() {
   }, [])
 
   // ── Save from detail modal ────────────────────────────────────────────────────
-  async function saveDetail(id: number, tags: string[], caption: string | null, marked: boolean) {
-    await patch({ ids: [id], tags, caption, marked })
+  async function saveDetail(id: number, tags: string[], caption: string | null, marked: boolean, sections: ImageRecord['captionSections']) {
+    await patch({ ids: [id], tags, caption, marked, captionSections: sections ?? null })
     setImages(prev => prev.map(img =>
-      img.id === id ? { ...img, adminTags: tags, adminCaption: caption, markedForTraining: marked } : img
+      img.id === id ? { ...img, adminTags: tags, adminCaption: caption, markedForTraining: marked, captionSections: sections ?? null } : img
     ))
-    if (detailImg?.id === id) setDetailImg(prev => prev ? { ...prev, adminTags: tags, adminCaption: caption, markedForTraining: marked } : prev)
+    if (detailImg?.id === id) setDetailImg(prev => prev ? { ...prev, adminTags: tags, adminCaption: caption, markedForTraining: marked, captionSections: sections ?? null } : prev)
   }
 
   // ── Bulk tag / caption ────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ import fs from 'fs'
 import path from 'path'
 import { finished } from 'stream/promises'
 import sharp from 'sharp'
+import { composeTrainingCaption, normalizeCaptionSections } from '@/lib/caption-compose'
 
 export const maxDuration = 300
 
@@ -118,15 +119,18 @@ export async function POST(req: NextRequest) {
 
     await setProgress(jobId, 'Fetching image list...')
 
+    // prompt/tags/captionSections ride along so composable caption sections
+    // (per-image toggles) are honored in the training txt
+    const imgSelect = { id: true, imageUrl: true, adminCaption: true, prompt: true, adminTags: true, captionSections: true } as const
     const images = imageIds.length > 0
       ? await prisma.generatedImage.findMany({
           where: { id: { in: imageIds } },
-          select: { id: true, imageUrl: true, adminCaption: true },
+          select: imgSelect,
         })
       : await prisma.generatedImage.findMany({
           where: { isDeleted: false, markedForTraining: true },
           orderBy: { createdAt: 'desc' },
-          select: { id: true, imageUrl: true, adminCaption: true },
+          select: imgSelect,
         })
 
     if (images.length === 0) {
@@ -169,7 +173,13 @@ export async function POST(req: NextRequest) {
                 .jpeg({ quality: 95 })
                 .toBuffer()
           const ext = isPng ? 'png' : 'jpg'
-          const caption = img.adminCaption?.trim() || defaultCaption
+          const caption = composeTrainingCaption({
+            adminCaption: img.adminCaption,
+            prompt: img.prompt,
+            adminTags: img.adminTags,
+            sections: normalizeCaptionSections(img.captionSections),
+            fallbackCaption: defaultCaption,
+          })
           return { name: `${img.id}.${ext}`, buf, caption, id: img.id }
         } catch { return null }
       }))

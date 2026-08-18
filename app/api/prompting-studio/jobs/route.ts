@@ -36,29 +36,48 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'Invalid session' }, { status: 401 })
     }
 
-    // Auto-fail any processing jobs that have been stuck for more than 10 minutes.
-    // This cleans up jobs where the server errored mid-generation and left the DB
-    // record in 'processing' forever, and releases their reserved tickets.
+    // Auto-fail PROVABLY-DEAD stuck jobs only. The old version force-failed
+    // anything older than 10 minutes with NO provider check — so a user who
+    // closed their tab mid-batch came back to find every job "timed out"
+    // while fal had actually COMPLETED them (fal charged, tickets released,
+    // images discarded — the worst possible outcome). Now a job with a fal
+    // request id is verified first: still queued/running/completed at fal →
+    // spared (the drain-queue cron harvests completed ones). Only jobs fal
+    // doesn't know (404/GONE) or that have NO request id can be failed here.
     const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000)
-    const timedOutJobs = await prisma.generationQueue.findMany({
+    const staleCandidates = await prisma.generationQueue.findMany({
       where: {
         userId: user.id,
         status: { in: ['processing', 'queued'] },
         startedAt: { lt: tenMinutesAgo },
       },
-      select: { id: true, ticketCost: true },
+      select: { id: true, ticketCost: true, falRequestId: true, parameters: true },
     })
-    if (timedOutJobs.length > 0) {
+    const provablyDead: { id: number; ticketCost: number }[] = []
+    for (const j of staleCandidates.slice(0, 20)) {
+      if (!j.falRequestId) { provablyDead.push(j); continue }
+      try {
+        const params = j.parameters as { falEndpoint?: string } | null
+        const baseApp = (params?.falEndpoint || '').split('/').slice(0, 2).join('/')
+        if (!baseApp || !process.env.FAL_KEY) continue // can't verify → spare
+        const res = await fetch(`https://queue.fal.run/${baseApp}/requests/${j.falRequestId}/status`, {
+          headers: { Authorization: `Key ${process.env.FAL_KEY}` },
+          signal: AbortSignal.timeout(6000),
+        })
+        if (res.status === 404) { provablyDead.push(j); continue }
+        // ok / in-progress / completed / transient error → spare
+      } catch { /* unreachable — spare, re-checked next poll */ }
+    }
+    if (provablyDead.length > 0) {
       await prisma.generationQueue.updateMany({
-        where: { id: { in: timedOutJobs.map(j => j.id) } },
+        where: { id: { in: provablyDead.map(j => j.id) }, status: { in: ['processing', 'queued'] } },
         data: {
           status: 'failed',
           errorMessage: 'Generation timed out — please try again',
           completedAt: new Date(),
         },
       })
-      // Release reserved tickets for timed-out jobs
-      const totalReserved = timedOutJobs.reduce((sum, j) => sum + j.ticketCost, 0)
+      const totalReserved = provablyDead.reduce((sum, j) => sum + j.ticketCost, 0)
       if (totalReserved > 0) {
         await prisma.ticket.update({
           where: { userId: user.id },

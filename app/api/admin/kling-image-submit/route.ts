@@ -5,7 +5,7 @@ import prisma from '@/lib/prisma'
 import { syncAndClaimFalSlot } from '@/lib/admin-queue-helpers'
 import { getUserFromSession } from '@/lib/auth'
 import { cookies } from 'next/headers'
-import { checkUserConcurrency } from '@/lib/user-concurrency'
+import { claimUserGenerationRow } from '@/lib/user-concurrency'
 import { isGenerationBlocked } from '@/lib/generation-guard'
 import { deductGenerationTickets, refundGenerationTickets, isAdminEmail } from '@/lib/ticket-gate'
 
@@ -79,75 +79,74 @@ export async function POST(req: Request) {
     // Server-side ticket check — Kling V3 costs 2 tickets
     const ticketCost = 2
     const chargedCost = isAdminEmail(sessionUser!.email) ? 0 : ticketCost
+    // ── Spam-safe submission order (see kling-o3-submit for the rationale):
+    // atomic user-slot claim → charge → global slot/submit, with the claimed
+    // row flipped through pending → queued/processing/failed exactly once.
+    const rowParams = { falEndpoint: endpoint, falInput: input as Record<string, unknown>, usePolling: true, permanentReferenceUrls }
+    const claim = await claimUserGenerationRow({
+      userId: targetUserId,
+      modelId: 'kling-v3-image',
+      modelType: 'image',
+      prompt: (prompt as string).trim(),
+      parameters: rowParams,
+      ticketCost: chargedCost,
+    })
+    if (!claim.ok) {
+      return NextResponse.json(
+        { error: `Queue full (${claim.activeCount}/${claim.limit} active). Wait for a generation to finish.` },
+        { status: 429 }
+      )
+    }
     const ticketResult = await deductGenerationTickets(targetUserId, sessionUser!.email, ticketCost)
     if (!ticketResult.ok) {
+      await prisma.generationQueue.delete({ where: { id: claim.rowId } }).catch(() => {})
       return NextResponse.json(
         { error: `Insufficient tickets — need ${ticketResult.need}, have ${ticketResult.have}` },
         { status: 402 },
       )
     }
+    await prisma.generationQueue.update({
+      where: { id: claim.rowId },
+      data: { parameters: { ...rowParams, chargeMode: 'deduct' } as any },
+    }).catch(() => {})
 
-    const { allowed, activeCount, limit } = await checkUserConcurrency(targetUserId)
-    if (!allowed) {
-      return NextResponse.json(
-        { error: `Queue full (${activeCount}/${limit} active). Wait for a generation to finish.` },
-        { status: 429 }
-      )
-    }
-
-    // Sync counter from ground truth, then atomically claim a slot
+    // Sync counter from ground truth, then atomically claim a global slot
     const { claimed, maxConcurrent } = await syncAndClaimFalSlot()
 
     if (!claimed) {
       // At capacity — queue for later (counter was NOT incremented)
-      const queueEntry = await prisma.generationQueue.create({
-        data: {
-          userId:    targetUserId!,
-          modelId:   'kling-v3-image',
-          modelType: 'image',
-          prompt:    (prompt as string).trim(),
-          parameters: { falEndpoint: endpoint, falInput: input as Record<string, unknown>, usePolling: true, permanentReferenceUrls } as any,
-          status:    'queued',
-          ticketCost: chargedCost,
-        },
-      })
-      console.log(`Kling V3 queued (at capacity, max=${maxConcurrent}) → queueId #${queueEntry.id}`)
-      return NextResponse.json({ success: true, queued: true, queueId: queueEntry.id, permanentReferenceUrls })
+      await prisma.generationQueue.update({ where: { id: claim.rowId }, data: { status: 'queued' } })
+      console.log(`Kling V3 queued (at capacity, max=${maxConcurrent}) → queueId #${claim.rowId}`)
+      return NextResponse.json({ success: true, queued: true, queueId: claim.rowId, permanentReferenceUrls })
     }
 
     // Slot claimed (counter already incremented) — submit to FAL
     try {
       const submitted = await fal.queue.submit(endpoint, { input })
-
-      const queueEntry = await prisma.generationQueue.create({
-        data: {
-          userId:      targetUserId!,
-          modelId:     'kling-v3-image',
-          modelType:   'image',
-          prompt:      (prompt as string).trim(),
-          parameters:  { falEndpoint: endpoint, falInput: input, usePolling: true, permanentReferenceUrls } as any,
-          status:      'processing',
-          ticketCost:  chargedCost,
-          falRequestId: submitted.request_id,
-          startedAt:   new Date(),
-        },
+      await prisma.generationQueue.update({
+        where: { id: claim.rowId },
+        data: { status: 'processing', falRequestId: submitted.request_id, startedAt: new Date() },
       })
 
       return NextResponse.json({
         success: true,
         requestId: submitted.request_id,
         falEndpoint: endpoint,
-        queueId: queueEntry.id,
+        queueId: claim.rowId,
         permanentReferenceUrls,
       })
     } catch (submitError: any) {
-      // FAL submit failed — release the slot and refund tickets
+      // FAL submit failed — release the slot, refund, settle the row
       const { FAL_GLOBAL_ID } = await import('@/lib/fal-queue')
       await prisma.modelConcurrencyLimit.updateMany({
         where: { modelId: FAL_GLOBAL_ID },
         data: { currentActive: { decrement: 1 } },
       }).catch(() => {})
       await refundGenerationTickets(targetUserId!, sessionUser!.email, ticketCost)
+      await prisma.generationQueue.update({
+        where: { id: claim.rowId },
+        data: { status: 'failed', completedAt: new Date(), errorMessage: 'Submission to provider failed' },
+      }).catch(() => {})
       throw submitError
     }
   } catch (error: any) {

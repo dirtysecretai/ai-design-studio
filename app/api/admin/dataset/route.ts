@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { Prisma } from '@prisma/client'
 import { checkAuth } from '@/lib/admin-auth'
+import { normalizeCaptionSections } from '@/lib/caption-compose'
 
 
 // GET — paginated dataset browser + optional ?export=true for full JSON download
@@ -19,7 +20,8 @@ export async function GET(req: Request) {
     if (ids.length === 0) return NextResponse.json({ images: [] })
     const rows = await prisma.generatedImage.findMany({
       where: { id: { in: ids }, isDeleted: false },
-      select: { id: true, adminCaption: true, adminTags: true, imageUrl: true, thumbnailUrl: true, aspectRatio: true },
+      // prompt + captionSections ride along for the composable-caption system
+      select: { id: true, adminCaption: true, adminTags: true, imageUrl: true, thumbnailUrl: true, aspectRatio: true, prompt: true, captionSections: true },
     })
     return NextResponse.json({ images: rows })
   }
@@ -175,6 +177,7 @@ export async function GET(req: Request) {
         id: true, prompt: true, imageUrl: true, referenceImageUrls: true,
         model: true, quality: true, aspectRatio: true, ticketCost: true,
         markedForTraining: true, adminTags: true, adminCaption: true,
+        captionSections: true,
         createdAt: true, expiresAt: true, falRequestId: true, videoMetadata: true,
         isDeleted: true, thumbnailUrl: true,
         user:        { select: { id: true, email: true, name: true } },
@@ -269,6 +272,8 @@ export async function PATCH(req: Request) {
       caption?:   string | null
       // Per-image caption updates in one request (composer find & replace)
       captions?:  { id: number; caption: string | null }[]
+      // Composable training-caption sections ({prompt?,tags?,noteOn?,note?} or null to clear)
+      captionSections?: unknown
     }
 
     // Bulk per-image captions — independent of the ids-based paths below
@@ -297,6 +302,11 @@ export async function PATCH(req: Request) {
     if (marked    !== undefined) simpleData.markedForTraining = marked
     if (caption   !== undefined) simpleData.adminCaption      = caption
     if (tags      !== undefined) simpleData.adminTags         = tags
+    if ('captionSections' in body) {
+      // Normalized to the known shape; null/empty clears back to autofill-only
+      const norm = normalizeCaptionSections(body.captionSections)
+      simpleData.captionSections = norm === null ? Prisma.DbNull : (norm as Prisma.InputJsonValue)
+    }
 
     let updated = 0
 

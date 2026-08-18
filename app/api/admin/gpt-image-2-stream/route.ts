@@ -71,6 +71,16 @@ export async function POST(req: Request) {
 
   const userId = sessionUser.id
 
+  // Server-side concurrency check FIRST — the old order deducted tickets and
+  // then rejected on concurrency WITHOUT refunding (charged for nothing)
+  const { allowed, activeCount, limit } = await checkUserConcurrency(userId)
+  if (!allowed) {
+    return NextResponse.json(
+      { error: `Queue full (${activeCount}/${limit} active). Wait for a generation to finish.` },
+      { status: 429 }
+    )
+  }
+
   // Server-side ticket check — compute cost from quality + size, do not trust client value
   const ticketCost = computeGptTicketCost(quality, size)
   const ticketResult = await deductGenerationTickets(userId, sessionUser.email, ticketCost)
@@ -78,15 +88,6 @@ export async function POST(req: Request) {
     return NextResponse.json(
       { error: `Insufficient tickets — need ${ticketResult.need}, have ${ticketResult.have}` },
       { status: 402 },
-    )
-  }
-
-  // Server-side concurrency check — prevents multi-device/multi-tab abuse
-  const { allowed, activeCount, limit } = await checkUserConcurrency(userId)
-  if (!allowed) {
-    return NextResponse.json(
-      { error: `Queue full (${activeCount}/${limit} active). Wait for a generation to finish.` },
-      { status: 429 }
     )
   }
   const encoder = new TextEncoder()

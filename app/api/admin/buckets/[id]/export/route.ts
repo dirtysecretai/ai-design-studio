@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import JSZip from 'jszip'
 import { prisma } from '@/lib/prisma'
 import { checkAuth } from '@/lib/admin-auth'
+import { composeTrainingCaption, normalizeCaptionSections } from '@/lib/caption-compose'
 
 
 // GET /api/admin/buckets/[id]/export
@@ -24,7 +25,7 @@ export async function GET(
       images: {
         include: {
           image: {
-            select: { id: true, imageUrl: true, adminCaption: true, prompt: true, adminTags: true, model: true },
+            select: { id: true, imageUrl: true, adminCaption: true, prompt: true, adminTags: true, model: true, captionSections: true },
           },
         },
         orderBy: { addedAt: 'asc' },
@@ -62,10 +63,17 @@ export async function GET(
 
         folder.file(`${idx}.${ext}`, buffer)
 
-        // Caption: adminCaption first; fall back to prompt only for AI-generated images
-        // (uploads have prompt = filename which is not useful as a training caption)
+        // Caption: composable sections when configured; otherwise adminCaption
+        // with a prompt fallback for AI-generated images only (uploads have
+        // prompt = filename, useless as a training caption)
         const isUpload = img.model === '__upload__'
-        const caption  = img.adminCaption?.trim() || (!isUpload ? img.prompt.trim() : '')
+        const caption = composeTrainingCaption({
+          adminCaption: img.adminCaption,
+          prompt: isUpload ? '' : img.prompt,
+          adminTags: img.adminTags,
+          sections: normalizeCaptionSections(img.captionSections),
+          fallbackCaption: !isUpload ? img.prompt : '',
+        })
         folder.file(`${idx}.txt`, caption)
 
         downloaded++

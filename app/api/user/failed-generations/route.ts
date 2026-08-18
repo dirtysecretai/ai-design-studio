@@ -55,10 +55,18 @@ export async function GET() {
         error: r.errorMessage || 'Generation failed',
         falRequestId: r.falRequestId,
         // Full run settings from the queue row's parameters — the feed shows
-        // them in the failed popup and Re-generate reuses them verbatim
-        aspectRatio: r.parameters?.aspectRatio || r.parameters?.size || null,
-        quality: r.parameters?.quality || null,
-        referenceImageUrls: Array.isArray(r.parameters?.referenceImageUrls) ? r.parameters.referenceImageUrls : [],
+        // them in the failed popup and Re-generate reuses them verbatim.
+        // Two row shapes exist: client-failure rows store settings top-level;
+        // submit-claim rows nest the raw fal payload under parameters.falInput
+        // (aspect_ratio / resolution) — fall back to that or the panel is empty.
+        aspectRatio: r.parameters?.aspectRatio || r.parameters?.size
+          || r.parameters?.falInput?.aspect_ratio || null,
+        quality: r.parameters?.quality || r.parameters?.falInput?.resolution || null,
+        referenceImageUrls: Array.isArray(r.parameters?.referenceImageUrls)
+          ? r.parameters.referenceImageUrls
+          : Array.isArray(r.parameters?.permanentReferenceUrls)
+            ? r.parameters.permanentReferenceUrls
+            : [],
         createdAt: r.createdAt,
       })),
     })

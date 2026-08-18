@@ -2364,6 +2364,14 @@ function FeedDropdown({
                 {/* Video-feed only: autoplay tiles while they're on screen */}
                 <FeedToggleRow label="Autoplay Videos" icon={<Video size={11} />} on={videoAutoplay} onChange={onVideoAutoplayChange} />
                 {videoAutoplay && <p className="text-[9.5px] text-slate-600 leading-relaxed px-0.5">Video feed tiles play automatically (muted) while visible. Uses more data.</p>}
+                {/* Every user chooses whether borders show; admins choose the
+                    style (Admin · Feed Filters below) */}
+                <FeedToggleRow label="Borders" icon={<Square size={11} />} on={tileBorders} onChange={onTileBordersChange} />
+                {tileBorders && (
+                  <p className="text-[9.5px] text-slate-600 leading-relaxed px-0.5">
+                    Animated silver outline around every feed thumbnail.
+                  </p>
+                )}
               </section>
             </div>
 
@@ -2385,23 +2393,22 @@ function FeedDropdown({
 
                 {adminOpen && (
                   <div className="space-y-2.5">
-                    {/* Borders — admin-controlled feed styling (moved out of the
-                        public Display section) */}
-                    <FeedToggleRow label="Borders" icon={<Square size={11} />} on={tileBorders} onChange={onTileBordersChange} />
-                    {tileBorders && (
-                      <div className="rounded-lg bg-black/20 border border-white/10 p-2.5 space-y-2">
-                        <FeedOptionRow label="Style">
-                          <FeedSeg value={borderMode} onChange={onBorderModeChange} options={[{ value: "slim", label: "Slim" }, { value: "fill", label: "Thick" }, { value: "smart", label: "Smart" }]} />
-                        </FeedOptionRow>
-                        <p className="text-[9.5px] text-slate-600 leading-relaxed">
-                          {borderMode === "smart"
-                            ? <><span className="text-white">Smart</span> fills the whole feed with flowing silver — no black space between or around generations.</>
-                            : borderMode === "fill"
-                            ? <><span className="text-white">Thick</span> frames each thumbnail with a wide animated silver border.</>
-                            : <><span className="text-white">Slim</span> hugs each thumbnail with a thin animated silver outline.</>}
-                        </p>
-                      </div>
-                    )}
+                    {/* Border STYLE stays admin-only — every user can switch
+                        borders on/off in the Display section above, but which
+                        style they get is a sitewide call */}
+                    <div className="rounded-lg bg-black/20 border border-white/10 p-2.5 space-y-2">
+                      <FeedOptionRow label="Border Style">
+                        <FeedSeg value={borderMode} onChange={onBorderModeChange} options={[{ value: "slim", label: "Slim" }, { value: "fill", label: "Thick" }, { value: "smart", label: "Smart" }]} />
+                      </FeedOptionRow>
+                      <p className="text-[9.5px] text-slate-600 leading-relaxed">
+                        {borderMode === "smart"
+                          ? <><span className="text-white">Smart</span> fills the whole feed with flowing silver — no black space between or around generations.</>
+                          : borderMode === "fill"
+                          ? <><span className="text-white">Thick</span> frames each thumbnail with a wide animated silver border.</>
+                          : <><span className="text-white">Slim</span> hugs each thumbnail with a thin animated silver outline.</>}
+                        {!tileBorders && <span className="text-slate-500"> Borders are currently off — toggle them on under Display.</span>}
+                      </p>
+                    </div>
 
                     {loadError && <p className="text-[10px] text-red-400">{loadError}</p>}
 
@@ -4470,6 +4477,9 @@ function RefDropdown({
   onDeleteFolder,
   disabled = false,
   libraryLimit = 50,
+  batchMode = false,
+  batches = [],
+  onBatchesChange,
 }: {
   open: boolean
   onToggle: () => void
@@ -4495,6 +4505,14 @@ function RefDropdown({
   onDeleteFolder?: (id: number) => void
   disabled?: boolean
   libraryLimit?: number
+  // ── Admin batch mode ──
+  // Each batch becomes its OWN generation sharing the prompt. Staging is
+  // uncapped (unlike normal activation, which is bounded by the model's
+  // max-reference count) because a batch's refs are the input to one
+  // generation, not all of them at once.
+  batchMode?: boolean
+  batches?: string[][]
+  onBatchesChange?: (next: string[][]) => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
@@ -4502,6 +4520,14 @@ function RefDropdown({
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0, z: 1 })
   const [selectMode, setSelectMode] = useState(false)
   const [selectedForDelete, setSelectedForDelete] = useState<Set<string>>(new Set())
+  // Batch staging — uncapped, and an image may appear in any number of batches
+  const [staged, setStaged] = useState<Set<string>>(new Set())
+  const commitBatch = (mode: "one" | "each") => {
+    if (staged.size === 0 || !onBatchesChange) return
+    const ids = [...staged]
+    onBatchesChange(mode === "one" ? [...batches, ids] : [...batches, ...ids.map(i => [i])])
+    setStaged(new Set())
+  }
   const [editMode, setEditMode] = useState(false)
   const [editingImage, setEditingImage] = useState<RefImage | null>(null)
   // The open editor survives a page refresh: remember which image is being
@@ -4987,6 +5013,57 @@ function RefDropdown({
               </div>
             )}
 
+            {/* ── Batch bar (admin batch mode) ── */}
+            {batchMode && (
+              <div className="mb-2 rounded-lg border border-cyan-500/25 bg-cyan-500/[0.04] p-2 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-cyan-300/90">
+                    Batch mode — {batches.length} batch{batches.length === 1 ? "" : "es"}
+                  </span>
+                  {batches.length > 0 && (
+                    <button onClick={() => onBatchesChange?.([])}
+                      className="text-[10px] text-slate-500 hover:text-white transition-colors">Clear all</button>
+                  )}
+                </div>
+                <p className="text-[9.5px] text-slate-500 leading-relaxed">
+                  Tap images to stage them, then commit. Each batch runs as its own generation with the same prompt — an image can appear in as many batches as you like.
+                </p>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-[10px] font-mono text-cyan-300">{staged.size} staged</span>
+                  <button onClick={() => commitBatch("one")} disabled={staged.size === 0}
+                    className="px-2 py-1 rounded-lg border border-cyan-500/30 bg-cyan-500/10 text-[10px] text-cyan-200 hover:bg-cyan-500/20 transition-colors disabled:opacity-35">
+                    Add as 1 batch
+                  </button>
+                  <button onClick={() => commitBatch("each")} disabled={staged.size === 0}
+                    title="One generation per staged image — the bulk case"
+                    className="px-2 py-1 rounded-lg border border-cyan-500/30 bg-cyan-500/10 text-[10px] text-cyan-200 hover:bg-cyan-500/20 transition-colors disabled:opacity-35">
+                    Each → own batch ({staged.size})
+                  </button>
+                  <button onClick={() => setStaged(new Set(visibleRefs.map(r => r.id)))}
+                    className="px-2 py-1 rounded-lg border border-white/10 text-[10px] text-slate-400 hover:text-white transition-colors">
+                    Stage all shown
+                  </button>
+                  {staged.size > 0 && (
+                    <button onClick={() => setStaged(new Set())}
+                      className="px-2 py-1 rounded-lg border border-white/10 text-[10px] text-slate-400 hover:text-white transition-colors">
+                      Unstage
+                    </button>
+                  )}
+                </div>
+                {batches.length > 0 && (
+                  <div className="flex flex-wrap gap-1 max-h-24 overflow-y-auto pt-0.5">
+                    {batches.map((b, i) => (
+                      <span key={i} className="flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-cyan-500/25 bg-cyan-500/10 text-[9px] text-cyan-200">
+                        #{i + 1} · {b.length} ref{b.length === 1 ? "" : "s"}
+                        <button onClick={() => onBatchesChange?.(batches.filter((_, j) => j !== i))}
+                          className="opacity-60 hover:opacity-100">×</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {visibleRefs.length === 0 && visibleFolders.length === 0 ? (
               <p className="text-center text-slate-600 text-[11px] py-8">
                 {currentFolderId === null ? "No images in library yet" : "This folder is empty"}
@@ -4994,9 +5071,12 @@ function RefDropdown({
             ) : (
               <div className={`grid ${wide ? "grid-cols-10" : "grid-cols-5"} gap-1.5`}>
                 {visibleRefs.map((img) => {
-                  const isActive = !selectMode && !editMode && activeIds.includes(img.id)
-                  const isDisabled = !selectMode && !editMode && !isActive && atLimit
+                  const isStaged = batchMode && staged.has(img.id)
+                  const isActive = !batchMode && !selectMode && !editMode && activeIds.includes(img.id)
+                  const isDisabled = !batchMode && !selectMode && !editMode && !isActive && atLimit
                   const isSelectedForDelete = selectMode && selectedForDelete.has(img.id)
+                  // How many batches already contain this image (it may repeat)
+                  const inBatches = batchMode ? batches.reduce((n, b) => n + (b.includes(img.id) ? 1 : 0), 0) : 0
                   return (
                     // Overlays are stacked via CSS grid (every child in cell 1/1), NOT
                     // position:absolute — iPad Safari mis-places absolutely positioned
@@ -5005,10 +5085,14 @@ function RefDropdown({
                     <div key={img.id} className="relative group aspect-square grid [grid-template-columns:100%] [grid-template-rows:100%]">
                       <button
                         // Video refs have no pixel editor — edit-mode clicks fall through to toggle
-                        onClick={() => (editMode && !isVideoRefUrl(img.url)) ? setEditingImage(img) : selectMode ? toggleSelectForDelete(img.id) : handleToggle(img)}
-                        disabled={!selectMode && !editMode && (isDisabled || disabled)}
+                        onClick={() =>
+                          batchMode
+                            ? setStaged(prev => { const n = new Set(prev); n.has(img.id) ? n.delete(img.id) : n.add(img.id); return n })
+                            : (editMode && !isVideoRefUrl(img.url)) ? setEditingImage(img) : selectMode ? toggleSelectForDelete(img.id) : handleToggle(img)}
+                        disabled={!batchMode && !selectMode && !editMode && (isDisabled || disabled)}
                         title={
-                          editMode ? "Click to edit"
+                          batchMode ? (isStaged ? "Staged — click to unstage" : "Click to stage for a batch")
+                            : editMode ? "Click to edit"
                             : selectMode
                             ? isSelectedForDelete ? "Click to deselect" : "Click to select for deletion"
                             : disabled ? "Not available for video models"
@@ -5016,7 +5100,11 @@ function RefDropdown({
                             : isActive ? "Click to deactivate" : "Click to activate"
                         }
                         className={`col-start-1 row-start-1 w-full h-full rounded-md overflow-hidden border-2 transition-all ${
-                          editMode
+                          batchMode
+                            ? isStaged
+                              ? "border-cyan-400 ring-1 ring-cyan-400/40"
+                              : "border-transparent hover:border-cyan-400/40"
+                            : editMode
                             ? "border-transparent hover:border-white/70"
                             : selectMode
                             ? isSelectedForDelete
@@ -5045,6 +5133,18 @@ function RefDropdown({
                           </div>
                         )}
                       </button>
+
+                      {/* Batch badges: staged tick + how many batches hold it */}
+                      {batchMode && isStaged && (
+                        <div className="col-start-1 row-start-1 self-end justify-self-end m-0.5 w-4 h-4 rounded-full bg-cyan-400 flex items-center justify-center pointer-events-none z-10">
+                          <Check size={9} className="text-black" />
+                        </div>
+                      )}
+                      {batchMode && inBatches > 0 && (
+                        <span className="col-start-1 row-start-1 self-start justify-self-start m-0.5 px-1 rounded bg-black/75 text-cyan-300 text-[8px] font-bold leading-4 pointer-events-none z-10">
+                          ×{inBatches}
+                        </span>
+                      )}
 
                       {/* Active checkmark (normal mode) */}
                       {!selectMode && isActive && (
@@ -5640,6 +5740,41 @@ function FeedMasonry({ head, body, n, gap = 8 }: {
     return () => ro.disconnect()
   }, [])
 
+  // ── Viewport windowing ──
+  // Tiles far outside the viewport are NOT mounted. Without this, a long
+  // scroll accumulated hundreds of decoded images in the tab until iPad
+  // Safari hit its memory ceiling and force-reloaded the page. Because every
+  // tile's position is computed (not DOM-flow-derived), unmounting far tiles
+  // changes nothing about layout — the container keeps its full height and
+  // scrollbar, and tiles remount with their kept measurements when scrolled
+  // back. The window is quantized so scrolling re-renders only when crossing
+  // a 400px step, not per frame.
+  const WINDOW_PAD = 1800
+  const [scrollWin, setScrollWin] = useState({ top: -WINDOW_PAD, bottom: WINDOW_PAD * 2 })
+  useEffect(() => {
+    let raf = 0
+    const update = () => {
+      raf = 0
+      const el = containerRef.current
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      const viewTop = -rect.top
+      const q = 400
+      const top = Math.floor((viewTop - WINDOW_PAD) / q) * q
+      const bottom = Math.ceil((viewTop + window.innerHeight + WINDOW_PAD) / q) * q
+      setScrollWin(w => (w.top === top && w.bottom === bottom) ? w : { top, bottom })
+    }
+    const onScroll = () => { if (!raf) raf = requestAnimationFrame(update) }
+    window.addEventListener("scroll", onScroll, { passive: true })
+    window.addEventListener("resize", onScroll, { passive: true })
+    update()
+    return () => {
+      window.removeEventListener("scroll", onScroll)
+      window.removeEventListener("resize", onScroll)
+      cancelAnimationFrame(raf)
+    }
+  }, [])
+
   // One observer for every tile: the measured box gives BOTH the true height
   // (beats the AR estimate — relayout when an image pops in or a card grows)
   // and the true width:height ratio, which drives column SPANNING below.
@@ -5716,7 +5851,7 @@ function FeedMasonry({ head, body, n, gap = 8 }: {
 
   const colW = width > 0 ? (width - gap * (n - 1)) / n : 0
   const colHeights = new Array(n).fill(0)
-  const placed: { key: string; node: ReactNode; left: number; top: number; w: number; span: number; ratio: number }[] = []
+  const placed: { key: string; node: ReactNode; left: number; top: number; w: number; h: number; span: number; ratio: number }[] = []
   // Wide tiles span columns so landscape generations display at real size
   // instead of being shrunk into one narrow cell: ≥16:9-ish gets 2 columns,
   // ≥21:9-ish gets 3 (capped by the column count). Ratio comes from the known
@@ -5750,8 +5885,11 @@ function FeedMasonry({ head, body, n, gap = 8 }: {
     // at least (w / ratio) tall once decoded (chrome like the border rim only
     // ADDS height), so max(measured, estimate) makes stale-short measurements
     // — the residual overlap cases — mathematically impossible.
-    const h = span > 1 ? Math.max(heightsRef.current.get(key) ?? 0, colW)
-      : Math.max(heightsRef.current.get(key) ?? 0, w / ratio)
+    // NATURAL SIZING for spanned tiles too: height follows the image's true
+    // ratio at its rendered width. (They used to be cropped to a uniform
+    // 1:1-card height — masonry needs no uniform heights, and that crop both
+    // hid image content and forced an extreme box ratio.)
+    const h = Math.max(heightsRef.current.get(key) ?? 0, w / ratio)
     // Single tiles: fill the topmost hole they fit into first
     if (span === 1 && gaps.length > 0) {
       let gi = -1
@@ -5760,7 +5898,7 @@ function FeedMasonry({ head, body, n, gap = 8 }: {
       }
       if (gi !== -1) {
         const g = gaps[gi]
-        placed.push({ key, node, left: Math.round(g.c * (colW + gap)), top: g.top, w: Math.round(w), span, ratio })
+        placed.push({ key, node, left: Math.round(g.c * (colW + gap)), top: g.top, w: Math.round(w), h, span, ratio })
         g.top += h + gap
         g.h -= h + gap
         if (g.h < 40) gaps.splice(gi, 1)
@@ -5773,7 +5911,7 @@ function FeedMasonry({ head, body, n, gap = 8 }: {
       for (let j = c; j < c + span; j++) top = Math.max(top, colHeights[j])
       if (top < bestTop - 0.5) { bestTop = top; best = c }
     }
-    placed.push({ key, node, left: Math.round(best * (colW + gap)), top: bestTop, w: Math.round(w), span, ratio })
+    placed.push({ key, node, left: Math.round(best * (colW + gap)), top: bestTop, w: Math.round(w), h, span, ratio })
     if (span > 1) {
       // Record the voids this span creates over its shorter columns
       for (let j = best; j < best + span; j++) {
@@ -5790,7 +5928,7 @@ function FeedMasonry({ head, body, n, gap = 8 }: {
 
   return (
     <div ref={containerRef} className="relative" style={{ height: width > 0 && totalH > 0 ? totalH : undefined }}>
-      {width > 0 && placed.map(p => (
+      {width > 0 && placed.filter(p => p.top < scrollWin.bottom && p.top + p.h > scrollWin.top).map(p => (
         <div key={p.key} ref={register(p.key)}
           // Position via TRANSFORM, not top/left: layout-property transitions
           // repaint every moving tile on the main thread, which starved the
@@ -5801,11 +5939,10 @@ function FeedMasonry({ head, body, n, gap = 8 }: {
           style={{ transform: `translate(${p.left}px, ${p.top}px)`, width: p.w }}>
           {isValidElement(p.node) && p.node.type === GridImage
             // Every image tile gets the direct size-report channel; spanned
-            // tiles additionally get the height cap + hi-res source. (Capping
-            // the MEDIA box inside the tile keeps the border rim intact.)
+            // tiles additionally load a higher-res rendition for their width
             ? cloneElement(p.node as ReactElement<Record<string, unknown>>, {
                 onNaturalSize: (r: number) => reportNat(p.key, r),
-                ...(p.span > 1 ? { spanBoost: true, capHeightPx: Math.round(colW) } : {}),
+                ...(p.span > 1 ? { spanBoost: true } : {}),
               })
             : p.node}
         </div>
@@ -15871,6 +16008,9 @@ function PromptBox({
   isGenerationMaintenance = false,
   isAdminAccount = false,
   ticketBalance = 0,
+  batchMode = false,
+  onToggleBatchMode,
+  refBatchUrls = [],
   siteLogoUrl = null,
   onSiteLogoChange,
   onGoHome,
@@ -15908,6 +16048,10 @@ function PromptBox({
   isGenerationMaintenance?: boolean
   isAdminAccount?: boolean
   ticketBalance?: number
+  // ── Admin batch mode ── each entry is ONE generation's reference URLs
+  batchMode?: boolean
+  onToggleBatchMode?: () => void
+  refBatchUrls?: string[][]
   // Logo dropdown in the tab row — same nav as the taskbar logo (Home / feed / admin)
   siteLogoUrl?: string | null
   onSiteLogoChange?: (url: string | null) => void
@@ -15936,6 +16080,8 @@ function PromptBox({
   const [quality, setQuality] = useState<Quality>("2k")
   const [outputFormat, setOutputFormat] = useState<"png" | "jpeg" | "webp">("png")
   const [imageCount, setImageCount] = useState<number>(1)
+  // Batch submission progress (admin batch mode)
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null)
   const [seedreamSafetyChecker, setSeedreamSafetyChecker] = useState(false)
   const [wanSafetyChecker, setWanSafetyChecker] = useState(false)
   const [fluxDevSafetyChecker, setFluxDevSafetyChecker] = useState(false)
@@ -16539,7 +16685,10 @@ function PromptBox({
       ? cfg.refUrlsOverride.map((u, i) => ({ id: `retry-ref-${i}`, url: u }))
       : activeRefImages
     const permanentRefUrls = refSources.map(r => r.url).filter(u => u.startsWith("https://"))
-    const slotIds = Array.from({ length: count }, (_, i) => `slot-${Date.now()}-${i}`)
+    // Sequential ids, NOT Date.now(): batch mode fires many runGenerate calls
+    // concurrently, and clock-based ids collide within a millisecond — which
+    // would produce duplicate React keys and slots that overwrite each other.
+    const slotIds = Array.from({ length: count }, (_, i) => `slot-${nextTempFeedId()}-${i}`)
     slotIds.forEach(sid => onAddPending({ slotId: sid, status: "loading", prompt: currentPrompt, modelId: model.apiId, aspectRatio, quality, referenceImageUrls: permanentRefUrls }))
     const slotId = slotIds[0] // alias for single-image paths
 
@@ -17162,6 +17311,26 @@ function PromptBox({
 
   const handleGenerate = async () => {
     if (!canGenerate) return
+    // ── BATCH MODE (admin) ──
+    // One generation per batch, all sharing this prompt. Submissions are
+    // throttled to 4 in flight: 156 simultaneous POSTs would swamp the tab and
+    // the API, and the server queues anything past global capacity anyway.
+    // Each call gets that batch's refs via refUrlsOverride.
+    if (batchMode && refBatchUrls.length > 0) {
+      setBatchProgress({ done: 0, total: refBatchUrls.length })
+      let done = 0
+      await runWithConcurrency(refBatchUrls, 4, async (urls) => {
+        await runGenerate({
+          model, prompt, aspectRatio, quality, outputFormat, imageCount,
+          seedreamSafetyChecker, wanSafetyChecker, fluxDevSafetyChecker, selectedLoraUrl,
+          refUrlsOverride: urls,
+        })
+        done++
+        setBatchProgress({ done, total: refBatchUrls.length })
+      })
+      setTimeout(() => setBatchProgress(null), 2500)
+      return
+    }
     return runGenerate({
       model, prompt, aspectRatio, quality, outputFormat, imageCount,
       seedreamSafetyChecker, wanSafetyChecker, fluxDevSafetyChecker, selectedLoraUrl,
@@ -18454,15 +18623,40 @@ function PromptBox({
                   <span className="opacity-70">{pinnedCost}</span>
                 </button>
               )}
-              {needsRefImage && !queueFull && (
+              {needsRefImage && !queueFull && !batchMode && (
                 <span className="text-[10px] text-amber-400/80 shrink-0">Requires ≥1 ref image</span>
               )}
-              {queueFull && (
+              {queueFull && !batchMode && (
                 <span className="text-[10px] text-red-400/80 shrink-0">Queue full ({activeJobCount}/{maxConcurrent === Infinity ? "∞" : maxConcurrent})</span>
+              )}
+              {/* ADMIN BATCH MODE — one generation per staged batch, same prompt.
+                  Admin-only because it deliberately floods the queue. */}
+              {isAdminAccount && onToggleBatchMode && (
+                <button
+                  onClick={onToggleBatchMode}
+                  data-keep-refs-open
+                  title="Batch mode — build reference batches in the Refs dropdown; each batch runs as its own generation with this prompt"
+                  className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold transition-all shrink-0 ${
+                    batchMode
+                      ? "bg-cyan-500/15 border-cyan-500/40 text-cyan-300"
+                      : "bg-white/5 border-white/10 text-slate-400 hover:text-white hover:border-white/25"
+                  }`}
+                >
+                  <Layers size={12} />
+                  Batch
+                  {batchMode && refBatchUrls.length > 0 && (
+                    <span className="px-1.5 rounded-full bg-cyan-500/25 text-cyan-200 text-[10px] leading-4">{refBatchUrls.length}</span>
+                  )}
+                </button>
+              )}
+              {batchProgress && (
+                <span className="text-[10px] font-mono text-cyan-300 shrink-0">
+                  Queuing {batchProgress.done}/{batchProgress.total}…
+                </span>
               )}
               <button
                 onClick={handleGenerate}
-                disabled={!canGenerate}
+                disabled={batchMode ? (generating || refBatchUrls.length === 0 || !prompt.trim()) : !canGenerate}
                 data-keep-refs-open
                 className={`relative overflow-hidden flex items-center justify-center gap-2 px-4 py-1.5 rounded-lg text-[12px] font-bold transition-all flex-1 sm:flex-none ${
                   canGenerate
@@ -18481,8 +18675,10 @@ function PromptBox({
                 ) : (
                   <Ticket size={12} />
                 )}
-                {isGenerationMaintenance ? "Temporarily Offline" : queueFull ? "Queue Full" : "Generate"}
-                {!isGenerationMaintenance && !queueFull && !model.isLocalModel && <span className="opacity-70">{totalCost}</span>}
+                {isGenerationMaintenance ? "Temporarily Offline"
+                  : batchMode ? (refBatchUrls.length === 0 ? "No batches" : `Run ${refBatchUrls.length} batches`)
+                  : queueFull ? "Queue Full" : "Generate"}
+                {!isGenerationMaintenance && !queueFull && !batchMode && !model.isLocalModel && <span className="opacity-70">{totalCost}</span>}
               </button>
             </div>
           </div>
@@ -21678,38 +21874,33 @@ export default function PortalV2Page() {
         triggerDownload(blob, `file-${ids[0]}.${ext}`)
         setDownloadProgress({ done: 1, total: 1 })
       } else {
-        // Multiple files — server builds the zip so the client never has to
-        // hold every raw image blob in JS heap simultaneously (avoids the
-        // iPad Safari memory crash that occurred with the old client-side
-        // JSZip approach for large selections).
-        const url = `/api/images/zip?ids=${ids.join(",")}`
-        const res = await fetch(url)
-        if (!res.ok) throw new Error("Zip generation failed")
-
-        // Stream the response body so we can report download progress
-        const contentLength = parseInt(res.headers.get("Content-Length") ?? "0")
-        const reader = res.body!.getReader()
-        const chunks: BlobPart[] = []
-        let received = 0
-
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          if (value) {
-            chunks.push(value)
-            received += value.length
-            if (contentLength > 0) {
-              setDownloadProgress({
-                done: Math.min(Math.round((received / contentLength) * ids.length), ids.length - 1),
-                total: ids.length,
-              })
-            }
-          }
+        // Multiple files — the zips are STREAMED by the server and downloaded
+        // NATIVELY by the browser (anchor to the zip URL, no fetch). Pulling
+        // zip bytes through JS was the killer: a part of 4K originals is
+        // ~275MB, and iPad Safari ran out of tab memory holding the blobs —
+        // "5 of 6 parts failed". The browser's own download pipe has no such
+        // limit and shows its own progress per file. Safari asks "allow
+        // multiple downloads?" once — tap Allow.
+        const PART = 15
+        const stamp = Date.now()
+        const parts: number[][] = []
+        for (let i = 0; i < ids.length; i += PART) parts.push(ids.slice(i, i + PART))
+        for (let pi = 0; pi < parts.length; pi++) {
+          const label = parts.length === 1 ? String(stamp) : `${stamp}-part${pi + 1}of${parts.length}`
+          const a = document.createElement("a")
+          a.href = `/api/images/zip?ids=${parts[pi].join(",")}&part=${encodeURIComponent(label)}`
+          a.download = `selections-${label}.zip`
+          document.body.appendChild(a)
+          a.click()
+          document.body.removeChild(a)
+          setDownloadProgress({ done: Math.min((pi + 1) * PART, ids.length), total: ids.length })
+          // Stagger the handoffs — firing 6 downloads in the same tick makes
+          // Safari drop some silently
+          if (pi < parts.length - 1) await new Promise(r => setTimeout(r, 1500))
         }
-
-        const zipBlob = new Blob(chunks, { type: "application/zip" })
-        setDownloadProgress({ done: ids.length, total: ids.length })
-        triggerDownload(zipBlob, `selections-${Date.now()}.zip`)
+        setDownloadError(parts.length > 1
+          ? `${parts.length} zips handed to your browser — watch its download manager for progress`
+          : null)
       }
     } catch (err) {
       console.error("Bulk download failed:", err)
@@ -22141,8 +22332,20 @@ export default function PortalV2Page() {
   // list. Once seen (or dismissed) a job is never re-adopted, so a dismissed
   // tile stays dismissed instead of reappearing on the next 20s poll.
   const adoptedFluxJobsRef = useRef<Set<string>>(new Set())
+  // fal request ids already recovered into slots by the DB-job poller —
+  // synchronous guard against its interval racing its visibilitychange trigger
+  const recoveredJobsRef = useRef<Set<string>>(new Set())
+  // Defensive dedupe at the single entry point: a slotId (or a job's fal
+  // request id) may only ever occupy ONE slot. Recovery pollers that fire
+  // twice in quick succession — e.g. the 10s interval racing the
+  // visibilitychange handler when an iPad tab wakes — otherwise insert the
+  // same slot twice and React sees duplicate keys.
   const handleAddPending    = useCallback((slot: PendingSlot) =>
-    setPendingSlots(p => [{ ...slot, queuedAtMs: slot.queuedAtMs ?? Date.now() }, ...p]), [])
+    setPendingSlots(p => {
+      if (p.some(s => s.slotId === slot.slotId)) return p
+      if (slot.nb2RequestId && p.some(s => s.nb2RequestId === slot.nb2RequestId)) return p
+      return [{ ...slot, queuedAtMs: slot.queuedAtMs ?? Date.now() }, ...p]
+    }), [])
   // Slots whose failure has ALREADY produced an error card + server record —
   // repeat failure reports for the same slot (double-firing pollers, races)
   // must only update the slot, never mint another card or POST another row
@@ -23407,7 +23610,13 @@ export default function PortalV2Page() {
 
   useEffect(() => {
     if (!user) return
+    // Overlap guard: the 10s interval and the visibilitychange trigger can
+    // both fire on tab wake. Two passes running concurrently read identical
+    // pre-commit state and duplicate every recovery they perform.
+    let pollBusy = false
     const poll = async () => {
+      if (pollBusy) return
+      pollBusy = true
       try {
         // Update active count + ticket balance in parallel
         const [countRes, ticketRes] = await Promise.all([
@@ -23509,6 +23718,11 @@ export default function PortalV2Page() {
         for (const j of nb2DbJobs) {
           // Skip if already tracked by requestId, by any DB queue job ID, or already completed
           if (trackedRequestIds.has(j.falRequestId) || trackedDbJobIds.has(j.id) || doneNb2Ids.has(j.falRequestId)) continue
+          // SYNCHRONOUS guard: pendingSlotsRef only catches up after React
+          // commits, so two poll passes in the same tick both read it as
+          // empty. A ref Set updates immediately and closes that window.
+          if (recoveredJobsRef.current.has(j.falRequestId)) continue
+          recoveredJobsRef.current.add(j.falRequestId)
           const params = j.parameters as any
           const newSlot: PendingSlot = {
             slotId:         `db-${j.id}-${j.falRequestId.slice(-6)}`,
@@ -23525,7 +23739,7 @@ export default function PortalV2Page() {
           handleAddPending(newSlot)
           startNb2SlotPolling(j.falRequestId, newSlot.nb2FalEndpoint!, [newSlot.slotId], j.prompt, "png", newSlot.nb2AspectRatio || "auto", newSlot.nb2StatusUrl, newSlot.nb2Quality, newSlot.nb2TicketCost ?? 0, newSlot.referenceImageUrls || [])
         }
-      } catch {}
+      } catch {} finally { pollBusy = false }
     }
     poll()
     const id = setInterval(poll, 10000)
@@ -23848,6 +24062,18 @@ export default function PortalV2Page() {
   const [genEditCanvas, setGenEditCanvas] = useState<{ ref: RefImage; stack: RefLayerStack } | null>(null)
   // Frame Extractor (taskbar "Frames" button)
   const [framesOpen, setFramesOpen] = useState(false)
+  // ── Admin batch mode ──
+  // Batches of REF IDS; each becomes its own generation sharing the prompt.
+  // Admin-only: it intentionally bypasses the one-at-a-time rhythm normal
+  // users are held to by their concurrency limit.
+  const [batchMode, setBatchMode] = useState(false)
+  const [refBatches, setRefBatches] = useState<string[][]>([])
+  const refBatchUrls = useMemo(
+    () => refBatches
+      .map(ids => ids.map(id => refLibrary.find(r => r.id === id)?.url).filter((u): u is string => !!u))
+      .filter(urls => urls.length > 0),
+    [refBatches, refLibrary]
+  )
   const handleEditCanvas = useCallback((img: ImageItem) => {
     const refUrl = img.referenceImageUrls?.[0]
     if (!refUrl || !img.imageUrl?.startsWith("https://")) return
@@ -24762,6 +24988,9 @@ export default function PortalV2Page() {
               onDeleteFolder={handleDeleteRefFolder}
               disabled={scannerMode === "video" && !videoRefsEnabled && !motionRefsEnabled}
               libraryLimit={refLibraryLimit}
+              batchMode={isAdminAccount && batchMode && scannerMode === "image"}
+              batches={refBatches}
+              onBatchesChange={setRefBatches}
             />
             <ShopDropdown
               open={openDropdown === "shop"}
@@ -25039,7 +25268,7 @@ export default function PortalV2Page() {
               onDismissFail={handleDismissFail}
               onRetryFail={handleRetryFail}
               onRetryPending={handleRetryPendingSlot}
-              tileBorders={isAdminAccount && feedTileBorders ? feedBorderMode : false}
+              tileBorders={feedTileBorders ? feedBorderMode : false}
               onImageClick={setSelectedImage}
               onPendingClick={setPendingDetail}
               selectMode={selectMode}
@@ -25112,6 +25341,14 @@ export default function PortalV2Page() {
             isGenerationMaintenance={isGenerationMaintenance && !isAdminAccount && !isAuditAccount}
             isAdminAccount={isAdminAccount}
             ticketBalance={user?.ticketBalance ?? 0}
+            batchMode={isAdminAccount && batchMode}
+            onToggleBatchMode={() => setBatchMode(v => {
+              // Leaving batch mode discards staged batches so a stale set
+              // can't fire on the next ordinary Generate
+              if (v) setRefBatches([])
+              return !v
+            })}
+            refBatchUrls={refBatchUrls}
           />
           )}
         </>
@@ -25215,7 +25452,7 @@ export default function PortalV2Page() {
               masonryMode={feedMasonryMode}
               tileRes={feedTileRes}
               autoplay={feedVideoAutoplay}
-              tileBorders={isAdminAccount && feedTileBorders ? feedBorderMode : false}
+              tileBorders={feedTileBorders ? feedBorderMode : false}
             />
           </div>
 

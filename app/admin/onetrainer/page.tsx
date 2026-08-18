@@ -9,6 +9,7 @@ import {
   Sparkles, Eye, Maximize2, Minimize2, ChevronLeft, ChevronRight, Check, Clock,
 } from "lucide-react"
 import { SiteLogoBox } from "@/components/SitePageHeader"
+import { AUTOFILL_MODELS, autofillModelLabel } from '@/lib/autofill-models'
 
 // Portal design system: animated silver rim used for selected/highlight chrome
 const SILVER_RIM_CONIC =
@@ -1229,6 +1230,10 @@ interface DsImage {
   tags: string
   override: 'default' | 'caption' | 'tags' | 'prompt' | 'custom'
   customText: string
+  // Composable training-caption sections (GeneratedImage.captionSections):
+  // when present, the txt = caption + toggled sections (clean paragraphs) —
+  // takes precedence over the single-source override system above
+  sections?: { prompt?: boolean; tags?: boolean; noteOn?: boolean; note?: string } | null
   // Viewer extras (optional — presets saved before these existed lack them)
   url?: string
   // Pre-generated R2 thumbnail — tiles load this directly (fast) instead of
@@ -1241,6 +1246,18 @@ interface DsImage {
 }
 
 function resolveDsCaption(img: DsImage, defaultSource: 'caption' | 'tags' | 'prompt'): string {
+  // Section composition wins when configured (mirrors lib/caption-compose):
+  // base caption, then toggled sections as blank-line-separated paragraphs
+  const s = img.sections
+  if (s && (s.prompt || s.tags || (s.noteOn && s.note?.trim()))) {
+    const parts: string[] = []
+    const base = (img.caption || img.prompt || '').trim()
+    if (base) parts.push(base)
+    if (s.prompt && img.prompt.trim()) parts.push(img.prompt.trim())
+    if (s.noteOn && s.note?.trim()) parts.push(s.note.trim())
+    if (s.tags && img.tags.trim()) parts.push(img.tags.trim())
+    return parts.join('\n\n')
+  }
   const src = img.override === 'default' ? defaultSource : img.override
   if (src === 'custom') return img.customText
   if (src === 'tags')   return img.tags || img.caption || img.prompt || ''
@@ -1382,7 +1399,7 @@ function PickerMultiChips({ label, options, values, onChange }: {
   )
 }
 
-function DatasetImageViewer({ images, index, onClose, onNav, isSelected, onToggleSelect, onSaveCaption, onPatchImage, selectable = true }: {
+function DatasetImageViewer({ images, index, onClose, onNav, isSelected, onToggleSelect, onSaveCaption, onPatchImage, onSaveSections, selectable = true }: {
   images: DsImage[]
   index: number
   onClose: () => void
@@ -1395,6 +1412,8 @@ function DatasetImageViewer({ images, index, onClose, onNav, isSelected, onToggl
   // When provided, shows the per-image caption-source override controls
   // (moved here from the old Current Dataset list rows)
   onPatchImage?: (id: number, patch: Partial<DsImage>) => void
+  // When provided, shows the composable-sections toggles (persists to the DB)
+  onSaveSections?: (id: number, sections: DsImage['sections']) => void
   // false → read-only browsing (hides the Add-to-dataset button)
   selectable?: boolean
 }) {
@@ -1564,6 +1583,38 @@ function DatasetImageViewer({ images, index, onClose, onNav, isSelected, onToggl
                 )}
               </div>
             )}
+            {/* Composable txt sections — caption is always the base; toggles
+                add clean paragraphs. Persisted on the image (shared with the
+                dataset page) and takes precedence over Caption source. */}
+            {onSaveSections && (
+              <div className="space-y-1.5 pt-1.5 border-t border-white/[0.06]">
+                <span className="text-[9px] font-mono uppercase tracking-widest text-slate-600">Txt sections (caption +)</span>
+                <div className="flex items-center gap-1 flex-wrap">
+                  {([['prompt', 'Original prompt'], ['tags', 'Tags'], ['noteOn', 'Curator note']] as const).map(([k, label]) => {
+                    const on = !!img.sections?.[k]
+                    return (
+                      <button key={k}
+                        onClick={() => onSaveSections(img.id, { ...(img.sections ?? {}), [k]: !on })}
+                        className={`px-2 py-0.5 rounded-full border text-[9px] transition-colors ${
+                          on ? 'bg-cyan-500/15 border-cyan-500/30 text-cyan-300' : 'border-white/[0.08] text-slate-500 hover:text-white'}`}>
+                        + {label}
+                      </button>
+                    )
+                  })}
+                </div>
+                {img.sections?.noteOn && (
+                  <textarea value={img.sections?.note ?? ''} rows={2}
+                    onChange={e => onSaveSections(img.id, { ...(img.sections ?? {}), note: e.target.value })}
+                    placeholder="Your natural phrasing for this image…"
+                    className="w-full px-2 py-1.5 rounded-lg bg-white/[0.04] border border-cyan-500/20 text-[10px] text-white placeholder:text-slate-700 resize-none focus:outline-none focus:border-cyan-500/40" />
+                )}
+                {!!(img.sections && (img.sections.prompt || img.sections.tags || (img.sections.noteOn && img.sections.note?.trim()))) && (
+                  <pre className="max-h-24 overflow-y-auto whitespace-pre-wrap rounded-lg bg-black/40 border border-white/[0.06] px-2 py-1.5 text-[9.5px] leading-relaxed text-slate-400 font-sans">
+                    {resolveDsCaption(img, 'caption')}
+                  </pre>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1683,6 +1734,7 @@ function BucketPickerModal({ onClose, onBuilt, adminHeaders, initialData }: {
         tags: Array.isArray(img.adminTags) ? img.adminTags.join(', ') : '',
         override: 'default' as const,
         customText: '',
+        sections: img.captionSections ?? null,
         url: img.imageUrl ?? '',
         thumb: typeof img.thumbnailUrl === 'string' && img.thumbnailUrl ? img.thumbnailUrl : undefined,
         model: img.model ?? '',
@@ -1747,8 +1799,10 @@ function BucketPickerModal({ onClose, onBuilt, adminHeaders, initialData }: {
 
   // ── AutoFill (same background jobs as the Dataset page's AutoFill) ──
   const [afOpen, setAfOpen]           = useState(false)
-  const [afMode, setAfMode]           = useState<'flux' | 'caption' | 'tags'>('flux')
-  const [afModel, setAfModel]         = useState<'flash' | 'pro'>('flash')
+  const [afMode, setAfMode]           = useState<'flux' | 'caption' | 'tags' | 'append'>('flux')
+  // Append mode: curated names/titles wanted (true) vs strict visual-only
+  const [afNaming, setAfNaming]       = useState(true)
+  const [afModel, setAfModel]         = useState<string>('flash') // key into AUTOFILL_MODELS
   const [afTrigger, setAfTrigger]     = useState('')
   const [afContext, setAfContext]     = useState('')
   const [afOverwrite, setAfOverwrite] = useState(false)
@@ -1785,6 +1839,9 @@ function BucketPickerModal({ onClose, onBuilt, adminHeaders, initialData }: {
                 ...cur,
                 caption: row.adminCaption ?? cur.caption,
                 tags: Array.isArray(row.adminTags) && row.adminTags.length > 0 ? row.adminTags.join(', ') : cur.tags,
+                sections: row.captionSections !== undefined ? (row.captionSections ?? null) : cur.sections,
+                // prompt rides along too — restored snapshots store prompt: ''
+                prompt: typeof row.prompt === 'string' && row.prompt ? row.prompt : cur.prompt,
               })
             }
             return n
@@ -1802,11 +1859,15 @@ function BucketPickerModal({ onClose, onBuilt, adminHeaders, initialData }: {
       // Only the tapped targets (panel defaults to all on open)
       const ids = [...afTargets].filter(id => selected.has(id))
       if (ids.length === 0) { setError('No images selected for AutoFill — tap tiles or Select all'); return }
+      if (afMode === 'append' && !afContext.trim()) {
+        setError('Append Edit needs a description of the edit to apply'); return
+      }
       const res = await fetch('/api/admin/auto-caption/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...adminHeaders },
         body: JSON.stringify({
-          ids, mode: afMode, model: afModel, overwrite: afOverwrite, advanced: false,
+          ids, mode: afMode, model: afModel, overwrite: afOverwrite,
+          advanced: afMode === 'append' ? afNaming : false,
           context:     afContext.trim() || undefined,
           contextTags: afTrigger.trim() ? [afTrigger.trim()] : undefined,
         }),
@@ -1921,6 +1982,25 @@ function BucketPickerModal({ onClose, onBuilt, adminHeaders, initialData }: {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', ...adminHeaders },
       body: JSON.stringify({ ids: [id], caption: caption || null }),
+    }).catch(() => {})
+  }
+
+  // Composable caption sections — updates local composer state AND persists to
+  // the image record (shared with the dataset page's section toggles)
+  function saveSections(id: number, sections: DsImage['sections']) {
+    const clean = sections && (sections.prompt || sections.tags || sections.noteOn || sections.note?.trim())
+      ? sections : null
+    setSelected(prev => {
+      const n = new Map(prev)
+      const cur = n.get(id)
+      if (cur) n.set(id, { ...cur, sections: clean })
+      return n
+    })
+    setBucketImages(prev => prev.map(i => i.id === id ? { ...i, sections: clean } : i))
+    fetch('/api/admin/dataset', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...adminHeaders },
+      body: JSON.stringify({ ids: [id], captionSections: clean }),
     }).catch(() => {})
   }
 
@@ -2082,6 +2162,7 @@ function BucketPickerModal({ onClose, onBuilt, adminHeaders, initialData }: {
       tags: normTags(img.tags),
       override: 'default' as const,
       customText: '',
+      sections: img.captionSections ?? null,
       url: img.url ?? '',
       thumb: typeof img.thumbnailUrl === 'string' && img.thumbnailUrl ? img.thumbnailUrl : undefined,
       model: img.model ?? '',
@@ -3003,35 +3084,64 @@ function BucketPickerModal({ onClose, onBuilt, adminHeaders, initialData }: {
             {afOpen && (
               <div className="px-4 py-2.5 border-b border-white/[0.06] shrink-0 space-y-2">
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  {([['flux', 'FLUX Caption'], ['caption', 'Caption'], ['tags', 'Tags']] as const).map(([v, l]) => (
+                  {([['flux', 'FLUX Caption'], ['caption', 'Caption'], ['tags', 'Tags'], ['append', 'Append Edit']] as const).map(([v, l]) => (
                     <button key={v} onClick={() => setAfMode(v)}
                       className={`px-2 py-1 rounded-md border text-[9px] font-medium transition-colors ${
-                        afMode === v ? (v === 'flux' ? 'bg-amber-500/15 border-amber-500/30 text-amber-300' : 'bg-white/10 border-white/25 text-white') : 'border-white/10 text-slate-500 hover:text-slate-300'}`}>
+                        afMode === v
+                          ? v === 'flux' ? 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+                          : v === 'append' ? 'bg-violet-500/15 border-violet-500/30 text-violet-300'
+                          : 'bg-white/10 border-white/25 text-white'
+                          : 'border-white/10 text-slate-500 hover:text-slate-300'}`}>
                       {l}
                     </button>
                   ))}
                   <span className="w-px h-3 bg-white/10" />
-                  {([['flash', 'Flash'], ['pro', 'Pro']] as const).map(([v, l]) => (
-                    <button key={v} onClick={() => setAfModel(v)}
+                  <select value={afModel} onChange={e => setAfModel(e.target.value)}
+                    className="px-1.5 py-1 rounded-md border border-white/10 bg-[#0a101d] text-[9px] text-white focus:outline-none focus:border-white/30 cursor-pointer">
+                    {AUTOFILL_MODELS.map(m => (
+                      <option key={m.key} value={m.key}>{m.label}</option>
+                    ))}
+                  </select>
+                  {/* Append always rewrites the caption it revises */}
+                  {afMode !== 'append' && (
+                    <button onClick={() => setAfOverwrite(v => !v)}
+                      title="Re-caption images that already have a caption"
                       className={`px-2 py-1 rounded-md border text-[9px] transition-colors ${
-                        afModel === v ? 'bg-white/10 border-white/25 text-white' : 'border-white/10 text-slate-500 hover:text-slate-300'}`}>
-                      {l}
+                        afOverwrite ? 'bg-white/10 border-white/25 text-white' : 'border-white/10 text-slate-500 hover:text-slate-300'}`}>
+                      Overwrite
                     </button>
-                  ))}
-                  <button onClick={() => setAfOverwrite(v => !v)}
-                    title="Re-caption images that already have a caption"
-                    className={`px-2 py-1 rounded-md border text-[9px] transition-colors ${
-                      afOverwrite ? 'bg-white/10 border-white/25 text-white' : 'border-white/10 text-slate-500 hover:text-slate-300'}`}>
-                    Overwrite
-                  </button>
+                  )}
                 </div>
+                {afMode === 'append' && (
+                  <>
+                    <p className="text-[9px] text-violet-300/80 leading-relaxed">
+                      Rewrites each image&apos;s <span className="text-violet-200">existing</span> caption using your description below. Uncaptioned images are skipped.
+                    </p>
+                    <button onClick={() => setAfNaming(v => !v)}
+                      className={`w-full px-2 py-1 rounded-md border text-[9px] text-left transition-colors ${
+                        afNaming ? 'bg-violet-500/10 border-violet-500/25 text-violet-200' : 'border-white/10 text-slate-500 hover:text-slate-300'}`}>
+                      {afNaming ? '✓ Curated naming — names + titles become prompt handles' : 'Strict visual only — no names or titles'}
+                    </button>
+                  </>
+                )}
                 <div className="flex items-center gap-1.5">
-                  <input value={afTrigger} onChange={e => setAfTrigger(e.target.value)} placeholder="Trigger word (e.g. myloRa)…"
+                  <input value={afTrigger} onChange={e => setAfTrigger(e.target.value)}
+                    placeholder={afMode === 'append' ? 'Trigger word to preserve…' : 'Trigger word (e.g. myloRa)…'}
                     className="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[10px] text-white placeholder:text-slate-700 focus:outline-none focus:border-white/30" />
                 </div>
-                <textarea value={afContext} onChange={e => setAfContext(e.target.value)} rows={2}
-                  placeholder="Extra context for the captioner (subject name, style notes…)"
-                  className="w-full px-2 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[10px] text-white placeholder:text-slate-700 focus:outline-none focus:border-white/30 resize-none" />
+                <textarea value={afContext} onChange={e => setAfContext(e.target.value)} rows={afMode === 'append' ? 4 : 2}
+                  placeholder={afMode === 'append'
+                    ? 'Describe the edit in your own words…\n\ne.g. Tony Bulgoni wearing his red and white super suit — call it "red and white super suit" every time'
+                    : 'Extra context for the captioner (subject name, style notes…)'}
+                  className={`w-full px-2 py-1.5 rounded-lg text-[10px] text-white placeholder:text-slate-700 focus:outline-none resize-none ${
+                    afMode === 'append'
+                      ? 'bg-violet-500/[0.04] border border-violet-500/25 focus:border-violet-500/50'
+                      : 'bg-white/[0.04] border border-white/[0.08] focus:border-white/30'}`} />
+                {afMode === 'append' && (
+                  <p className="text-[9px] text-slate-600 leading-relaxed">
+                    Your exact wording is adopted for anything <span className="text-slate-400">visible</span> in the image. Lore the model can&apos;t see (film titles, backstory) is left out rather than asserted.
+                  </p>
+                )}
                 {/* Target picker — tap tiles below to choose which images run */}
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-[9px] font-mono text-amber-300/80">
@@ -3050,16 +3160,22 @@ function BucketPickerModal({ onClose, onBuilt, adminHeaders, initialData }: {
                     Clear
                   </button>
                 </div>
-                <button onClick={startAutofill} disabled={afTargetCount === 0 || afRunning}
-                  className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] font-semibold hover:bg-amber-500/25 transition-colors disabled:opacity-40">
+                <button onClick={startAutofill}
+                  disabled={afTargetCount === 0 || afRunning || (afMode === 'append' && !afContext.trim())}
+                  className={`w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border text-[10px] font-semibold transition-colors disabled:opacity-40 ${
+                    afMode === 'append'
+                      ? 'bg-violet-500/15 border-violet-500/30 text-violet-300 hover:bg-violet-500/25'
+                      : 'bg-amber-500/15 border-amber-500/30 text-amber-300 hover:bg-amber-500/25'}`}>
                   {afRunning ? <Loader2 size={10} className="animate-spin" /> : <Sparkles size={10} />}
                   {afRunning && afJob
-                    ? `Captioning ${afJob.processed + afJob.skipped + afJob.failed}/${afJob.total}…`
-                    : `AutoFill ${afTargetCount} image${afTargetCount === 1 ? '' : 's'}`}
+                    ? `${afMode === 'append' ? 'Revising' : 'Captioning'} ${afJob.processed + afJob.skipped + afJob.failed}/${afJob.total}…`
+                    : afMode === 'append' && !afContext.trim()
+                      ? 'Describe the edit above'
+                      : `${afMode === 'append' ? 'Append Edit to' : 'AutoFill'} ${afTargetCount} image${afTargetCount === 1 ? '' : 's'}`}
                 </button>
                 {afJob && !afRunning && (
                   <p className="text-[9px] text-slate-500 font-mono">
-                    Done — {afJob.processed} captioned{afJob.skipped > 0 ? ` · ${afJob.skipped} skipped` : ''}{afJob.failed > 0 ? ` · ${afJob.failed} failed` : ''}. Captions saved to the images.
+                    Done — {afJob.processed} {afMode === 'append' ? 'revised' : 'captioned'}{afJob.skipped > 0 ? ` · ${afJob.skipped} skipped` : ''}{afJob.failed > 0 ? ` · ${afJob.failed} failed` : ''}. Captions saved to the images.
                   </p>
                 )}
                 {afRunning && (
@@ -3238,6 +3354,7 @@ function BucketPickerModal({ onClose, onBuilt, adminHeaders, initialData }: {
           isSelected={(id) => selected.has(id)}
           onToggleSelect={toggleImage}
           onSaveCaption={saveCaption}
+          onSaveSections={saveSections}
         />
       )}
       {/* Current-dataset viewer — view/edit captions + per-image caption source */}
@@ -3250,6 +3367,7 @@ function BucketPickerModal({ onClose, onBuilt, adminHeaders, initialData }: {
           isSelected={(id) => selected.has(id)}
           onToggleSelect={toggleImage}
           onSaveCaption={saveCaption}
+          onSaveSections={saveSections}
           onPatchImage={patchImage}
         />
       )}

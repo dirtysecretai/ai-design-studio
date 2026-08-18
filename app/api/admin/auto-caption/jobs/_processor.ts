@@ -5,10 +5,11 @@ export const CHUNK_SIZE = 5
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!
 
-const MODELS = {
-  pro:   'gemini-3.1-pro-preview',
-  flash: 'gemini-3.1-flash-lite-preview',
-}
+// Model whitelist lives in lib/autofill-models.ts (client-safe, shared with
+// both admin pages' dropdowns)
+export { AUTOFILL_MODELS } from '@/lib/autofill-models'
+import { AUTOFILL_MODELS as _AM } from '@/lib/autofill-models'
+const MODELS: Record<string, string> = Object.fromEntries(_AM.map(m => [m.key, m.apiId]))
 
 type ImagePart  = { inlineData: { data: string; mimeType: string } }
 type TextPart   = { text: string }
@@ -199,6 +200,78 @@ TARGET LENGTH: 120–220 words
 Respond with ONLY the caption text. No preamble, no section headers, no quotes, no markdown.`
 }
 
+// APPEND mode — rewrite an EXISTING caption per a natural-language edit.
+// The model sees the image + the current caption + the instruction, and
+// returns the full revised caption.
+//
+// CONDITIONAL NAMING (naming=true, the default) is the point of this mode.
+// Training correlates TOKENS with PIXELS — it has no notion of "description"
+// vs "lore". Any phrase that consistently co-occurs with a visual cluster
+// becomes a promptable handle, so curated names ("Tony Bulgoni's red and
+// white super suit", "from Hot Dog Man") DO give the user extra ways to
+// summon the look, and invented names are ideal because the base model holds
+// no competing prior for them.
+//
+// What actually breaks a handle is NON-DISCRIMINATIVE naming: if the phrase
+// lands on images that don't share the visual, it averages into mush. Hence
+// the rule below is conditional — a name is attached only where its visual
+// referent is actually present, never blanket-applied. naming=false falls
+// back to strict visual-only editing.
+function buildAppendInstruction(
+  existingCaption: string,
+  instruction: string,
+  triggerWord: string | null,
+  refCount: number,
+  naming: boolean,
+): string {
+  // Emphatic and placed LAST (recency) — flash-lite was silently dropping the
+  // rename when the rest of the edit turned out to be inapplicable
+  const triggerLine = triggerWord
+    ? `\n\n═══ MANDATORY ═══\nThe caption MUST contain the exact token "${triggerWord}" once, early, as the subject's identity — replacing any other name currently used for the subject. This is required even if every other part of the edit turns out not to apply to this image.`
+    : ''
+  const refOrderNote = refCount > 0
+    ? `IMAGE ORDER: Image 1 = the training image (the caption describes THIS). Images 2–${refCount + 1} = references for identity context only.`
+    : 'One image provided — it is the training image the caption describes.'
+
+  const groundingRule = naming
+    ? `3. NAMING RULE — the core of this mode:
+   • The curator's names, titles and phrases ARE wanted in the caption. They become prompt handles, so use them VERBATIM and identically every time.
+   • CONDITIONAL ATTACHMENT: attach a name only to an image where the thing it names is actually present. If the edit says the red and white super suit is "from Hot Dog Man", include that naming ONLY when the suit is visible in THIS image. If the suit is absent, omit the suit naming entirely — do not mention it.
+   • Subject/character names may always be used as the subject's identity, even when only the person is visible.
+   • NEVER invent visual details to match a name. Name what is there; do not describe what is not.
+   • If the edit contradicts the image, follow the IMAGE and silently omit the contradiction.`
+    : `3. GROUNDING RULE (strict visual mode):
+   • Describe ONLY what is visibly present. Adopt the curator's vocabulary for visible things.
+   • Do NOT state titles, backstory or in-fiction names as visual facts. A proper name may be used as the subject's name only.
+   • If the edit contradicts the image, follow the IMAGE and silently omit the contradiction.`
+
+  return `You are a professional AI model trainer REVISING an existing LoRA training caption.
+
+${refOrderNote}
+
+═══ CURRENT CAPTION ═══
+${existingCaption}
+
+═══ REQUESTED EDIT (curator's own words) ═══
+${instruction}
+
+═══ HOW TO APPLY THE EDIT ═══
+
+1. Start from the CURRENT CAPTION. Preserve everything still accurate — its structure, ordering, level of detail, and its quality descriptors.
+2. Apply the curator's edit, ADOPTING THEIR EXACT VOCABULARY. If they call it a "red and white super suit", use that phrase verbatim — identical wording across the dataset is what makes it a reliable prompt handle.
+${groundingRule}
+4. Do not simply append a sentence to the end — weave the edit into the relevant existing sentences so the caption reads as one coherent description.
+5. Keep roughly the original length (±30%).${triggerLine}
+
+═══ WRITING RULES ═══
+✓ Natural descriptive sentences, not comma-separated tags
+✓ Specific colors, materials, textures
+✗ No subjective adjectives (menacing, beautiful, iconic)
+✗ No "the image shows", "we can see", "depicting"
+
+Respond with ONLY the revised caption. No preamble, no quotes, no markdown, no commentary about what you changed.`
+}
+
 type JobRecord = {
   id:                 number
   prompt:             string
@@ -253,7 +326,7 @@ async function _processChunk(jobId: string, baseUrl: string): Promise<void> {
   const job = await prisma.autoFillJob.findUnique({ where: { id: jobId } })
   if (!job || job.status !== 'running') return
 
-  const modelId = MODELS[job.modelKey as 'pro' | 'flash'] ?? MODELS.flash
+  const modelId = MODELS[job.modelKey] ?? MODELS.flash
 
   const records: JobRecord[] = await prisma.generatedImage.findMany({
     where:   { id: { in: job.imageIds as number[] }, isDeleted: false },
@@ -287,8 +360,19 @@ async function _processChunk(jobId: string, baseUrl: string): Promise<void> {
 
     const record = ordered[i]
 
+    // APPEND mode needs an existing caption to revise — nothing to edit
+    // otherwise. (Its whole purpose is rewriting, so `overwrite` doesn't
+    // apply: it always writes back over the caption it just revised.)
+    if (job.mode === 'append' && !record.adminCaption?.trim()) {
+      skippedCount++
+      newResults.push({ id: record.id, type: 'skip', imageUrl: record.imageUrl, error: 'No caption to edit — run a caption pass first' })
+      const allResults = [...existingResults, ...newResults].slice(-100)
+      await prisma.autoFillJob.update({ where: { id: jobId }, data: { nextIndex: i + 1, skippedCount, results: allResults } })
+      continue
+    }
+
     // Skip already-processed
-    if (!job.overwrite) {
+    if (!job.overwrite && job.mode !== 'append') {
       const alreadyCaptioned = (job.mode === 'caption' || job.mode === 'flux') && !!record.adminCaption
       const alreadyTagged    = job.mode === 'tags' && record.adminTags.length > 0
       if (alreadyCaptioned || alreadyTagged) {
@@ -321,7 +405,23 @@ async function _processChunk(jobId: string, baseUrl: string): Promise<void> {
       let savedValue: string
       let savedTags:  string[] | undefined
 
-      if (job.mode === 'flux') {
+      if (job.mode === 'append') {
+        const refUrls   = (record.referenceImageUrls ?? []).slice(0, 3)
+        const refImages = (await Promise.all(refUrls.map(fetchImageAsBase64Safe))).filter((x): x is { data: string; mimeType: string } => !!x)
+        const parts: GeminiPart[] = [
+          { inlineData: mainImage },
+          ...refImages.map(img => ({ inlineData: img })),
+          // `advanced` doubles as the naming flag for append mode (no schema
+          // change): true = curated names/titles wanted, false = strict visual
+          { text: buildAppendInstruction(record.adminCaption!.trim(), job.curatorContext ?? '', job.triggerWord, refImages.length, job.advanced) },
+        ]
+        const raw = await callGeminiParts(parts, modelId, 1400, 90_000)
+        savedValue = raw.replace(/^["']|["']$/g, '').trim()
+        // Guard: a refusal or empty return must never wipe a good caption
+        if (savedValue.length < 20) throw new Error('Revision came back empty or too short — caption left unchanged')
+        await prisma.generatedImage.update({ where: { id: record.id }, data: { adminCaption: savedValue } })
+
+      } else if (job.mode === 'flux') {
         const refUrls   = (record.referenceImageUrls ?? []).slice(0, 3)
         const refImages = (await Promise.all(refUrls.map(fetchImageAsBase64Safe))).filter((x): x is { data: string; mimeType: string } => !!x)
         const parts: GeminiPart[] = [{ inlineData: mainImage }, ...refImages.map(img => ({ inlineData: img })), { text: buildFluxInstruction(promptSnippet, refImages.length, rating, job.triggerWord) }]

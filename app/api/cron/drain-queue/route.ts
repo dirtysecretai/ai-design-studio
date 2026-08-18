@@ -3,6 +3,8 @@ import prisma from '@/lib/prisma'
 import { promoteNextQueuedJob, FAL_GLOBAL_ID } from '@/lib/fal-queue'
 import { syncActiveCounters } from '@/app/api/admin/queue/stats/route'
 import { processChunk, getBaseUrl } from '@/app/api/admin/auto-caption/jobs/_processor'
+import { uploadToR2 } from '@/lib/r2'
+import { releaseQueueSlot } from '@/lib/admin-queue-helpers'
 
 // Jobs stuck in 'processing' longer than this are CANDIDATES for being reset.
 // Was 10 minutes, which force-failed jobs fal was still happily running —
@@ -43,7 +45,10 @@ export async function GET(request: Request) {
 
     const staleCandidates = await prisma.generationQueue.findMany({
       where: { status: 'processing', startedAt: { lt: staleThreshold } },
-      select: { id: true, modelType: true, startedAt: true, falRequestId: true, parameters: true },
+      select: {
+        id: true, modelType: true, startedAt: true, falRequestId: true, parameters: true,
+        userId: true, modelId: true, prompt: true, ticketCost: true, createdAt: true,
+      },
     })
 
     // NEVER fail a job fal is still running (or has finished). Ask fal for the
@@ -51,7 +56,7 @@ export async function GET(request: Request) {
     // away a completed image AND refunded the user for work we actually paid
     // for. Only jobs fal reports as gone/failed (or that we can't identify) are
     // reset. Unreachable fal = leave it alone and re-check next minute.
-    const verifyWithFal = async (j: typeof staleCandidates[number]): Promise<'alive' | 'dead' | 'unknown'> => {
+    const verifyWithFal = async (j: typeof staleCandidates[number]): Promise<'completed' | 'alive' | 'dead' | 'unknown'> => {
       const params = j.parameters as { falEndpoint?: string } | null
       const ep = params?.falEndpoint
       if (!j.falRequestId || !ep || !process.env.FAL_KEY) return 'dead' // never submitted → safe to fail
@@ -64,12 +69,14 @@ export async function GET(request: Request) {
         })
         if (!res.ok) return res.status === 404 ? 'dead' : 'unknown'
         const d = await res.json() as { status?: string }
-        if (d.status === 'COMPLETED' || d.status === 'IN_PROGRESS' || d.status === 'IN_QUEUE') return 'alive'
+        if (d.status === 'COMPLETED') return 'completed'
+        if (d.status === 'IN_PROGRESS' || d.status === 'IN_QUEUE') return 'alive'
         return 'dead'
       } catch { return 'unknown' }
     }
 
     const toFail: number[] = []
+    const toHarvest: typeof staleCandidates = []
     let sparedAlive = 0
     for (const j of staleCandidates) {
       // Video gets a much longer grace period before we even consider it stale
@@ -77,6 +84,7 @@ export async function GET(request: Request) {
       if (j.startedAt && Date.now() - j.startedAt.getTime() < limitMin * 60 * 1000) continue
       const verdict = await verifyWithFal(j)
       if (verdict === 'dead') toFail.push(j.id)
+      else if (verdict === 'completed') { toHarvest.push(j); sparedAlive++ }
       else sparedAlive++
     }
 
@@ -97,6 +105,143 @@ export async function GET(request: Request) {
     } else if (sparedAlive > 0) {
       console.log(`[cron-drain] ${sparedAlive} long-running job(s) still alive at fal — left running`)
     }
+
+    // ── 1a-harvest. Save completed-at-fal jobs nobody is polling ─────────────
+    // A job that fal COMPLETED but that is still 'processing' after the stale
+    // threshold means the polling client is gone (tab closed mid-batch). We
+    // already paid fal for it — before this existed the row sat until fal
+    // purged the result and it eventually failed+refunded: pay fal AND refund
+    // the user AND lose the image. Now the cron finishes the client's job:
+    // fetch the result, re-host to R2, save GeneratedImage rows (queue-time
+    // createdAt keeps feed order), settle the row via releaseQueueSlot.
+    // Zero images returned = the model refused (content filter) — fail+refund,
+    // exactly what the live poller does. Image polling-jobs only; capped per
+    // run to stay inside the function budget (cron re-runs every minute).
+    // Newest first: fresh results are the ones fal still has — old rows whose
+    // results 504/expired must not head-of-line-block recoverable ones.
+    toHarvest.sort((a, b) => (b.startedAt?.getTime() ?? 0) - (a.startedAt?.getTime() ?? 0))
+    let harvested = 0
+    for (const j of toHarvest.slice(0, 6)) {
+      const params = j.parameters as {
+        falEndpoint?: string
+        falInput?: { aspect_ratio?: string; resolution?: string; output_format?: string }
+        permanentReferenceUrls?: string[]
+        usePolling?: boolean
+      } | null
+      if (j.modelType !== 'image' || !params?.usePolling || !j.falRequestId || !params.falEndpoint) continue
+      try {
+        // Idempotency: if images for this request were already saved (client
+        // came back and harvested first), just settle the row.
+        const already = await prisma.generatedImage.count({ where: { falRequestId: j.falRequestId } })
+        if (already > 0) {
+          await releaseQueueSlot(j.falRequestId, false)
+          harvested++
+          continue
+        }
+        const baseApp = params.falEndpoint.split('/').slice(0, 2).join('/')
+        const res = await fetch(`https://queue.fal.run/${baseApp}/requests/${j.falRequestId}`, {
+          headers: { Authorization: `Key ${process.env.FAL_KEY}` },
+          signal: AbortSignal.timeout(15000),
+        })
+        if (res.status === 422) {
+          // COMPLETED status but 422 result = the model finished WITHOUT usable
+          // output (content filter / validation refusal). Permanent — fail+refund.
+          await releaseQueueSlot(j.falRequestId, true, 'The model did not generate the expected output — content may have been filtered')
+          continue
+        }
+        if (res.status === 404 || res.status === 410) {
+          // Result purged by fal before we could harvest it — image is gone.
+          await releaseQueueSlot(j.falRequestId, true, 'Generation result expired before it could be saved')
+          continue
+        }
+        if (!res.ok) {
+          // 5xx: usually transient — but NanoBanana results expire at fal on
+          // the order of an hour, after which the result endpoint 500/504s
+          // permanently. A COMPLETED row whose result has been unfetchable
+          // this long is unrecoverable: settle it (fail+refund) instead of
+          // sparing it forever.
+          const ageMs = Date.now() - (j.startedAt?.getTime() ?? j.createdAt.getTime())
+          if (ageMs > 2 * 60 * 60 * 1000) {
+            await releaseQueueSlot(j.falRequestId, true, 'Generation result expired before it could be saved')
+          }
+          continue // young rows: transient, retry next minute
+        }
+        const data = await res.json() as { images?: { url: string; width?: number; height?: number }[] }
+        const falImages = Array.isArray(data?.images) ? data.images : []
+        if (falImages.length === 0) {
+          await releaseQueueSlot(j.falRequestId, true, 'The model did not generate the expected output — content may have been filtered')
+          continue
+        }
+        const format = params.falInput?.output_format || 'png'
+        const saved: string[] = []
+        for (let i = 0; i < falImages.length; i++) {
+          try {
+            const imgRes = await fetch(falImages[i].url, { signal: AbortSignal.timeout(30000) })
+            if (!imgRes.ok) continue
+            const buffer = Buffer.from(await imgRes.arrayBuffer())
+            const ext = format === 'jpeg' ? 'jpg' : format
+            const url = await uploadToR2(`nb2-${Date.now()}-${i}.${ext}`, buffer, `image/${format === 'jpeg' ? 'jpeg' : format}`)
+            await prisma.generatedImage.create({
+              data: {
+                userId:             j.userId,
+                prompt:             j.prompt || '',
+                imageUrl:           url,
+                model:              j.modelId,
+                ticketCost:         j.ticketCost,
+                quality:            params.falInput?.resolution || 'auto',
+                aspectRatio:        params.falInput?.aspect_ratio || 'auto',
+                referenceImageUrls: Array.isArray(params.permanentReferenceUrls) ? params.permanentReferenceUrls : [],
+                expiresAt:          new Date(Date.now() + 100 * 365 * 24 * 60 * 60 * 1000),
+                falRequestId:       j.falRequestId,
+                createdAt:          j.createdAt, // queue time — the feed's ordering key
+              },
+            })
+            saved.push(url)
+          } catch (imgErr) {
+            console.error(`[cron-drain] harvest: image ${i} of ${j.falRequestId} failed:`, imgErr)
+          }
+        }
+        if (saved.length > 0) {
+          await prisma.generationQueue.update({
+            where: { id: j.id },
+            data: { resultUrl: saved[0] },
+          }).catch(() => {})
+          await releaseQueueSlot(j.falRequestId, false)
+          harvested++
+          console.log(`[cron-drain] Harvested ${saved.length} image(s) for orphaned job ${j.falRequestId}`)
+        }
+        // saved.length === 0 with images present = R2/network hiccup → leave
+        // 'processing', retried next minute
+      } catch (harvestErr) {
+        console.error(`[cron-drain] harvest error for ${j.falRequestId}:`, harvestErr)
+      }
+    }
+
+    // ── 1b. Sweep orphaned 'pending' claims ─────────────────────────────────
+    // 'pending' rows are atomic user-slot claims made at submit time (see
+    // claimUserGenerationRow). They live for a second or two before flipping
+    // to queued/processing — one older than 10 minutes means the function
+    // crashed mid-submit. Fail it (frees the user's slot) and refund IF the
+    // row was marked charged (parameters.chargeMode) before the crash.
+    const stalePending = await prisma.generationQueue.findMany({
+      where: { status: 'pending', createdAt: { lt: new Date(Date.now() - 10 * 60 * 1000) } },
+      select: { id: true, userId: true, ticketCost: true, parameters: true },
+    })
+    for (const p of stalePending) {
+      const settled = await prisma.generationQueue.updateMany({
+        where: { id: p.id, status: 'pending' }, // guard: exactly-once even across cron overlaps
+        data: { status: 'failed', completedAt: new Date(), errorMessage: 'Submission was interrupted — not charged' },
+      })
+      if (settled.count === 0) continue
+      const params = p.parameters as { chargeMode?: string } | null
+      if (params?.chargeMode === 'deduct' && p.ticketCost > 0) {
+        await prisma.ticket.update({
+          where: { userId: p.userId },
+          data: { balance: { increment: p.ticketCost } },
+        }).catch(() => {})
+      }
+    }
+    if (stalePending.length > 0) console.log(`[cron-drain] Swept ${stalePending.length} orphaned pending claim(s)`)
 
     // ── 2. Promote queued jobs into free slots ───────────────────────────────
     // Read current state.  If stale reset happened the counter was just synced;
@@ -165,7 +310,7 @@ export async function GET(request: Request) {
       }
     }
 
-    return NextResponse.json({ success: true, staleReset, promoted, autofillKicked: stuckAutofillJobs.length, autofillPromoted })
+    return NextResponse.json({ success: true, staleReset, harvested, promoted, autofillKicked: stuckAutofillJobs.length, autofillPromoted })
   } catch (error) {
     console.error('[cron-drain] Error:', error)
     return NextResponse.json({ error: 'Drain failed' }, { status: 500 })

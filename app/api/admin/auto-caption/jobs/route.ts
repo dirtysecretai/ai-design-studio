@@ -1,6 +1,6 @@
 import { after }  from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { processChunk, getBaseUrl } from './_processor'
+import { processChunk, getBaseUrl, AUTOFILL_MODELS } from './_processor'
 import { checkAuth } from '@/lib/admin-auth'
 
 
@@ -53,7 +53,7 @@ export async function POST(req: Request) {
     ids, mode, model: modelKey, overwrite = false, advanced = false, context, contextTags,
   } = await req.json() as {
     ids:          number[]
-    mode:         'caption' | 'tags' | 'flux'
+    mode:         'caption' | 'tags' | 'flux' | 'append'
     model:        'pro' | 'flash'
     overwrite:    boolean
     advanced:     boolean
@@ -62,14 +62,34 @@ export async function POST(req: Request) {
   }
 
   if (!Array.isArray(ids) || ids.length === 0) return new Response('ids required', { status: 400 })
-  if (!['caption', 'tags', 'flux'].includes(mode)) return new Response('invalid mode', { status: 400 })
+  if (!['caption', 'tags', 'flux', 'append'].includes(mode)) return new Response('invalid mode', { status: 400 })
+  // Validate the model key — an unknown key used to be stored verbatim,
+  // silently run flash-lite, AND be mislabeled "Pro" in the run list
+  if (modelKey !== undefined && !AUTOFILL_MODELS.some(m => m.key === modelKey)) {
+    return new Response('invalid model', { status: 400 })
+  }
+  // Append rewrites existing captions from a natural-language instruction —
+  // without one there is nothing to apply
+  if (mode === 'append' && !context?.trim()) {
+    return new Response('append mode needs an edit instruction', { status: 400 })
+  }
 
-  const curatorContext = [
-    ...(contextTags?.length ? [`Subjects/names: ${contextTags.join(', ')}`] : []),
-    ...(context ? [context] : []),
-  ].join(' — ') || null
+  const curatorContext = mode === 'append'
+    // Append: curatorContext carries the raw edit instruction verbatim (the
+    // processor feeds it to the model as the curator's own words). Names go in
+    // as a hint line rather than the "must be included" phrasing used below.
+    ? [context!.trim(), ...(contextTags?.length ? [`(Subject name(s): ${contextTags.join(', ')})`] : [])].join('\n')
+    : [
+        ...(contextTags?.length ? [`Subjects/names: ${contextTags.join(', ')}`] : []),
+        ...(context ? [context] : []),
+      ].join(' — ') || null
 
-  const triggerWord = mode === 'flux' ? (contextTags?.[0] ?? null) : null
+  const triggerWord = (mode === 'flux' || mode === 'append') ? (contextTags?.[0] ?? null) : null
+
+  // For append, `advanced` carries the NAMING flag (curated names/titles vs
+  // strict visual-only) — see buildAppendInstruction. Defaults on: naming is
+  // the reason to use this mode.
+  const advancedFlag = mode === 'append' ? advanced !== false : advanced
 
   // If a job is actively running (updated recently) or paused, enqueue; otherwise start immediately.
   // Ignore 'running' jobs not updated in 3+ minutes — they are stuck/zombie and the cron watchdog
@@ -89,7 +109,7 @@ export async function POST(req: Request) {
   const job = await prisma.autoFillJob.create({
     data: {
       status: initialStatus,
-      mode, modelKey: modelKey ?? 'flash', overwrite, advanced,
+      mode, modelKey: modelKey ?? 'flash', overwrite, advanced: advancedFlag,
       curatorContext, triggerWord, imageIds: ids, totalCount: ids.length,
     },
   })
