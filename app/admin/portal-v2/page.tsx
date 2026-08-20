@@ -5799,6 +5799,35 @@ function QueueDisplay({ active, max, label = "queue" }: { active: number; max: n
 // skeleton/fade, since the browser already holds the bytes
 const seenTileSrcs = new Set<string>()
 
+// Ledger of DISMISSED failed-generation tiles. A dismiss sometimes can't reach
+// its server row on the first try (the local card doesn't know its DB row id
+// yet, or the row is created server-side a beat AFTER the dismiss) — the row
+// then resurrects on refresh until dismissed a second time. The ledger records
+// every dismissal locally; the rehydrate fetch hides any returned row that
+// matches it AND re-sends the PATCH with the now-known row id, so one dismiss
+// always sticks. Entries the server stops returning are pruned as confirmed.
+const DISMISSED_FAILS_KEY = "pv2-dismissed-fails-v1"
+function loadDismissedFails(): { ids: number[]; reqs: string[] } {
+  try {
+    const raw = localStorage.getItem(DISMISSED_FAILS_KEY)
+    if (raw) {
+      const d = JSON.parse(raw)
+      return { ids: Array.isArray(d.ids) ? d.ids : [], reqs: Array.isArray(d.reqs) ? d.reqs : [] }
+    }
+  } catch { /* fresh */ }
+  return { ids: [], reqs: [] }
+}
+function saveDismissedFails(d: { ids: number[]; reqs: string[] }) {
+  try { localStorage.setItem(DISMISSED_FAILS_KEY, JSON.stringify({ ids: d.ids.slice(-300), reqs: d.reqs.slice(-300) })) } catch { /* quota */ }
+}
+function recordDismissedFail(queueRowId?: number | null, falRequestId?: string | null) {
+  if (queueRowId == null && !falRequestId) return
+  const d = loadDismissedFails()
+  if (queueRowId != null && !d.ids.includes(queueRowId)) d.ids.push(queueRowId)
+  if (falRequestId && !d.reqs.includes(falRequestId)) d.reqs.push(falRequestId)
+  saveDismissedFails(d)
+}
+
 // Learned tile ratios, persisted for the SESSION: a page refresh used to
 // forget every measured width:height, so "auto"-aspect portraits were
 // re-reserved as squares and overlapped their neighbors until each image
@@ -24790,7 +24819,30 @@ export default function PortalV2Page() {
         if (!res.ok) { failsFetchedForUserRef.current = null; return }
         const data = await res.json()
         if (!data.success) return
-        const rows: any[] = data.fails || []
+        let rows: any[] = data.fails || []
+        // Ledger sweep: rows the user already dismissed locally are HIDDEN and
+        // re-dismissed server-side with their now-known row ids (the first
+        // dismiss may have had nothing to target). Entries the server no
+        // longer returns are confirmed-dismissed and pruned.
+        {
+          const ledger = loadDismissedFails()
+          const lIds = new Set(ledger.ids)
+          const lReqs = new Set(ledger.reqs)
+          const isLocallyDismissed = (r: any) => lIds.has(r.id) || (r.falRequestId && lReqs.has(r.falRequestId))
+          const resurrected = rows.filter(isLocallyDismissed)
+          if (resurrected.length > 0) {
+            fetch('/api/user/failed-generations', {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ids: resurrected.map((r: any) => r.id) }),
+            }).catch(() => {})
+            rows = rows.filter((r: any) => !isLocallyDismissed(r))
+          }
+          saveDismissedFails({
+            ids: ledger.ids.filter(id => resurrected.some((r: any) => r.id === id)),
+            reqs: ledger.reqs.filter(rq => resurrected.some((r: any) => r.falRequestId === rq)),
+          })
+        }
         const serverKeys = new Set<string>(rows.flatMap(r => [`qf-${r.id}`, ...(r.falRequestId ? [`rf-${r.falRequestId}`] : [])]))
         const toIso = (v: any) => (typeof v === 'string' ? v : new Date(v).toISOString())
         const imgFails: ImageItem[] = rows.filter(r => r.modelType === 'image').map(r => ({
@@ -24834,6 +24886,9 @@ export default function PortalV2Page() {
     setPendingSlots(prev => prev.filter(s => s.failItemId !== item.id))
     const ids = item.queueRowId ? [item.queueRowId] : []
     const falRequestIds = !item.queueRowId && item.failKey?.startsWith('rf-') ? [item.failKey.slice(3)] : []
+    // Ledger: guarantees the dismissal is re-asserted on rehydrate even if
+    // this PATCH can't target the row yet (see DISMISSED_FAILS_KEY)
+    recordDismissedFail(item.queueRowId ?? null, item.failKey?.startsWith('rf-') ? item.failKey.slice(3) : null)
     if (ids.length || falRequestIds.length) {
       fetch('/api/user/failed-generations', {
         method: 'PATCH',
@@ -24860,6 +24915,8 @@ export default function PortalV2Page() {
     pendingSlots.forEach(s => {
       if (s.status === 'failed') collect(s.queueId ?? s.queueJobId ?? undefined, undefined, s.nb2RequestId)
     })
+    ids.forEach(id => recordDismissedFail(id, null))
+    falRequestIds.forEach(rq => recordDismissedFail(null, rq))
     setSavedFails([])
     setSavedVideoFails([])
     setVideoItems(prev => prev.filter(v => !v.failed))
@@ -24879,6 +24936,7 @@ export default function PortalV2Page() {
     setVideoItems(prev => prev.filter(v => !(v.failed && v.id === item.id)))
     const ids = item.queueRowId ? [item.queueRowId] : []
     const falRequestIds = !item.queueRowId && item.failKey?.startsWith('rf-') ? [item.failKey.slice(3)] : []
+    recordDismissedFail(item.queueRowId ?? null, item.failKey?.startsWith('rf-') ? item.failKey.slice(3) : null)
     if (ids.length || falRequestIds.length) {
       fetch('/api/user/failed-generations', {
         method: 'PATCH',
