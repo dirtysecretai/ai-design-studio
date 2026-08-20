@@ -11,11 +11,21 @@ const nextConfig: NextConfig = {
   // it breaks that path, so it must stay external; tracing then carries the
   // binary for the reference-video trim route on Vercel
   serverExternalPackages: ['ffmpeg-static'],
+  // Pin the workspace root: a stray lockfile in a parent directory made Next
+  // infer the wrong root (build warning), which fed the runaway tracing below.
+  turbopack: {
+    root: __dirname,
+  },
   outputFileTracingIncludes: {
     '/api/user/references/trim-video': ['./node_modules/ffmpeg-static/**'],
-    '/api/admin/dataset/convert-gif': ['./node_modules/ffmpeg-static/**'],
-    '/api/admin/dataset/trim-clip': ['./node_modules/ffmpeg-static/**'],
-    '/api/admin/lora-training/prepare': ['./node_modules/ffmpeg-static/**'],
+  },
+  // Routes importing lib/video-clip get their trace exploded to the ENTIRE
+  // project dir (AI/ training junk, .git, uploads — 14GB locally, 401MB of
+  // committed files on Vercel, over the 250MB function limit and failing every
+  // deploy). ffmpeg-static itself is traced automatically via its import; these
+  // excludes just keep the junk out of every function bundle.
+  outputFileTracingExcludes: {
+    '*': ['AI/**', '.git/**', 'public/uploads/**', 'Wan2.2/**', '**/*.pth', '**/*.safetensors'],
   },
 
   images: {
