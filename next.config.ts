@@ -13,6 +13,9 @@ const nextConfig: NextConfig = {
   serverExternalPackages: ['ffmpeg-static'],
   outputFileTracingIncludes: {
     '/api/user/references/trim-video': ['./node_modules/ffmpeg-static/**'],
+    '/api/admin/dataset/convert-gif': ['./node_modules/ffmpeg-static/**'],
+    '/api/admin/dataset/trim-clip': ['./node_modules/ffmpeg-static/**'],
+    '/api/admin/lora-training/prepare': ['./node_modules/ffmpeg-static/**'],
   },
 
   images: {

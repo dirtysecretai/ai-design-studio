@@ -43,7 +43,7 @@ interface LoraJob {
 interface ConfigField {
   key: string
   label: string
-  type: 'number' | 'float' | 'text' | 'select'
+  type: 'number' | 'float' | 'text' | 'select' | 'toggle'
   min?: number
   max?: number
   step?: number
@@ -60,6 +60,9 @@ interface ModelDef {
   estimatedTime: string
   defaultConfig: Record<string, unknown>
   configFields: ConfigField[]
+  // 'video' = trains on clips (mp4/mov/webm; GIFs auto-convert in prepare);
+  // absent/'image' = stills
+  mediaKind?: 'image' | 'video'
 }
 
 // ─── Model definitions ────────────────────────────────────────────────────────
@@ -137,6 +140,76 @@ const TRAINING_MODELS: ModelDef[] = [
       { key: 'steps',           label: 'Steps',           type: 'number', min: 100,      max: 10000, step: 100 },
       { key: 'learning_rate',   label: 'Learning Rate',   type: 'float',  min: 0.000001, max: 0.01,  step: 0.0001 },
       { key: 'default_caption', label: 'Default Caption', type: 'text',   placeholder: 'Fallback caption for uncaptioned images' },
+    ],
+  },
+  {
+    id: 'fal-ai/wan-22-trainer',
+    name: 'Wan 2.2 Video',
+    tag: 'wan22v',
+    color: 'emerald',
+    description: 'Video LoRA (T2V/I2V) — trains on clips; GIFs auto-convert. ~$0.005/step',
+    estimatedTime: '30-90 min',
+    mediaKind: 'video',
+    defaultConfig: {
+      variant: 't2v-a14b',
+      steps: 400,
+      learning_rate: 0.0002,
+      trigger_phrase: '',
+      auto_scale_input: true,
+    },
+    configFields: [
+      { key: 'variant',          label: 'Variant',        type: 'select', options: ['t2v-a14b', 'i2v-a14b'] },
+      { key: 'steps',            label: 'Steps',          type: 'number', min: 100,      max: 20000, step: 100 },
+      { key: 'learning_rate',    label: 'Learning Rate',  type: 'float',  min: 0.000001, max: 0.01,  step: 0.0001 },
+      { key: 'trigger_phrase',   label: 'Trigger Phrase', type: 'text',   placeholder: 'e.g. TOK_MOTION (optional)' },
+      { key: 'auto_scale_input', label: 'Auto-scale clips to 81 frames @16fps', type: 'toggle' },
+    ],
+  },
+  {
+    id: 'fal-ai/wan-22-image-trainer',
+    name: 'Wan 2.2 Image',
+    tag: 'wan22i',
+    color: 'amber',
+    description: 'Wan 2.2 text-to-image LoRA — subjects and styles. Trigger phrase required',
+    estimatedTime: '20-45 min',
+    defaultConfig: {
+      steps: 1000,
+      learning_rate: 0.0007,
+      trigger_phrase: '',
+      is_style: false,
+      use_face_detection: true,
+    },
+    configFields: [
+      { key: 'steps',              label: 'Steps',              type: 'number', min: 100,      max: 10000, step: 100 },
+      { key: 'learning_rate',      label: 'Learning Rate',      type: 'float',  min: 0.000001, max: 0.01,  step: 0.0001 },
+      { key: 'trigger_phrase',     label: 'Trigger Phrase *',   type: 'text',   placeholder: 'e.g. TOK, MYCHAR (required)' },
+      { key: 'is_style',           label: 'Style LoRA (disables face options)', type: 'toggle' },
+      { key: 'use_face_detection', label: 'Face-centered resizing', type: 'toggle' },
+    ],
+  },
+  {
+    id: 'fal-ai/ltx2-video-trainer',
+    name: 'LTX-2 Video',
+    tag: 'ltx2v',
+    color: 'violet',
+    description: 'LTX-2 19B video LoRA — native audio model; trains on clips. ~$0.0048/step',
+    estimatedTime: '30-120 min',
+    mediaKind: 'video',
+    defaultConfig: {
+      steps: 2000,
+      learning_rate: 0.0002,
+      rank: 32,
+      resolution: 'medium',
+      aspect_ratio: '1:1',
+      trigger_phrase: '',
+    },
+    configFields: [
+      { key: 'steps',          label: 'Steps',          type: 'number', min: 100,      max: 20000, step: 100 },
+      { key: 'learning_rate',  label: 'Learning Rate',  type: 'float',  min: 0.000001, max: 0.01,  step: 0.0001 },
+      { key: 'rank',           label: 'Rank',           type: 'select', options: ['8', '16', '32', '64', '128'] },
+      { key: 'resolution',     label: 'Resolution',     type: 'select', options: ['low', 'medium', 'high'] },
+      { key: 'aspect_ratio',   label: 'Aspect Ratio',   type: 'select', options: ['1:1', '16:9', '9:16'] },
+      { key: 'trigger_phrase', label: 'Trigger Phrase', type: 'text',   placeholder: 'e.g. TOK_MOTION (optional)' },
     ],
   },
   {
@@ -288,6 +361,22 @@ function ConfigFieldInput({
           options={field.options.map(o => ({ value: o, label: o }))}
         />
       </div>
+    )
+  }
+
+  if (field.type === 'toggle') {
+    const on = value === true
+    return (
+      <button
+        type="button"
+        onClick={() => onChange(field.key, !on)}
+        className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/[0.05] border border-white/[0.08] hover:bg-white/[0.07] transition-all"
+      >
+        <span className="text-xs text-slate-400 text-left">{field.label}</span>
+        <span className={`shrink-0 w-8 h-[18px] rounded-full relative transition-colors ${on ? 'bg-emerald-500/60' : 'bg-white/[0.1]'}`}>
+          <span className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white transition-all ${on ? 'left-[16px]' : 'left-[2px]'}`} />
+        </span>
+      </button>
     )
   }
 
@@ -530,7 +619,11 @@ export default function LoraTrainingPage() {
   // ── Start training ────────────────────────────────────────────────────────────
   async function startTraining() {
     const isEditTrainer = selectedModel.id === 'fal-ai/flux-2-trainer/edit'
-    if (!isEditTrainer && images.length === 0) return
+    // Video trainers: only send motion media (stills would be rejected server-side)
+    const sendable = selectedModel.mediaKind === 'video'
+      ? images.filter(i => /\.(gif|mp4|mov|m4v|webm)(\?|#|$)/i.test(i.imageUrl))
+      : images
+    if (!isEditTrainer && sendable.length === 0) return
     if (isEditTrainer && !trainingZipUrl) { setStartError('Upload a training ZIP first'); return }
     if (!jobName.trim()) { setStartError('Job name is required'); return }
 
@@ -541,7 +634,7 @@ export default function LoraTrainingPage() {
     try {
       const body = isEditTrainer
         ? { zipUrl: trainingZipUrl, modelId: selectedModel.id, config, name: jobName.trim() }
-        : { imageIds: images.map(i => i.id), modelId: selectedModel.id, config, name: jobName.trim() }
+        : { imageIds: sendable.map(i => i.id), modelId: selectedModel.id, config, name: jobName.trim() }
 
       const r = await fetch('/api/admin/lora-training/start', {
         method: 'POST',
@@ -624,11 +717,17 @@ export default function LoraTrainingPage() {
 
   const accent = accentClasses[selectedModel.color] ?? accentClasses.cyan
   const isEditTrainer = selectedModel.id === 'fal-ai/flux-2-trainer/edit'
-  const hasImages = images.length > 0
-  const tooFewImages = images.length > 0 && images.length < 10
+  const isVideoModel = selectedModel.mediaKind === 'video'
+  // Video trainers only eat motion media; GIFs count (prepare auto-converts them)
+  const usableImages = isVideoModel
+    ? images.filter(i => /\.(gif|mp4|mov|m4v|webm)(\?|#|$)/i.test(i.imageUrl))
+    : images
+  const excludedStills = isVideoModel ? images.length - usableImages.length : 0
+  const hasImages = usableImages.length > 0
+  const tooFewImages = usableImages.length > 0 && usableImages.length < 10
   const canStartTraining = isEditTrainer
     ? !!trainingZipUrl && !!jobName.trim()
-    : hasImages && images.length >= 5 && !!jobName.trim()
+    : hasImages && usableImages.length >= 5 && !!jobName.trim()
 
   return (
     <div className="min-h-screen bg-[#09090f] text-white">
@@ -845,7 +944,7 @@ export default function LoraTrainingPage() {
 
                   {hasImages && (
                     <span className={`text-sm font-medium ${tooFewImages ? 'text-yellow-400' : 'text-emerald-400'}`}>
-                      {images.length} images loaded
+                      {usableImages.length} {isVideoModel ? 'clips' : 'images'} loaded
                     </span>
                   )}
                 </div>
@@ -856,14 +955,24 @@ export default function LoraTrainingPage() {
                     {imageError}
                   </p>
                 )}
-                {tooFewImages && (
-                  <p className="text-xs text-yellow-400 bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-2">
-                    Warning: Training typically requires at least 10 images. You have {images.length}.
+                {excludedStills > 0 && (
+                  <p className="text-xs text-sky-400 bg-sky-500/10 border border-sky-500/20 rounded-lg px-3 py-2">
+                    {excludedStills} still image(s) excluded — the video trainer only uses clips and GIFs (GIFs auto-convert to MP4).
                   </p>
                 )}
-                {hasImages && images.length < 5 && (
+                {tooFewImages && (
+                  <p className="text-xs text-yellow-400 bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-2">
+                    Warning: Training typically requires at least 10 {isVideoModel ? 'clips' : 'images'}. You have {usableImages.length}.
+                  </p>
+                )}
+                {hasImages && usableImages.length < 5 && (
                   <p className="text-xs text-orange-400 bg-orange-500/10 border border-orange-500/20 rounded-lg px-3 py-2">
-                    Too few images ({images.length}). Please add at least 5 images before training.
+                    Too few items ({usableImages.length}). Please add at least 5 before training.
+                  </p>
+                )}
+                {isVideoModel && images.length > 0 && usableImages.length === 0 && (
+                  <p className="text-xs text-orange-400 bg-orange-500/10 border border-orange-500/20 rounded-lg px-3 py-2">
+                    No clips or GIFs in this selection — the video trainer needs motion media. Convert GIFs on the dataset page or upload MP4 clips.
                   </p>
                 )}
 
@@ -871,28 +980,41 @@ export default function LoraTrainingPage() {
                 {hasImages && (
                   <div className="mt-2">
                     <p className="text-[11px] text-slate-600 mb-2">
-                      Preview (first {Math.min(12, images.length)} of {images.length})
+                      Preview (first {Math.min(12, usableImages.length)} of {usableImages.length})
                     </p>
                     <div className="grid grid-cols-6 gap-1.5">
-                      {images.slice(0, 12).map(img => (
+                      {usableImages.slice(0, 12).map(img => {
+                        const vid = /\.(mp4|mov|m4v|webm)(\?|#|$)/i.test(img.imageUrl)
+                        return (
                         <div
                           key={img.id}
                           className="aspect-square rounded-lg overflow-hidden bg-white/[0.04] border border-white/[0.06] relative group"
                         >
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={img.imageUrl}
-                            alt={`img-${img.id}`}
-                            className="w-full h-full object-cover"
-                            onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
-                          />
+                          {vid ? (
+                            <video src={img.imageUrl} muted playsInline preload="metadata" className="w-full h-full object-cover" />
+                          ) : (
+                            /* eslint-disable-next-line @next/next/no-img-element */
+                            <img
+                              src={img.imageUrl}
+                              alt={`img-${img.id}`}
+                              className="w-full h-full object-cover"
+                              onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+                            />
+                          )}
+                          {vid && (
+                            <span className="absolute top-1 left-1 text-[8px] px-1 py-0.5 rounded bg-black/60 text-emerald-300 leading-none">clip</span>
+                          )}
+                          {/\.gif(\?|#|$)/i.test(img.imageUrl) && (
+                            <span className="absolute top-1 left-1 text-[8px] px-1 py-0.5 rounded bg-black/60 text-cyan-300 leading-none">gif→mp4</span>
+                          )}
                           {img.adminCaption && (
                             <div className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-1">
                               <p className="text-[9px] text-slate-300 line-clamp-3 leading-tight">{img.adminCaption}</p>
                             </div>
                           )}
                         </div>
-                      ))}
+                        )
+                      })}
                     </div>
                   </div>
                 )}
@@ -945,7 +1067,7 @@ export default function LoraTrainingPage() {
                 <div className="flex items-center gap-1.5">
                   {isEditTrainer
                     ? <><FileArchive size={12} /><span>{trainingZipUrl ? 'ZIP ready' : 'No ZIP uploaded'}</span></>
-                    : <><ImageIcon size={12} /><span>{hasImages ? `${images.length} images` : 'No images loaded'}</span></>
+                    : <><ImageIcon size={12} /><span>{hasImages ? `${usableImages.length} ${isVideoModel ? 'clips' : 'images'}` : `No ${isVideoModel ? 'clips' : 'images'} loaded`}</span></>
                   }
                 </div>
                 <div className="flex items-center gap-1.5">

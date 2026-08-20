@@ -8,7 +8,7 @@ import {
   Plus, Hash, ChevronDown, MousePointer2, Copy, ExternalLink,
   User, Calendar, Cpu, Layers, Clock, Fingerprint, Film, Video,
   FolderOpen, FolderPlus, Pencil, Trash2, MoreHorizontal,
-  UploadCloud, FileImage, HardDrive, Ruler, Check
+  UploadCloud, FileImage, HardDrive, Ruler, Check, Scissors
 } from "lucide-react"
 import { AddToBucketModal, type Bucket, type BucketFolder } from "@/components/AddToBucketModal"
 import { MultiFilterSelect } from "@/components/MultiFilterSelect"
@@ -571,11 +571,12 @@ function UploadModal({ bucketId, suggestions, onClose, onUploaded }: {
 
 // ─── Detail modal ─────────────────────────────────────────────────────────────
 
-function DetailModal({ img, suggestions, onClose, onSave }: {
+function DetailModal({ img, suggestions, onClose, onSave, onRefresh }: {
   img: ImageRecord
   suggestions: string[]
   onClose: () => void
   onSave: (id: number, tags: string[], caption: string | null, marked: boolean, sections: ImageRecord['captionSections']) => Promise<void>
+  onRefresh?: () => void
 }) {
   const [tags,    setTags]    = useState<string[]>(img.adminTags)
   const [caption, setCaption] = useState(img.adminCaption ?? "")
@@ -589,6 +590,45 @@ function DetailModal({ img, suggestions, onClose, onSave }: {
   const [imgErr,  setImgErr]  = useState(false)
   const [copied,  setCopied]  = useState<string | null>(null)
   const isVideo = img.imageUrl?.match(/\.(mp4|webm|mov)$/i)
+  const isGif   = /\.gif(\?|#|$)/i.test(img.imageUrl || "")
+  // Clip tools (GIF→MP4 convert, video trim for training clips)
+  const [clipBusy, setClipBusy] = useState(false)
+  const [clipMsg,  setClipMsg]  = useState<string | null>(null)
+  const [trimStart, setTrimStart] = useState("0")
+  const [trimEnd,   setTrimEnd]   = useState("")
+
+  async function convertGif() {
+    setClipBusy(true); setClipMsg(null)
+    try {
+      const res = await fetch('/api/admin/dataset/convert-gif', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ imageIds: [img.id] }),
+      })
+      const d = await res.json().catch(() => ({}))
+      const r = d?.results?.[0]
+      if (res.ok && r?.ok) { setClipMsg(`Clip created (#${r.clipId})`); onRefresh?.() }
+      else setClipMsg(r?.error || `Failed (HTTP ${res.status})`)
+    } catch { setClipMsg('Network error') }
+    finally { setClipBusy(false) }
+  }
+
+  async function trimClip() {
+    const s = parseFloat(trimStart), e = parseFloat(trimEnd)
+    if (!isFinite(s) || !isFinite(e) || e <= s) { setClipMsg('Enter a valid start/end'); return }
+    setClipBusy(true); setClipMsg(null)
+    try {
+      const res = await fetch('/api/admin/dataset/trim-clip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ imageId: img.id, startSec: s, endSec: e }),
+      })
+      const d = await res.json().catch(() => ({}))
+      if (res.ok && d?.success) { setClipMsg(`Trimmed to ${(d.duration ?? e - s).toFixed?.(1) ?? d.duration}s`); onRefresh?.() }
+      else setClipMsg(d?.error || `Failed (HTTP ${res.status})`)
+    } catch { setClipMsg('Network error') }
+    finally { setClipBusy(false) }
+  }
 
   const sectionsOut: ImageRecord['captionSections'] =
     (secPrompt || secTags || secNoteOn || secNote.trim())
@@ -684,6 +724,33 @@ function DetailModal({ img, suggestions, onClose, onSave }: {
                 </a>
               )}
             </div>
+
+            {/* Clip tools — GIF→MP4 conversion / training-clip trim */}
+            {(isGif || isVideo) && (
+              <div className="p-2 border-t border-white/[0.06] space-y-1.5">
+                {isGif && (
+                  <button onClick={convertGif} disabled={clipBusy}
+                    className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 text-[11px] hover:bg-cyan-500/15 transition-all disabled:opacity-50">
+                    {clipBusy ? <Loader2 size={11} className="animate-spin" /> : <Film size={11} />}
+                    Convert to MP4 clip
+                  </button>
+                )}
+                {isVideo && (
+                  <div className="flex items-center gap-1.5">
+                    <input value={trimStart} onChange={e => setTrimStart(e.target.value)} placeholder="start s" inputMode="decimal"
+                      className="w-16 px-2 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[11px] text-white placeholder:text-slate-600 focus:outline-none focus:border-cyan-500/40" />
+                    <input value={trimEnd} onChange={e => setTrimEnd(e.target.value)} placeholder="end s" inputMode="decimal"
+                      className="w-16 px-2 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[11px] text-white placeholder:text-slate-600 focus:outline-none focus:border-cyan-500/40" />
+                    <button onClick={trimClip} disabled={clipBusy}
+                      className="flex-1 flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-violet-500/10 border border-violet-500/20 text-violet-400 text-[11px] hover:bg-violet-500/15 transition-all disabled:opacity-50">
+                      {clipBusy ? <Loader2 size={11} className="animate-spin" /> : <Scissors size={11} />}
+                      Trim
+                    </button>
+                  </div>
+                )}
+                {clipMsg && <p className="text-[10px] text-slate-500">{clipMsg}</p>}
+              </div>
+            )}
 
             {/* Reference images */}
             {img.referenceImageUrls.length > 0 && (
@@ -2382,6 +2449,33 @@ export default function DatasetPage() {
     finally { setBulkLoading(false) }
   }
 
+  // ── Bulk GIF→MP4 conversion (training clips) ─────────────────────────────────
+  async function convertSelectedGifs() {
+    const gifIds = Array.from(selected).filter(id => {
+      const img = images.find(i => i.id === id)
+      return img && /\.gif(\?|#|$)/i.test(img.imageUrl || "")
+    })
+    if (gifIds.length === 0) { alert('No GIFs in the selection'); return }
+    setBulkLoading(true)
+    try {
+      let ok = 0, fail = 0
+      for (let i = 0; i < gifIds.length; i += 10) {
+        const res = await fetch('/api/admin/dataset/convert-gif', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ imageIds: gifIds.slice(i, i + 10) }),
+        })
+        const d = await res.json().catch(() => ({}))
+        for (const r of (d?.results ?? []) as { ok: boolean }[]) { if (r.ok) ok++; else fail++ }
+        if (!res.ok) fail += gifIds.slice(i, i + 10).length
+      }
+      alert(`Converted ${ok} GIF(s) to clips${fail ? ` — ${fail} failed` : ''}`)
+      setSelected(new Set())
+      fetchData()
+    } catch (e: any) { alert(`Failed: ${e.message}`) }
+    finally { setBulkLoading(false) }
+  }
+
   // Stable ref for per-card mark toggle — avoids breaking ImageCard memo
   const handleCardToggleMark = useCallback((id: number, current: boolean) => {
     const doToggle = async () => {
@@ -2792,6 +2886,7 @@ const modelOptions      = useMemo(() => (facets?.models    ?? []).map(m => ({ va
           suggestions={tagSuggestions}
           onClose={() => setDetailImg(null)}
           onSave={saveDetail}
+          onRefresh={() => fetchData()}
         />
       )}
       {bulkMode && (
@@ -3065,6 +3160,10 @@ const modelOptions      = useMemo(() => (facets?.models    ?? []).map(m => ({ va
               <button onClick={() => setAutoFillOpen(true)}
                 className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500/10 to-violet-500/10 border border-cyan-500/20 text-[11px] text-white/80 hover:text-white transition-all whitespace-nowrap">
                 <Sparkles size={11} /> Auto Fill
+              </button>
+              <button onClick={convertSelectedGifs} disabled={bulkLoading}
+                className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-cyan-500/10 border border-cyan-500/20 text-cyan-300 text-[11px] hover:bg-cyan-500/15 transition-all disabled:opacity-50 whitespace-nowrap">
+                {bulkLoading ? <Loader2 size={11} className="animate-spin" /> : <Film size={11} />} GIF→Clip
               </button>
               <button onClick={() => setBulkMode("tags")} disabled={bulkLoading}
                 className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 text-[11px] hover:bg-cyan-500/15 transition-all disabled:opacity-50 whitespace-nowrap">

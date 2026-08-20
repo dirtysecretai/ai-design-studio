@@ -385,13 +385,22 @@ async function _processChunk(jobId: string, baseUrl: string): Promise<void> {
       }
     }
 
-    // Skip videos
-    if (/\.(mp4|webm|mov)$/i.test(record.imageUrl)) {
-      skippedCount++
-      newResults.push({ id: record.id, type: 'skip', imageUrl: record.imageUrl, error: 'Video — images only' })
-      const allResults = [...existingResults, ...newResults].slice(-100)
-      await prisma.autoFillJob.update({ where: { id: jobId }, data: { nextIndex: i + 1, skippedCount, results: allResults } })
-      continue
+    // Videos: caption from the representative thumbnail frame when one exists
+    // (training clips made by convert-gif always have one). No thumbnail →
+    // nothing for the vision model to look at, so skip with a pointer.
+    let captionSourceUrl = record.imageUrl
+    if (/\.(mp4|webm|mov)(\?|#|$)/i.test(record.imageUrl)) {
+      const meta = record.videoMetadata as { thumbnailUrl?: unknown } | null
+      const thumb = meta && typeof meta.thumbnailUrl === 'string' ? meta.thumbnailUrl : null
+      if (thumb) {
+        captionSourceUrl = thumb
+      } else {
+        skippedCount++
+        newResults.push({ id: record.id, type: 'skip', imageUrl: record.imageUrl, error: 'Video without thumbnail — generate a thumbnail first' })
+        const allResults = [...existingResults, ...newResults].slice(-100)
+        await prisma.autoFillJob.update({ where: { id: jobId }, data: { nextIndex: i + 1, skippedCount, results: allResults } })
+        continue
+      }
     }
 
     if (!firstProcessed) await new Promise(r => setTimeout(r, 800))
@@ -400,7 +409,7 @@ async function _processChunk(jobId: string, baseUrl: string): Promise<void> {
     try {
       const promptSnippet = record.prompt.slice(0, 400)
       const rating        = record.imageRating ?? null
-      const mainImage     = await fetchImageAsBase64(record.imageUrl)
+      const mainImage     = await fetchImageAsBase64(captionSourceUrl)
 
       let savedValue: string
       let savedTags:  string[] | undefined

@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server'
+import { after } from 'next/server'
 import { uploadToR2 } from '@/lib/r2'
 import prisma from '@/lib/prisma'
 import { FAL_GLOBAL_ID, promoteNextQueuedJob } from '@/lib/fal-queue'
 import { releaseReservedTickets } from '@/lib/ticket-gate'
+import { getTrainerFamily } from '@/lib/trainer-families'
 
 // FAL.ai calls this endpoint when an async job completes or fails.
 // We must return 200 quickly — FAL.ai will retry on non-200 responses.
@@ -52,11 +54,37 @@ export async function POST(request: Request) {
             ?? data?.output_lora_file?.url
             ?? null
           const configUrl = data?.config_file?.url ?? null
+          // Trainer families (wan22/ltx2): capture EVERY output file url so
+          // finalize can re-host multi-file outputs (e.g. high_noise_lora)
+          const family = getTrainerFamily(loraJob.modelId)
+          const jobConfig = (loraJob.config ?? {}) as Record<string, unknown>
+          const resultUrls: Record<string, string> = {}
+          if (family && data) {
+            for (const f of family.outputFiles) {
+              const u = data[f.key]?.url
+              if (u) resultUrls[f.key] = u
+            }
+          }
           await prisma.loraTrainingJob.update({
             where: { id: loraJob.id },
-            data: { status: 'completed', loraUrl, configUrl },
+            data: {
+              status: 'completed', loraUrl, configUrl,
+              ...(family ? { config: { ...jobConfig, _result: resultUrls } as object } : {}),
+            },
           })
           console.log(`LoRA job #${loraJob.id} completed — loraUrl: ${loraUrl}`)
+          // Kick artifact re-hosting to R2 (idempotent; status poller also kicks)
+          if (family) {
+            after(async () => {
+              const base = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://prompt-protocol.vercel.app'
+              await fetch(`${base}/api/admin/lora-training/finalize`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'x-admin-password': process.env.ADMIN_PASSWORD ?? '' },
+                body: JSON.stringify({ jobId: loraJob.id }),
+                signal: AbortSignal.timeout(10_000),
+              }).catch(() => {})
+            })
+          }
         }
 
         return NextResponse.json({ received: true })

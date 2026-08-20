@@ -5,7 +5,7 @@ import { createPortal } from "react-dom"
 import Link from "next/link"
 import ChatWidget from "@/components/ChatWidget"
 import ChatHub, { ChatProviderSettings, ChatLayoutSettings, ChatAgentSettings, ChatAgentCapabilities, ChatApiKeysSettings } from "@/components/chat-hub"
-import { Image, Video, Type, ChevronDown, ChevronLeft, ChevronRight, Ticket, User, BookMarked, ImagePlus, X, Plus, Check, Copy, Download, RotateCcw, ShoppingBag, SlidersHorizontal, Bell, AlertTriangle, CheckCircle, Info, Sparkles, Music, BookOpen, Star, Trash2, Loader2, Eye, RefreshCw, Upload, Pencil, Eraser, Crop, Undo2, Square, Circle, Droplets, Lock, FolderPlus, Layers, Search, PanelLeft, PanelRight, PanelTop, PanelBottom, EyeOff, Folder, Maximize2, Minimize2, FolderInput, Zap, Pin, MessagesSquare, ArrowUpRight, Wand2, Scissors, List, LayoutGrid, Unlock, MousePointer2, ClipboardPaste, Play, Film } from "lucide-react"
+import { Image, Video, Type, ChevronDown, ChevronLeft, ChevronRight, Ticket, User, BookMarked, ImagePlus, X, Plus, Check, Copy, Download, RotateCcw, ShoppingBag, SlidersHorizontal, Bell, AlertTriangle, CheckCircle, Info, Sparkles, Music, BookOpen, Star, Trash2, Loader2, Eye, RefreshCw, Upload, Pencil, Eraser, Crop, Undo2, Square, Circle, Droplets, Lock, FolderPlus, Layers, Search, PanelLeft, PanelRight, PanelTop, PanelBottom, EyeOff, Folder, Maximize2, Minimize2, FolderInput, Zap, Pin, MessagesSquare, ArrowUpRight, Wand2, Scissors, List, LayoutGrid, Unlock, MousePointer2, ClipboardPaste, Play, Film, Mic, MicOff } from "lucide-react"
 import { AddToBucketModal, type Bucket, type BucketFolder } from "@/components/AddToBucketModal"
 import { NewsManager } from "@/components/NewsManager"
 import { HomeView } from "@/components/home/HomeView"
@@ -116,6 +116,8 @@ const IMAGE_MODEL_CONFIGS: ImageModelConfig[] = [
   { id: "seedream-5-pro",       apiId: "seedream-5-pro",           name: "SeeDream 5.0 Pro",    aspectRatios: ["1:1", "2:3", "3:2", "4:5", "3:4", "4:3", "9:16", "16:9"],       supportsQuality: true,  qualityOptions: ["2k"], maxReferenceImages: 10, isFal: false, maxImages: 4, supportsSafetyChecker: true },
   { id: "recraft-v4.1",         apiId: "recraft-v4.1",             name: "Recraft v4.1",        aspectRatios: ["1:1", "4:3", "3:4", "16:9", "9:16"],                            supportsQuality: false, maxReferenceImages: 0,  isFal: false, maxImages: 4, supportsSafetyChecker: true },
   { id: "wan-2.7-pro",          apiId: "wan-2.7-pro",              name: "Wan 2.7 Pro",         aspectRatios: ["1:1", "4:3", "16:9", "3:4", "9:16"],                     supportsQuality: false, maxReferenceImages: 4,  isFal: false, maxImages: 4 },
+  // ADMIN ONLY — Wan 2.2 A14B text-to-image with custom trained LoRAs
+  { id: "wan-2.2-t2i-lora",     apiId: "wan-2.2-t2i-lora",         name: "Wan 2.2 T2I LoRA",    aspectRatios: ["1:1", "4:3", "16:9", "3:4", "9:16"],                     supportsQuality: false, maxReferenceImages: 0,  isFal: false, maxImages: 4 },
   { id: "flux-1-dev",           apiId: "flux-1-dev",               name: "FLUX 1 Dev",          aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4"], supportsQuality: true, qualityOptions: ["1k", "2k", "4k"], maxReferenceImages: 1, isFal: true, maxImages: 1 },
   { id: "flux-2",               apiId: "flux-2",                   name: "FLUX 2",              aspectRatios: ["1:1", "4:5", "9:16", "16:9"],                            supportsQuality: false, maxReferenceImages: 4,  isFal: true  },
   { id: "pro-scanner-v3",       apiId: "gemini-3-pro-image",       name: "Pro Scanner v3",      aspectRatios: ["1:1", "2:3", "3:2", "4:5", "3:4", "4:3", "9:16", "16:9"], supportsQuality: true,  maxReferenceImages: 8,  isFal: false },
@@ -160,6 +162,7 @@ function calcTicketCost(modelId: string, quality: Quality, aspectRatio?: AspectR
   if (modelId === "kling-v3-image")     return 2
   if (modelId === "kling-o3-image")     return quality === "4k" ? 4 : 2
   if (modelId === "wan-2.7-pro")        return 4
+  if (modelId === "wan-2.2-t2i-lora")   return 2
   if (modelId === "pro-scanner-v3")     return quality === "4k" ? 15 : 7
   if (modelId === "flash-scanner-v2.5") return 1
   if (modelId === "gpt-image-2") {
@@ -701,6 +704,19 @@ const VIDEO_MODEL_CONFIGS: VideoModelConfig[] = [
     videoModes: ["t2v", "i2v", "r2v", "edit"],
   },
   {
+    // ADMIN ONLY — Wan 2.2 A14B with custom trained LoRAs (the video-loras
+    // training pipeline). fal-ai/wan/v2.2-a14b/{text,image}-to-video/lora;
+    // a LoRA picker panel appears when this model is selected.
+    id: "wan-2.2-lora",
+    name: "Wan 2.2 LoRA",
+    durations: ["3","4","5","6","7","8","9","10"],
+    resolutions: ["480p","580p","720p"],
+    aspectRatios: ["16:9","9:16","1:1"],
+    supportsEndFrame: false,
+    audioType: "none",
+    textToVideo: true,
+  },
+  {
     id: "lipsync-v3",
     name: "Lipsync v3",
     durations: [],
@@ -731,6 +747,7 @@ const IMAGE_MODEL_COST: Record<string, "$" | "$$" | "$$$" | "$$$+"> = {
   "kling-v3-image":      "$",
   "kling-o3-image":      "$$",
   "wan-2.7-pro":         "$$",
+  "wan-2.2-t2i-lora":    "$$",
   "nano-banana-pro-2":   "$$",
   "pro-scanner-v3":      "$$$",
   "nano-banana-pro":     "$$$",
@@ -795,6 +812,7 @@ const IMAGE_MODEL_GROUPS = [
 const ADMIN_IMAGE_MODEL_GROUPS = [
   // Gemini scanners retired from the public offering 2026-07-29 — admin only now
   { label: "Gemini",    type: "text to image",              accent: "text-blue-400",  dot: "bg-blue-400",  items: ["Flash Scanner v2.5", "Pro Scanner v3"] },
+  { label: "Wan",       type: "text to image · custom LoRA", accent: "text-violet-400", dot: "bg-violet-400", items: ["Wan 2.2 T2I LoRA"] },
   { label: "RunPod",    type: "local · PC must be running", accent: "text-cyan-400",  dot: "bg-cyan-500",  items: ["Real-ESRGAN (Local)", "DAT-2 (Local)", "Custom Flux LoRA"] },
   { label: "Upscalers", type: "enhance & enlarge images",   accent: "text-slate-400", dot: "bg-slate-500", items: ["Clarity Upscaler", "AuraSR", "ESRGAN", "DRCT", "SUPIR"] },
 ]
@@ -810,10 +828,83 @@ const VIDEO_MODEL_GROUPS = [
 ]
 const ADMIN_VIDEO_MODEL_GROUPS = [
   { label: "Google", type: "text · image · ref · edit to video · pricing TBD", accent: "text-blue-400", dot: "bg-blue-400", items: ["Gemini Omni Flash"] },
-  { label: "Wan",    type: "image & text to video · pricing TBD",             accent: "text-violet-400", dot: "bg-violet-400", items: ["Wan 2.7"] },
+  { label: "Wan",    type: "image & text to video · pricing TBD",             accent: "text-violet-400", dot: "bg-violet-400", items: ["Wan 2.7", "Wan 2.2 LoRA"] },
 ]
 // Model ids only admins may see/select in the video UI (also gated server-side)
-const ADMIN_VIDEO_MODEL_IDS = new Set(["gemini-omni-flash", "wan-2.7"])
+const ADMIN_VIDEO_MODEL_IDS = new Set(["gemini-omni-flash", "wan-2.7", "wan-2.2-lora"])
+
+// ── Wan 2.2 custom-LoRA picker (admin) ─────────────────────────────────────
+// Runs come from /api/admin/video-loras (training/video-loras/<run>/run.json).
+type VideoLoraRun = {
+  run: string; name: string; family: string | null; variant: string | null
+  trigger_phrase: string | null; loraUrl: string; highNoiseUrl: string | null; createdAt: string | null
+}
+type VideoLoraSel = { path: string; scale: number; transformer: "high" | "low" | "both"; name: string; trigger: string | null }
+
+function WanLoraPicker({ runs, sel, onSelect }: {
+  runs: VideoLoraRun[] | null
+  sel: VideoLoraSel | null
+  onSelect: (s: VideoLoraSel | null) => void
+}) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <div className="p-3 border-b border-white/5 space-y-2">
+      <p className="text-[10px] uppercase tracking-wider text-violet-400 font-semibold">Custom LoRA</p>
+      {runs === null ? (
+        <p className="text-[11px] text-slate-600">Loading trained LoRAs…</p>
+      ) : runs.length === 0 ? (
+        <p className="text-[11px] text-slate-600">No trained LoRAs yet — train one on the LoRA Training page.</p>
+      ) : (
+        <div className="space-y-1 max-h-44 overflow-y-auto">
+          {runs.map(r => {
+            const active = sel?.path === r.loraUrl
+            return (
+              <button
+                key={r.run}
+                onClick={() => onSelect(active ? null : { path: r.loraUrl, scale: sel?.scale ?? 1, transformer: sel?.transformer ?? "high", name: String(r.name), trigger: r.trigger_phrase })}
+                className={`w-full text-left px-2.5 py-1.5 rounded-lg border text-[11px] transition-all ${active ? "bg-violet-500/15 border-violet-500/40 text-violet-200" : "bg-white/[0.03] border-white/[0.07] text-slate-400 hover:bg-white/[0.06]"}`}
+              >
+                <span className="block truncate font-medium">{String(r.name)}</span>
+                <span className="block text-[9px] text-slate-600">{r.family ?? "wan22"}{r.variant ? ` · ${r.variant}` : ""}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+      {sel && (
+        <div className="space-y-2 pt-1">
+          <div>
+            <div className="flex items-center justify-between text-[10px] text-slate-500 mb-1">
+              <span>Strength</span><span className="text-slate-300">{sel.scale.toFixed(2)}</span>
+            </div>
+            <input
+              type="range" min={0} max={2} step={0.05} value={sel.scale}
+              onChange={e => onSelect({ ...sel, scale: parseFloat(e.target.value) })}
+              className="w-full accent-violet-500"
+            />
+          </div>
+          <div className="flex gap-1">
+            {(["high", "low", "both"] as const).map(t => (
+              <button key={t} onClick={() => onSelect({ ...sel, transformer: t })}
+                className={`flex-1 px-2 py-1 rounded-md text-[10px] border transition-all ${sel.transformer === t ? "bg-violet-500/20 border-violet-500/40 text-violet-200" : "bg-white/[0.03] border-white/[0.07] text-slate-500 hover:bg-white/[0.06]"}`}>
+                {t}
+              </button>
+            ))}
+          </div>
+          {sel.trigger && (
+            <button
+              onClick={() => { navigator.clipboard.writeText(sel.trigger!).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) }).catch(() => {}) }}
+              className="w-full px-2 py-1.5 rounded-md bg-white/[0.04] border border-white/[0.08] text-[10px] text-slate-400 hover:text-slate-200 transition-all truncate"
+              title="Copy trigger phrase"
+            >
+              {copied ? "Copied!" : <>trigger: <span className="text-violet-300">{sel.trigger}</span></>}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 // Flagship models — their rows in the model dropdowns get the animated silver rim
 const SILVER_RIM_MODELS = new Set([
@@ -5708,6 +5799,34 @@ function QueueDisplay({ active, max, label = "queue" }: { active: number; max: n
 // skeleton/fade, since the browser already holds the bytes
 const seenTileSrcs = new Set<string>()
 
+// Learned tile ratios, persisted for the SESSION: a page refresh used to
+// forget every measured width:height, so "auto"-aspect portraits were
+// re-reserved as squares and overlapped their neighbors until each image
+// slowly re-decoded. Keys are the stable masonry keys (db-<id>, fresh-<id>),
+// so a reload places every previously-seen image at its true shape instantly.
+const TILE_RATIO_KEY = "pv2-tile-ratios-v1"
+const seenTileRatios: Map<string, number> = (() => {
+  try {
+    const raw = sessionStorage.getItem(TILE_RATIO_KEY)
+    if (raw) return new Map(Object.entries(JSON.parse(raw) as Record<string, number>))
+  } catch { /* fresh session */ }
+  return new Map()
+})()
+let ratioSaveTimer: ReturnType<typeof setTimeout> | null = null
+function rememberTileRatio(key: string, r: number) {
+  seenTileRatios.set(key, r)
+  if (ratioSaveTimer) return
+  ratioSaveTimer = setTimeout(() => {
+    ratioSaveTimer = null
+    try {
+      // Cap the persisted set — oldest insertions evicted first
+      const entries = [...seenTileRatios.entries()]
+      const trimmed = entries.length > 800 ? entries.slice(entries.length - 800) : entries
+      sessionStorage.setItem(TILE_RATIO_KEY, JSON.stringify(Object.fromEntries(trimmed)))
+    } catch { /* quota — skip */ }
+  }, 1500)
+}
+
 // ONE flat masonry for the whole rows-mode feed — head strip AND body.
 // Solves all three constraints at once:
 //  • No remounts: every tile is a direct child of a single container with a
@@ -5796,7 +5915,7 @@ function FeedMasonry({ head, body, n, gap = 8 }: {
         const natAr = arEl?.dataset.natAr ? parseFloat(arEl.dataset.natAr) : null
         if (natAr && isFinite(natAr) && natAr > 0.05 && natAr < 20) {
           const pr = ratiosRef.current.get(k)
-          if (pr === undefined || Math.abs(pr - natAr) > 0.02) { ratiosRef.current.set(k, natAr); changed = true }
+          if (pr === undefined || Math.abs(pr - natAr) > 0.02) { ratiosRef.current.set(k, natAr); rememberTileRatio(k, natAr); changed = true }
         }
         // Learn heights only from REAL boxes:
         //  • media tile without decoded dimensions yet → its box is a
@@ -5844,6 +5963,7 @@ function FeedMasonry({ head, body, n, gap = 8 }: {
     const pr = ratiosRef.current.get(key)
     if (pr === undefined || Math.abs(pr - r) > 0.02) {
       ratiosRef.current.set(key, r)
+      rememberTileRatio(key, r)
       cancelAnimationFrame(rafRef.current)
       rafRef.current = requestAnimationFrame(() => force())
     }
@@ -5851,7 +5971,7 @@ function FeedMasonry({ head, body, n, gap = 8 }: {
 
   const colW = width > 0 ? (width - gap * (n - 1)) / n : 0
   const colHeights = new Array(n).fill(0)
-  const placed: { key: string; node: ReactNode; left: number; top: number; w: number; h: number; span: number; ratio: number }[] = []
+  const placed: { key: string; node: ReactNode; left: number; top: number; w: number; h: number; span: number; ratio: number; known: boolean }[] = []
   // Wide tiles span columns so landscape generations display at real size
   // instead of being shrunk into one narrow cell: ≥16:9-ish gets 2 columns,
   // ≥21:9-ish gets 3 (capped by the column count). Ratio comes from the known
@@ -5868,7 +5988,20 @@ function FeedMasonry({ head, body, n, gap = 8 }: {
   // leave permanent empty pockets in the feed.
   const gaps: { c: number; top: number; h: number }[] = []
   const place = (key: string, weight: number, node: ReactNode) => {
-    const ratio = ratiosRef.current.get(key) ?? 1 / (weight || 1)
+    // Ratio sources, most→least authoritative: measured this session →
+    // remembered from an earlier load (survives refresh) → the recorded
+    // aspect-ratio weight → square. `known` = anything better than the blind
+    // square default; unknown tiles get their media box HARD-CAPPED to the
+    // reserved height below so a decoding portrait crops inside its slot
+    // instead of painting over the tile beneath it.
+    const remembered = seenTileRatios.get(key)
+    const ratio = ratiosRef.current.get(key)
+      ?? (remembered && isFinite(remembered) && remembered > 0.05 && remembered < 20 ? remembered : undefined)
+      ?? 1 / (weight || 1)
+    // "known" = a MEASURED ratio (this session or remembered). Weight-derived
+    // ratios still get the cap: if the recorded metadata is right the cap is
+    // an exact-fit no-op, and if it lies the tile still can't overlap.
+    const known = ratiosRef.current.has(key) || remembered !== undefined
     // Only IMAGE tiles span — a spanned tile is height-capped and cropped,
     // which would clip the buttons off error cards and spinner labels
     const isImage = isValidElement(node) && node.type === GridImage
@@ -5898,7 +6031,7 @@ function FeedMasonry({ head, body, n, gap = 8 }: {
       }
       if (gi !== -1) {
         const g = gaps[gi]
-        placed.push({ key, node, left: Math.round(g.c * (colW + gap)), top: g.top, w: Math.round(w), h, span, ratio })
+        placed.push({ key, node, left: Math.round(g.c * (colW + gap)), top: g.top, w: Math.round(w), h, span, ratio, known })
         g.top += h + gap
         g.h -= h + gap
         if (g.h < 40) gaps.splice(gi, 1)
@@ -5911,7 +6044,7 @@ function FeedMasonry({ head, body, n, gap = 8 }: {
       for (let j = c; j < c + span; j++) top = Math.max(top, colHeights[j])
       if (top < bestTop - 0.5) { bestTop = top; best = c }
     }
-    placed.push({ key, node, left: Math.round(best * (colW + gap)), top: bestTop, w: Math.round(w), h, span, ratio })
+    placed.push({ key, node, left: Math.round(best * (colW + gap)), top: bestTop, w: Math.round(w), h, span, ratio, known })
     if (span > 1) {
       // Record the voids this span creates over its shorter columns
       for (let j = best; j < best + span; j++) {
@@ -5943,6 +6076,12 @@ function FeedMasonry({ head, body, n, gap = 8 }: {
             ? cloneElement(p.node as ReactElement<Record<string, unknown>>, {
                 onNaturalSize: (r: number) => reportNat(p.key, r),
                 ...(p.span > 1 ? { spanBoost: true } : {}),
+                // Unknown-ratio tile (blind square reservation): pin the media
+                // box to exactly the reserved height so a portrait decoding
+                // taller CROPS inside its slot instead of overlapping the tile
+                // below. The same onLoad that reveals the true ratio re-places
+                // the tile and drops this cap in one render.
+                ...(!p.known && p.span === 1 ? { capHeightPx: Math.round(p.h) } : {}),
               })
             : p.node}
         </div>
@@ -6066,7 +6205,10 @@ function GridImage({ src, alt, onClick, imageId, directUrl, thumbUrl, aspectRati
           src={renderedSrc}
           alt={alt}
           decoding="async"
-          loading="lazy"
+          // Re-mounted tiles (scrolled back into the window) have their source
+          // in the browser cache — lazy-loading them again just adds visible
+          // shimmer time on top of the decode. Only never-seen sources defer.
+          loading={loaded ? "eager" : "lazy"}
           // data-nat-ar: the decoded file's TRUE width:height, stamped on the
           // tile root for FeedMasonry. Span decisions come only from this —
           // box measurements lied for un-decoded and height-capped tiles
@@ -16119,6 +16261,83 @@ function PromptBox({
   const [showAddLora, setShowAddLora] = useState(false)
   const [newLoraName, setNewLoraName] = useState("")
   const [newLoraUrl, setNewLoraUrl] = useState("")
+  // ── Admin voice dictation: mic → /api/admin/transcribe (fal Whisper) → prompt ──
+  // One button toggles: idle → recording (tap again to stop) → transcribing.
+  // Mic capture needs a SECURE context (https or localhost) — on plain-http
+  // dev-over-LAN the browser hides mediaDevices entirely, so we surface that.
+  const [voiceState, setVoiceState] = useState<"idle" | "rec" | "busy">("idle")
+  const [voiceError, setVoiceError] = useState<string | null>(null)
+  const voiceRecRef = useRef<MediaRecorder | null>(null)
+  const voiceChunksRef = useRef<Blob[]>([])
+  const voiceStopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  async function toggleVoice() {
+    if (voiceState === "busy") return
+    if (voiceState === "rec") { voiceRecRef.current?.stop(); return }
+    setVoiceError(null)
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setVoiceError("Mic needs HTTPS or localhost — use the deployed site on iPad")
+      return
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find(t => MediaRecorder.isTypeSupported(t)) || ""
+      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined)
+      voiceChunksRef.current = []
+      rec.ondataavailable = e => { if (e.data.size > 0) voiceChunksRef.current.push(e.data) }
+      rec.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop())
+        if (voiceStopTimerRef.current) { clearTimeout(voiceStopTimerRef.current); voiceStopTimerRef.current = null }
+        const blob = new Blob(voiceChunksRef.current, { type: rec.mimeType || "audio/webm" })
+        voiceChunksRef.current = []
+        if (blob.size < 1000) { setVoiceState("idle"); return } // accidental tap — nothing recorded
+        if (blob.size > 3_500_000) { setVoiceState("idle"); setVoiceError("Recording too long — keep it under ~2 minutes"); return }
+        setVoiceState("busy")
+        try {
+          const dataUri: string = await new Promise((res, rej) => {
+            const fr = new FileReader()
+            fr.onload = () => res(fr.result as string)
+            fr.onerror = () => rej(new Error("Could not read recording"))
+            fr.readAsDataURL(blob)
+          })
+          const r = await fetch("/api/admin/transcribe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ audio: dataUri }),
+          })
+          const d = await r.json().catch(() => ({}))
+          if (!r.ok || !d.text) throw new Error(d.error || `Transcription failed (HTTP ${r.status})`)
+          const t = String(d.text).trim()
+          if (t) setPrompt(p => (p.trim() ? `${p.replace(/\s+$/, "")} ${t}` : t))
+        } catch (e) {
+          setVoiceError(e instanceof Error ? e.message : "Transcription failed")
+        } finally {
+          setVoiceState("idle")
+        }
+      }
+      rec.start()
+      voiceRecRef.current = rec
+      setVoiceState("rec")
+      // Hard stop at 2 minutes so a forgotten mic can't record forever
+      voiceStopTimerRef.current = setTimeout(() => {
+        if (voiceRecRef.current?.state === "recording") voiceRecRef.current.stop()
+      }, 120_000)
+    } catch {
+      setVoiceError("Microphone access denied")
+    }
+  }
+
+  // Wan 2.2 T2I custom-LoRA picker (admin) — runs from /api/admin/video-loras
+  const [wanT2iRuns, setWanT2iRuns] = useState<VideoLoraRun[] | null>(null)
+  const [wanT2iSel, setWanT2iSel] = useState<VideoLoraSel | null>(null)
+  const [wanT2iPickerOpen, setWanT2iPickerOpen] = useState(false)
+  useEffect(() => {
+    if (model.id !== "wan-2.2-t2i-lora" || wanT2iRuns !== null) return
+    fetch("/api/admin/video-loras")
+      .then(r => (r.ok ? r.json() : null))
+      // Only wan22-family runs fit the Wan 2.2 endpoints (LTX-2 LoRAs don't)
+      .then(d => setWanT2iRuns((((d?.runs as VideoLoraRun[]) ?? [])).filter(r => !r.family || String(r.family).startsWith("wan22"))))
+      .catch(() => setWanT2iRuns([]))
+  }, [model.id, wanT2iRuns])
   const [loraUploading, setLoraUploading] = useState(false)
   const loraFileInputRef = useRef<HTMLInputElement>(null)
   const loraPickerRef = useRef<HTMLDivElement>(null)
@@ -17055,6 +17274,56 @@ function PromptBox({
         return
       }
 
+      // --- Wan 2.2 T2I LoRA: one FAL job per slot (custom trained LoRA) ---
+      if (model.id === "wan-2.2-t2i-lora") {
+        if (!wanT2iSel) {
+          slotIds.forEach(sid => onUpdatePending(sid, { status: "failed", error: "Select a trained LoRA first" }))
+          return
+        }
+        await Promise.all(slotIds.map(async (sid) => {
+          try {
+            const res = await fetch("/api/admin/wan-22-t2i-lora-submit", {
+              signal: AbortSignal.timeout(90_000),
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                prompt: currentPrompt,
+                aspect_ratio: aspectRatio,
+                loras: [{ path: wanT2iSel.path, scale: wanT2iSel.scale, transformer: wanT2iSel.transformer }],
+              }),
+            })
+            const submitData = await res.json()
+            if (!res.ok || !submitData.success) {
+              onUpdatePending(sid, { status: "failed", error: submitData.error || "Submission failed" })
+              return
+            }
+            const wanLoraCost = calcTicketCost("wan-2.2-t2i-lora", quality)
+            onDeductTickets?.(wanLoraCost)
+            if (submitData.queued) {
+              onUpdatePending(sid, {
+                queueJobId: submitData.queueId,
+                nb2StatusUrl: "/api/admin/wan-22-t2i-lora-status",
+                nb2AspectRatio: aspectRatio,
+                nb2TicketCost: wanLoraCost,
+              })
+              return
+            }
+            const { requestId, falEndpoint } = submitData
+            onUpdatePending(sid, {
+              nb2RequestId: requestId,
+              nb2FalEndpoint: falEndpoint,
+              nb2AspectRatio: aspectRatio,
+              nb2StatusUrl: "/api/admin/wan-22-t2i-lora-status",
+              nb2TicketCost: wanLoraCost,
+            })
+            onStartNb2Polling(requestId, falEndpoint, [sid], currentPrompt, outputFormat, aspectRatio, "/api/admin/wan-22-t2i-lora-status", undefined, wanLoraCost, undefined)
+          } catch (err: any) {
+            onUpdatePending(sid, { status: "failed", error: err.message || "Network error" })
+          }
+        }))
+        return
+      }
+
       // --- ChatGPT Images 2.0: streaming with submit+poll fallback ---
       // Single reader loop with a Promise-based button unlock so no SSE lines are ever dropped.
       // Button waits until the 'submitted' event (same timing as other models' queue submit).
@@ -17807,20 +18076,42 @@ function PromptBox({
 
           {/* Textarea — hidden for upscaler (prompt not used) */}
           {!model.isUpscaler && (
-            <textarea
-              ref={textareaRef}
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleGenerate() }}
-              placeholder="Describe what you want to create..."
-              rows={1}
-              onInput={(e) => {
-                const el = e.currentTarget
-                el.style.height = "auto"
-                el.style.height = Math.min(el.scrollHeight, 160) + "px"
-              }}
-              className="w-full resize-none bg-transparent px-5 pt-4 pb-3 text-sm text-white placeholder-slate-500 focus:outline-none leading-relaxed"
-            />
+            <div className="relative">
+              <textarea
+                ref={textareaRef}
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleGenerate() }}
+                placeholder="Describe what you want to create..."
+                rows={1}
+                onInput={(e) => {
+                  const el = e.currentTarget
+                  el.style.height = "auto"
+                  el.style.height = Math.min(el.scrollHeight, 160) + "px"
+                }}
+                className={`w-full resize-none bg-transparent px-5 pt-4 pb-3 text-sm text-white placeholder-slate-500 focus:outline-none leading-relaxed ${isAdminAccount ? "pr-12" : ""}`}
+              />
+              {/* Admin voice dictation — tap to record, tap again to stop & transcribe */}
+              {isAdminAccount && (
+                <button
+                  onClick={toggleVoice}
+                  disabled={voiceState === "busy"}
+                  title={voiceState === "rec" ? "Stop recording & transcribe" : voiceState === "busy" ? "Transcribing…" : "Dictate into the prompt"}
+                  className={`absolute right-3 top-3 w-8 h-8 rounded-full flex items-center justify-center border transition-all ${
+                    voiceState === "rec"
+                      ? "bg-red-500/20 border-red-500/60 text-red-400 animate-pulse"
+                      : voiceState === "busy"
+                        ? "bg-white/[0.06] border-white/[0.1] text-slate-400"
+                        : "bg-white/[0.04] border-white/[0.08] text-slate-500 hover:text-white hover:border-white/25"
+                  }`}
+                >
+                  {voiceState === "busy" ? <Loader2 size={14} className="animate-spin" /> : voiceState === "rec" ? <MicOff size={14} /> : <Mic size={14} />}
+                </button>
+              )}
+              {voiceError && (
+                <p className="px-5 pb-1 -mt-1 text-[10px] text-red-400">{voiceError}</p>
+              )}
+            </div>
           )}
 
           {/* LoRA config row — visible when a LoRA is active */}
@@ -18527,6 +18818,68 @@ function PromptBox({
                     disabled={imageCount >= (model.maxImages ?? 1)}
                     className="w-4 h-5 flex items-center justify-center rounded text-slate-400 hover:text-white hover:bg-white/10 disabled:opacity-25 disabled:cursor-not-allowed transition-all text-sm leading-none font-bold"
                   >+</button>
+                </div>
+              </>
+            )}
+
+            {/* Wan 2.2 T2I custom-LoRA picker */}
+            {model.id === "wan-2.2-t2i-lora" && (
+              <>
+                <div className="w-px h-3 bg-white/10 shrink-0 hidden sm:block" />
+                <div className="relative shrink-0">
+                  <button
+                    onClick={() => setWanT2iPickerOpen(v => !v)}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] transition-all ${
+                      wanT2iSel
+                        ? "bg-violet-500/15 border-violet-500/40 text-violet-300"
+                        : "border-white/10 bg-white/5 text-slate-400 hover:border-white/20 hover:text-white"
+                    }`}
+                  >
+                    <Sparkles size={11} />
+                    {wanT2iSel ? `${wanT2iSel.name} · ${wanT2iSel.scale.toFixed(2)}` : "LoRA"}
+                  </button>
+                  {wanT2iPickerOpen && (
+                    <div className="absolute bottom-full mb-1.5 left-0 z-50 min-w-[240px] rounded-xl bg-[#131320] border border-white/[0.1] shadow-2xl overflow-hidden py-1">
+                      {wanT2iRuns === null ? (
+                        <p className="px-3 py-2 text-[11px] text-slate-500">Loading…</p>
+                      ) : wanT2iRuns.length === 0 ? (
+                        <p className="px-3 py-2 text-[11px] text-slate-500">No trained LoRAs yet</p>
+                      ) : wanT2iRuns.map(r => (
+                        <button
+                          key={r.run}
+                          onClick={() => { setWanT2iSel({ path: r.loraUrl, scale: wanT2iSel?.scale ?? 1, transformer: wanT2iSel?.transformer ?? "high", name: String(r.name), trigger: r.trigger_phrase }); setWanT2iPickerOpen(false) }}
+                          className={`w-full text-left px-3 py-2 text-[11px] transition-colors ${wanT2iSel?.path === r.loraUrl ? "text-violet-300 bg-violet-500/10" : "text-slate-400 hover:text-white hover:bg-white/[0.06]"}`}
+                        >
+                          <div className="truncate">{String(r.name)}</div>
+                          <div className="text-[9px] text-slate-600">{r.family ?? "wan22"}{r.trigger_phrase ? ` · trigger: ${r.trigger_phrase}` : ""}</div>
+                        </button>
+                      ))}
+                      {wanT2iSel && (
+                        <div className="border-t border-white/[0.06] px-3 py-2 space-y-1.5">
+                          <div className="flex items-center justify-between text-[10px] text-slate-500">
+                            <span>Strength</span><span className="text-slate-300">{wanT2iSel.scale.toFixed(2)}</span>
+                          </div>
+                          <input type="range" min={0} max={2} step={0.05} value={wanT2iSel.scale}
+                            onChange={e => setWanT2iSel({ ...wanT2iSel, scale: parseFloat(e.target.value) })}
+                            className="w-full accent-violet-500" />
+                          <div className="flex gap-1">
+                            {(["high", "low", "both"] as const).map(t => (
+                              <button key={t} onClick={() => setWanT2iSel({ ...wanT2iSel, transformer: t })}
+                                className={`flex-1 px-2 py-1 rounded-md text-[10px] border transition-all ${wanT2iSel.transformer === t ? "bg-violet-500/20 border-violet-500/40 text-violet-200" : "bg-white/[0.03] border-white/[0.07] text-slate-500 hover:bg-white/[0.06]"}`}>
+                                {t}
+                              </button>
+                            ))}
+                          </div>
+                          <button
+                            onClick={() => setWanT2iSel(null)}
+                            className="w-full px-2 py-1 rounded-md text-[10px] text-slate-500 hover:text-red-400 transition-colors text-left"
+                          >
+                            Clear LoRA
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </>
             )}
@@ -22327,6 +22680,17 @@ export default function PortalV2Page() {
   const [wan25VideoSafetyChecker, setWan25VideoSafetyChecker] = useState(false)
   const [seedance15VideoSafetyChecker, setSeedance15VideoSafetyChecker] = useState(false)
   const [wan27VideoSafetyChecker, setWan27VideoSafetyChecker] = useState(false)
+  // Wan 2.2 custom-LoRA serving (admin): trained runs + current selection
+  const [videoLoraRuns, setVideoLoraRuns] = useState<VideoLoraRun[] | null>(null)
+  const [videoLoraSel, setVideoLoraSel] = useState<VideoLoraSel | null>(null)
+  useEffect(() => {
+    if (selectedVideoModel.id !== "wan-2.2-lora" || videoLoraRuns !== null) return
+    fetch("/api/admin/video-loras")
+      .then(r => (r.ok ? r.json() : null))
+      // Only wan22-family runs fit the Wan 2.2 endpoints (LTX-2 LoRAs don't)
+      .then(d => setVideoLoraRuns((((d?.runs as VideoLoraRun[]) ?? [])).filter(r => !r.family || String(r.family).startsWith("wan22"))))
+      .catch(() => setVideoLoraRuns([]))
+  }, [selectedVideoModel.id, videoLoraRuns])
 
   // Flux jobs this device has already adopted from the cross-device /active
   // list. Once seen (or dismissed) a job is never re-adopted, so a dismissed
@@ -22940,6 +23304,9 @@ export default function PortalV2Page() {
           ...(selectedVideoModel.id === "wan-2.5" ? { wan25SafetyChecker: wan25VideoSafetyChecker } : {}),
           ...(selectedVideoModel.id === "seedance-1.5" ? { seedance15SafetyChecker: seedance15VideoSafetyChecker } : {}),
           ...(selectedVideoModel.id === "wan-2.7" ? { wan27SafetyChecker: wan27VideoSafetyChecker } : {}),
+          ...(selectedVideoModel.id === "wan-2.2-lora"
+            ? { loras: videoLoraSel ? [{ path: videoLoraSel.path, scale: videoLoraSel.scale, transformer: videoLoraSel.transformer }] : [] }
+            : {}),
         }),
       })
       const data = await res.json()
@@ -25360,6 +25727,9 @@ export default function PortalV2Page() {
         <div style={{ height: "calc(100vh - 48px)" }} className="flex overflow-hidden relative">
           {/* Left: customization panel — desktop only */}
           <div className="hidden sm:block w-72 shrink-0 border-r border-white/5 overflow-y-auto pb-24">
+            {selectedVideoModel.id === "wan-2.2-lora" && (
+              <WanLoraPicker runs={videoLoraRuns} sel={videoLoraSel} onSelect={setVideoLoraSel} />
+            )}
             <VideoCustomizationPanel
               model={selectedVideoModel}
               safetyChecker={selectedVideoModel.id === "wan-2.5" ? wan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? seedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? wan27VideoSafetyChecker : undefined}
@@ -25524,6 +25894,9 @@ export default function PortalV2Page() {
                   </div>
                 )}
                 {/* Config panel */}
+                {selectedVideoModel.id === "wan-2.2-lora" && (
+                  <WanLoraPicker runs={videoLoraRuns} sel={videoLoraSel} onSelect={setVideoLoraSel} />
+                )}
                 <VideoCustomizationPanel
                   model={selectedVideoModel}
                   safetyChecker={selectedVideoModel.id === "wan-2.5" ? wan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? seedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? wan27VideoSafetyChecker : undefined}

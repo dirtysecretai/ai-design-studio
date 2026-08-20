@@ -32,6 +32,10 @@ const FAL_ENDPOINTS: Record<string, string> = {
   'seedance-2.0-fast-i2v':      'bytedance/seedance-2.0/fast/image-to-video',
   'seedance-2.0-fast-r2v':      'bytedance/seedance-2.0/fast/reference-to-video',
   'lipsync-v3':                 'fal-ai/sync-lipsync/v3',
+  // Wan 2.2 A14B with custom LoRAs (ADMIN ONLY) — serves LoRAs trained by the
+  // wan-22-trainer pipeline; loras[].path takes our R2 URLs
+  'wan-2.2-lora-t2v':           'fal-ai/wan/v2.2-a14b/text-to-video/lora',
+  'wan-2.2-lora-i2v':           'fal-ai/wan/v2.2-a14b/image-to-video/lora',
   'happy-horse':                'alibaba/happy-horse/image-to-video',
   // Gemini Omni Flash lives under the `google` owner — NO `fal-ai/` prefix
   // (same pattern as bytedance/seedance-2.0 above). ADMIN-ONLY model.
@@ -43,7 +47,7 @@ const FAL_ENDPOINTS: Record<string, string> = {
 
 // Models only admin accounts may use (pricing TBD) — enforced server-side,
 // independent of the client-supplied adminMode flag
-const ADMIN_ONLY_VIDEO_MODELS = new Set(['gemini-omni-flash', 'wan-2.7']);
+const ADMIN_ONLY_VIDEO_MODELS = new Set(['gemini-omni-flash', 'wan-2.7', 'wan-2.2-lora']);
 
 export async function POST(request: NextRequest) {
   try {
@@ -95,6 +99,8 @@ export async function POST(request: NextRequest) {
       seedance15SafetyChecker = true,
       // WAN 2.7 safety
       wan27SafetyChecker = true,
+      // Wan 2.2 LoRA serving: [{ path, scale, transformer }] — validated below
+      loras = [],
     } = await request.json();
 
     // CCBill compliance: fal content-safety flags from the client are only honored
@@ -128,13 +134,36 @@ export async function POST(request: NextRequest) {
       : isOmni
         ? (sd20Mode === 'r2v' || sd20Mode === 'edit' ? sd20Mode : imageUrl ? 'i2v' : 't2v')
         : sd20Mode
+    const isWanLora = model === 'wan-2.2-lora'
     const isTextToVideo = model === 'seedance-1.5'
       ? !imageUrl
       : isSD20Family
         ? (effectiveSd20Mode !== 'i2v') // t2v/r2v need no start frame
         : isOmni
           ? (effectiveSd20Mode !== 'i2v') // t2v/r2v/edit need no start frame
-          : false
+          : isWanLora
+            ? !imageUrl // t2v when no start frame
+            : false
+
+    // Wan 2.2 LoRA: validate the loras array — only OUR trained artifacts may
+    // be loaded (R2 video-loras namespace), never arbitrary URLs
+    let wanLoras: { path: string; scale: number; transformer: 'high' | 'low' | 'both' }[] = []
+    if (isWanLora) {
+      const publicBase = (process.env.R2_PUBLIC_URL || '').replace(/\/$/, '')
+      const raw = Array.isArray(loras) ? loras.slice(0, 2) : []
+      for (const l of raw) {
+        const p = typeof l?.path === 'string' ? l.path : ''
+        if (!publicBase || !p.startsWith(`${publicBase}/training/video-loras/`)) {
+          return NextResponse.json({ success: false, error: 'Invalid LoRA path' }, { status: 400 });
+        }
+        const scale = Math.min(4, Math.max(0, Number(l?.scale) || 1))
+        const transformer = l?.transformer === 'low' || l?.transformer === 'both' ? l.transformer : 'high'
+        wanLoras.push({ path: p, scale, transformer })
+      }
+      if (wanLoras.length === 0) {
+        return NextResponse.json({ success: false, error: 'Select a trained LoRA first' }, { status: 400 });
+      }
+    }
     if (!imageUrl && !isTextToVideo && !isLipsync) {
       return NextResponse.json({ success: false, error: 'Missing required fields' }, { status: 400 });
     }
@@ -212,6 +241,10 @@ export async function POST(request: NextRequest) {
       // 720p 13/5s = 2.6/s). ADMIN ONLY until priced manually.
       const sec = parseInt(duration) || 5;
       ticketCost = Math.ceil(sec * (resolution === '1080p' ? 4 : 2.6));
+    } else if (isWanLora) {
+      // PLACEHOLDER — ADMIN ONLY until priced. A14B renders ~81 frames @16fps ≈ 5s
+      const sec = Math.ceil((parseInt(duration) || 5));
+      ticketCost = Math.ceil(sec * (resolution === '720p' ? 4 : 2.6));
     } else if (model === 'happy-horse') {
       ticketCost = parseInt(duration) * (resolution === '1080p' ? 12 : 7);
     } else {
@@ -262,6 +295,8 @@ export async function POST(request: NextRequest) {
       ? FAL_ENDPOINTS['seedance-1.5-text']
       : model === 'wan-2.7' && !imageUrl
       ? FAL_ENDPOINTS['wan-2.7-text']
+      : isWanLora
+      ? FAL_ENDPOINTS[imageUrl ? 'wan-2.2-lora-i2v' : 'wan-2.2-lora-t2v']
       : FAL_ENDPOINTS[model] || FAL_ENDPOINTS['wan-2.5'];
     let falInput: Record<string, any>;
 
@@ -365,6 +400,20 @@ export async function POST(request: NextRequest) {
       else if (klingAspectRatio && klingAspectRatio !== 'auto') falInput.aspect_ratio = klingAspectRatio;
       if (endImageUrl) falInput.end_image_url = endImageUrl;
       if (audioUrl) falInput.audio_url = audioUrl;
+    } else if (isWanLora) {
+      // Wan 2.2 A14B */lora schema (verified via fal OpenAPI): resolution
+      // 480p/580p/720p, num_frames 17-161 (default 81 ≈ 5s @16fps), loras[]
+      // of { path, scale, transformer }. duration (sec) → num_frames @16fps.
+      const sec = Math.min(10, Math.max(1, parseInt(duration) || 5));
+      falInput = {
+        prompt,
+        loras: wanLoras,
+        resolution: ['480p', '580p', '720p'].includes(resolution) ? resolution : '720p',
+        num_frames: Math.min(161, Math.max(17, sec * 16 + 1)),
+        enable_safety_checker: isAdminUser ? false : true,
+      };
+      if (imageUrl) falInput.image_url = imageUrl;
+      else if (['16:9', '9:16', '1:1'].includes(klingAspectRatio)) falInput.aspect_ratio = klingAspectRatio;
     } else if (model === 'happy-horse') {
       falInput = {
         image_url: imageUrl,
