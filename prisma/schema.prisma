@@ -297,6 +297,8 @@ model HomeCard {
 model SystemState {
   id                       Int      @id @default(autoincrement())
   logoUrl                  String?  // Site logo (admin-uploaded, shown to everyone in the portal-v2 header)
+  adminContentFilterOn     Boolean  @default(false) // CCBill prompt filter also applies to ADMIN accounts (users always filtered; toggled on portal-v2; DDL out-of-band via add-content-filter-flag.js, read via raw SQL)
+  contentFilterMode        String   @default("gemini") // 'gemini' (lists + LLM check) | 'static' (lists only, free) — DDL out-of-band, raw SQL
   isShopOpen               Boolean  @default(true)
   isMaintenanceMode        Boolean  @default(false)
   runesMaintenance         Boolean  @default(false)

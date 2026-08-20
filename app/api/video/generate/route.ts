@@ -6,6 +6,7 @@ import { isGenerationBlocked } from '@/lib/generation-guard';
 import { cookies } from 'next/headers';
 import { getUserFromSession } from '@/lib/auth';
 import { authenticateApiKey, invalidKeyResponse, requireScopes, canUseModel, modelNotPermittedResponse } from '@/lib/api-key-auth';
+import { enforceContentFilter } from '@/lib/content-filter'
 
 
 fal.config({
@@ -256,6 +257,11 @@ export async function POST(request: NextRequest) {
       ticketCost = pricing[resolution]?.[duration] || 20;
     }
 
+    // CCBill content filter — must pass BEFORE any charge or provider submit
+    {
+      const _cf = await enforceContentFilter(prompt, _u?.email)
+      if (!_cf.ok) return NextResponse.json({ error: _cf.reason }, { status: 400 })
+    }
     // For non-admin: verify and deduct tickets before queuing
     if (!adminMode) {
       const userTickets = await prisma.ticket.findUnique({

@@ -96,10 +96,10 @@ export default function ReportPage() {
               Your report ID is <span className="font-mono text-white">#{reportId}</span>.
             </p>
             <p className="text-slate-400 text-sm mb-4 leading-relaxed">
-              All reports are reviewed and resolved within seven (7) days. Content confirmed to be
-              illegal is removed immediately, and valid requests to remove non-consensual intimate
-              imagery are actioned within 48 hours. If you provided an email address, we will
-              contact you with the outcome.
+              All reported complaints are reviewed and resolved within five (5) business days.
+              Content confirmed to be illegal is removed immediately, and valid requests to remove
+              non-consensual intimate imagery are actioned within 48 hours. If you provided an
+              email address, we will contact you with the outcome.
             </p>
             <Link href="/" className="text-sm text-slate-400 hover:text-white underline underline-offset-2 decoration-slate-600">← Back to home</Link>
           </div>
@@ -203,9 +203,22 @@ export default function ReportPage() {
 
             <div className="pt-2 border-t border-white/10 space-y-2">
               <p className="text-xs text-slate-500 leading-relaxed">
-                All reports are reviewed and resolved within <span className="text-slate-300">seven (7) days</span>.
+                All reported complaints are reviewed and resolved within <span className="text-slate-300">five (5) business days</span>.
                 Content confirmed to be illegal is removed immediately, and valid requests to remove
                 non-consensual intimate imagery are actioned within <span className="text-slate-300">48 hours</span>.
+              </p>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                <span className="text-slate-300 font-semibold">Anti-Trafficking Statement:</span>{' '}
+                Prompt &amp; Protocol LLC does not condone human sex trafficking in any form. All
+                instances of suspected human trafficking will be reported to the proper authorities.
+              </p>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                <span className="text-slate-300 font-semibold">18 U.S.C. § 2257 Exemption Statement:</span>{' '}
+                All visual content on this service is 100% AI-generated. No real human performers are
+                depicted, photographed, or recorded in any content available here. Because no content
+                constitutes a depiction of actual sexually explicit conduct involving real persons,
+                this service is exempt from the record-keeping requirements of 18 U.S.C. § 2257 and
+                28 C.F.R. Part 75.
               </p>
               <p className="text-xs text-slate-500 leading-relaxed">
                 If you are depicted in content on this service, you may appeal for its removal. If consent

@@ -5,18 +5,34 @@ import { Input } from "@/components/ui/input"
 import {
   MessageSquare, Wrench, Image as ImageIcon, Sparkles, Tag,
   Users, CreditCard, ListOrdered, FlaskConical, Home, LayoutDashboard,
-  LogOut, ChevronRight, ShieldOff, Loader2, Shield, FileText, HardDrive, Database, Brain, ClipboardCheck, PackageOpen, Telescope
-} from "lucide-react"
+  LogOut, ChevronRight, ShieldOff, Loader2, Shield, FileText, HardDrive, Database, Brain, ClipboardCheck, PackageOpen, Telescope, ShieldAlert, ShieldCheck } from "lucide-react"
 import { SiteBrandHero, SiteLogoBox } from "@/components/SitePageHeader"
 
 const TOOL_PAGES = [
+  {
+    group: "Compliance",
+    items: [
+      { name: "Content Reports",    description: "CCBill complaints & monthly export",    href: "/admin/content-reports", icon: ShieldAlert, badge: "reports" },
+      { name: "Content Filter",     description: "CCBill prompt filter & engine mode",    href: "/admin/content-filter", icon: ShieldCheck },
+      { name: "Audit Accounts",     description: "Merchant auditor bypass accounts",      href: "/admin/audit-accounts", icon: ClipboardCheck },
+    ]
+  },
   {
     group: "People",
     items: [
       { name: "Users",              description: "Accounts, subs & transactions",         href: "/admin/users",          icon: Users },
       { name: "Dev Tier",           description: "Dev subscriptions & analytics",         href: "/admin/dev-tier",       icon: CreditCard },
       { name: "Promotions",         description: "Discount codes & free tickets",         href: "/admin/promotions",     icon: Tag },
-      { name: "Feedback",           description: "User feedback & echo stream",           href: "/admin/feedback",       icon: MessageSquare },
+    ]
+  },
+  {
+    group: "Training",
+    items: [
+      { name: "Dataset",            description: "Browse & curate training data",         href: "/admin/dataset",        icon: Database },
+      { name: "Dataset Prep",       description: "Build export templates & datasets",     href: "/admin/dataset-prep",   icon: PackageOpen },
+      { name: "OneTrainer",         description: "Fine-tune models with OneTrainer",      href: "/admin/onetrainer",     icon: Brain },
+      { name: "LoRA Training",      description: "FAL trainers - Flux, Wan 2.2, LTX-2",   href: "/admin/lora-training",  icon: Sparkles, badge: "training" },
+      { name: "Upscaler Training",  description: "Train ESRGAN / DRCT upscalers",         href: "/admin/upscaler",       icon: Telescope },
     ]
   },
   {
@@ -24,23 +40,16 @@ const TOOL_PAGES = [
     items: [
       { name: "News & Notifications", description: "Articles, notifications & pages",     href: "/admin/news",           icon: FileText },
       { name: "Images",             description: "Generated images & carousel",           href: "/admin/images",         icon: ImageIcon },
-      { name: "Scanner",            description: "Admin scanner & testing tools",         href: "/admin/scanner",        icon: Sparkles },
-      { name: "Dataset",            description: "Browse & curate training data",         href: "/admin/dataset",        icon: Database },
-      { name: "Dataset Prep",       description: "Build export templates & datasets",     href: "/admin/dataset-prep",   icon: PackageOpen },
-      { name: "OneTrainer",         description: "Fine-tune models with OneTrainer",      href: "/admin/onetrainer",     icon: Brain },
-      { name: "Upscaler Training",  description: "Train ESRGAN / DRCT upscalers",         href: "/admin/upscaler",       icon: Telescope },
-      { name: "Prototype",          description: "Experimental features",                 href: "/admin/prototype",      icon: FlaskConical },
     ]
   },
   {
     group: "System",
     items: [
-      { name: "Queue",              description: "Generation queue & concurrency",        href: "/admin/queue",          icon: ListOrdered },
+      { name: "Queue",              description: "Generation queue & concurrency",        href: "/admin/queue",          icon: ListOrdered, badge: "queue" },
       { name: "Maintenance",        description: "Feature & model toggles",               href: "/admin/maintenance",    icon: Wrench },
       { name: "Admins",             description: "Admin accounts & permissions",          href: "/admin/accounts",       icon: Shield },
-      { name: "Audit Accounts",     description: "Merchant auditor bypass accounts",      href: "/admin/audit-accounts", icon: ClipboardCheck },
-      { name: "R2 Storage",         description: "Upload checkpoints, models & datasets", href: "/admin/r2-storage",     icon: HardDrive },
-      { name: "Storage",            description: "R2 migration & Vercel Blob cleanup",    href: "/admin/storage",        icon: HardDrive },
+      { name: "Storage",            description: "R2 uploads / migration / cleanup",      href: "/admin/storage",        icon: HardDrive },
+      { name: "Lab",                description: "Scanner, prototype & model test pages", href: "/admin/lab",            icon: FlaskConical },
     ]
   },
 ]
@@ -68,13 +77,42 @@ function AdminBackdrop() {
   )
 }
 
+type PanelStats = {
+  reports: { open: number; overdue: number; nearestDeadline: number | null }
+  queue: { queued: number; processing: number }
+  training: { active: number; failed24h: number }
+  ccbillExport: { month: string; ready: boolean }
+}
+
+function fmtCountdown(ms: number): string {
+  const abs = Math.abs(ms)
+  const d = Math.floor(abs / 86_400_000)
+  const h = Math.floor((abs % 86_400_000) / 3_600_000)
+  if (d > 0) return `${d}d ${h}h`
+  const m = Math.floor((abs % 3_600_000) / 60_000)
+  return h > 0 ? `${h}h ${m}m` : `${m}m`
+}
+
 export default function AdminPage() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [stats, setStats] = useState<PanelStats | null>(null)
   const [password, setPassword] = useState("")
   const [error, setError] = useState("")
   const [sessionEmail, setSessionEmail] = useState<string | null>(null)
   const [isAdminAccount, setIsAdminAccount] = useState<boolean | null>(null)
   const [sessionChecked, setSessionChecked] = useState(false)
+
+  useEffect(() => {
+    if (!isAuthenticated) return
+    let alive = true
+    const load = () => fetch('/api/admin/panel-stats')
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (alive && d && !d.error) setStats(d) })
+      .catch(() => {})
+    load()
+    const t = setInterval(load, 60_000)
+    return () => { alive = false; clearInterval(t) }
+  }, [isAuthenticated])
 
   useEffect(() => {
     const check = async () => {
@@ -240,6 +278,57 @@ export default function AdminPage() {
           </button>
         </div>
 
+        {/* Needs attention - live status strip */}
+        {stats && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-7">
+            <button onClick={() => window.location.href = '/admin/content-reports'}
+              className={`text-left p-3 rounded-xl border transition-all hover:brightness-125 ${
+                stats.reports.overdue > 0 ? 'bg-red-500/10 border-red-500/30'
+                : stats.reports.open > 0 ? 'bg-amber-500/[0.07] border-amber-500/25'
+                : 'bg-[#0a101d]/80 border-white/[0.08]'}`}>
+              <p className="text-[9px] font-mono uppercase tracking-wider text-slate-500">Complaints</p>
+              <p className={`text-lg font-bold leading-tight ${stats.reports.overdue > 0 ? 'text-red-400' : stats.reports.open > 0 ? 'text-amber-300' : 'text-white'}`}>
+                {stats.reports.open}<span className="text-[10px] font-normal text-slate-500"> open</span>
+              </p>
+              <p className="text-[10px] text-slate-500 leading-tight">
+                {stats.reports.overdue > 0
+                  ? `${stats.reports.overdue} OVERDUE`
+                  : stats.reports.nearestDeadline
+                    ? `next due in ${fmtCountdown(stats.reports.nearestDeadline - Date.now())}`
+                    : 'all clear'}
+              </p>
+            </button>
+            <button onClick={() => window.location.href = '/admin/queue'}
+              className="text-left p-3 rounded-xl bg-[#0a101d]/80 border border-white/[0.08] hover:border-white/25 transition-all">
+              <p className="text-[9px] font-mono uppercase tracking-wider text-slate-500">Queue</p>
+              <p className="text-lg font-bold text-white leading-tight">
+                {stats.queue.processing}<span className="text-[10px] font-normal text-slate-500"> running</span>
+              </p>
+              <p className="text-[10px] text-slate-500 leading-tight">{stats.queue.queued} waiting</p>
+            </button>
+            <button onClick={() => window.location.href = '/admin/lora-training'}
+              className={`text-left p-3 rounded-xl border transition-all hover:brightness-125 ${
+                stats.training.failed24h > 0 ? 'bg-red-500/10 border-red-500/30' : 'bg-[#0a101d]/80 border-white/[0.08]'}`}>
+              <p className="text-[9px] font-mono uppercase tracking-wider text-slate-500">Training</p>
+              <p className={`text-lg font-bold leading-tight ${stats.training.failed24h > 0 ? 'text-red-400' : 'text-white'}`}>
+                {stats.training.active}<span className="text-[10px] font-normal text-slate-500"> active</span>
+              </p>
+              <p className="text-[10px] text-slate-500 leading-tight">
+                {stats.training.failed24h > 0 ? `${stats.training.failed24h} failed (24h)` : 'no recent failures'}
+              </p>
+            </button>
+            <button onClick={() => window.location.href = '/admin/content-reports'}
+              className={`text-left p-3 rounded-xl border transition-all hover:brightness-125 ${
+                stats.ccbillExport.ready ? 'bg-[#0a101d]/80 border-white/[0.08]' : 'bg-amber-500/[0.07] border-amber-500/25'}`}>
+              <p className="text-[9px] font-mono uppercase tracking-wider text-slate-500">CCBill Export</p>
+              <p className={`text-lg font-bold leading-tight ${stats.ccbillExport.ready ? 'text-emerald-400' : 'text-amber-300'}`}>
+                {stats.ccbillExport.ready ? 'Ready' : 'Pending'}
+              </p>
+              <p className="text-[10px] text-slate-500 leading-tight">{stats.ccbillExport.month} - due 2nd Monday</p>
+            </button>
+          </div>
+        )}
+
         {/* Tool groups */}
         <div className="space-y-6">
           {TOOL_PAGES.map((group) => (
@@ -263,6 +352,21 @@ export default function AdminPage() {
                       <p className="text-sm font-semibold text-white leading-none">{item.name}</p>
                       <p className="text-[11px] text-slate-500 mt-0.5 leading-snug truncate">{item.description}</p>
                     </div>
+                    {(() => {
+                      if (!stats || !("badge" in item)) return null
+                      const badge = (item as { badge?: string }).badge
+                      const n = badge === "reports" ? stats.reports.open
+                        : badge === "queue" ? stats.queue.queued + stats.queue.processing
+                        : badge === "training" ? stats.training.active
+                        : 0
+                      if (n <= 0) return null
+                      const alert = badge === "reports" && stats.reports.overdue > 0
+                      return (
+                        <span className={`shrink-0 min-w-[20px] text-center px-1.5 py-0.5 rounded-full text-[10px] font-bold leading-none ${alert ? "bg-red-500/20 text-red-400" : "bg-white/[0.1] text-slate-300"}`}>
+                          {n}
+                        </span>
+                      )
+                    })()}
                     <ChevronRight size={13} className="text-slate-700 group-hover:text-slate-400 shrink-0 transition-colors" />
                   </button>
                 ))}

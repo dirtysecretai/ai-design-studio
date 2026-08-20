@@ -9,6 +9,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { getUserFromSession } from '@/lib/auth';
 import { cookies } from 'next/headers';
 import { isGenerationBlocked } from '@/lib/generation-guard';
+import { enforceContentFilter } from '@/lib/content-filter'
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
@@ -125,6 +126,11 @@ export async function POST(req: NextRequest) {
 
     // Atomically reserve tickets — checks (balance - max(0, reserved)) >= cost in one SQL
     // statement so concurrent requests cannot both pass with 0 effective balance.
+    // CCBill content filter — must pass BEFORE any charge or provider submit
+    {
+      const _cf = await enforceContentFilter(prompt, sessionUser.email)
+      if (!_cf.ok) return NextResponse.json({ error: _cf.reason }, { status: 400 })
+    }
     console.log('🔒 Attempting to reserve tickets...');
     {
       const { reserveGenerationTickets } = await import('@/lib/ticket-gate')

@@ -8,6 +8,7 @@ import { cookies } from 'next/headers'
 import { claimUserGenerationRow } from '@/lib/user-concurrency'
 import { isGenerationBlocked } from '@/lib/generation-guard'
 import { deductGenerationTickets, refundGenerationTickets, isAdminEmail } from '@/lib/ticket-gate'
+import { enforceContentFilter } from '@/lib/content-filter'
 
 fal.config({ credentials: process.env.FAL_KEY })
 
@@ -106,6 +107,11 @@ export async function POST(req: Request) {
     // 3. Global fal slot / provider submit; the claimed row is flipped to
     //    queued/processing/failed so every path settles exactly once.
     const rowParams = { falEndpoint: endpoint, falInput: input, usePolling: true, permanentReferenceUrls }
+    // CCBill content filter — must pass BEFORE any charge or provider submit
+    {
+      const _cf = await enforceContentFilter(prompt, sessionUser?.email)
+      if (!_cf.ok) return NextResponse.json({ error: _cf.reason }, { status: 400 })
+    }
     const claim = await claimUserGenerationRow({
       userId: targetUserId,
       modelId: 'kling-o3-image',

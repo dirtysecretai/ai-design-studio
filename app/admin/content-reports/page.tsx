@@ -8,8 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
   RefreshCw, ShieldAlert, ArrowLeft, ChevronDown, ChevronUp, Search,
-  Copy, Download, CheckCircle, Scale, EyeOff,
-} from "lucide-react"
+  Copy, Download, CheckCircle, Scale, EyeOff, Clock3 } from "lucide-react"
 
 interface ContentReport {
   id: number
@@ -91,6 +90,67 @@ function StatusBadge({ status }: { status: string }) {
   )
 }
 
+// ── Resolution deadline (CCBill: 5 business days; NCII: 48 clock hours) ─────
+// Deadline = createdAt + 5 business days (weekends skipped, end of that day
+// UTC). Non-consensual reports use the stricter 48-hour clock instead.
+function resolutionDeadline(createdAtIso: string, type: string): Date {
+  const created = new Date(createdAtIso)
+  if (type === 'non-consensual') return new Date(created.getTime() + 48 * 3600 * 1000)
+  const d = new Date(created)
+  let added = 0
+  while (added < 5) {
+    d.setUTCDate(d.getUTCDate() + 1)
+    const dow = d.getUTCDay()
+    if (dow !== 0 && dow !== 6) added++
+  }
+  d.setUTCHours(23, 59, 59, 999)
+  return d
+}
+
+function fmtRemain(ms: number): string {
+  const abs = Math.abs(ms)
+  const dys = Math.floor(abs / 86_400_000)
+  const hrs = Math.floor((abs % 86_400_000) / 3_600_000)
+  const mins = Math.floor((abs % 3_600_000) / 60_000)
+  if (dys > 0) return `${dys}d ${hrs}h`
+  if (hrs > 0) return `${hrs}h ${mins}m`
+  return `${mins}m`
+}
+
+// Live countdown chip: green (>2d) → amber (≤2d) → red (overdue). Resolved
+// reports show whether the deadline was met instead of a running clock.
+function DeadlineChip({ createdAt, type, status, resolvedAt, now }: {
+  createdAt: string; type: string; status: string; resolvedAt: string | null; now: number
+}) {
+  const deadline = resolutionDeadline(createdAt, type).getTime()
+  const open = status === 'open' || status === 'under-review'
+  if (!open) {
+    if (!resolvedAt) return null
+    const onTime = new Date(resolvedAt).getTime() <= deadline
+    return (
+      <span className={`shrink-0 px-1.5 py-0.5 rounded-md text-[10px] font-semibold leading-none ${onTime ? 'bg-emerald-500/10 text-emerald-500/80' : 'bg-red-500/10 text-red-400/80'}`}>
+        {onTime ? 'on time' : 'past deadline'}
+      </span>
+    )
+  }
+  const remain = deadline - now
+  const overdue = remain < 0
+  const urgent = !overdue && remain <= 2 * 86_400_000
+  return (
+    <span
+      title={`Resolution deadline: ${new Date(deadline).toLocaleString()} (${type === 'non-consensual' ? 'NCII 48-hour rule' : '5 business days'})`}
+      className={`shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold leading-none tabular-nums ${
+        overdue ? 'bg-red-500/15 text-red-400'
+        : urgent ? 'bg-amber-500/15 text-amber-400'
+        : 'bg-emerald-500/10 text-emerald-400'
+      }`}
+    >
+      <Clock3 size={9} />
+      {overdue ? `OVERDUE ${fmtRemain(remain)}` : `${fmtRemain(remain)} left`}
+    </span>
+  )
+}
+
 export default function AdminContentReportsPage() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [password, setPassword] = useState("")
@@ -98,6 +158,12 @@ export default function AdminContentReportsPage() {
   const [isLoading, setIsLoading] = useState(false)
 
   const [reports, setReports] = useState<ContentReport[]>([])
+  // Per-minute tick so every deadline countdown stays live
+  const [nowTick, setNowTick] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 60_000)
+    return () => clearInterval(t)
+  }, [])
   const [activeTab, setActiveTab] = useState<'reports' | 'monthly'>('reports')
 
   const [searchQuery, setSearchQuery] = useState("")
@@ -107,6 +173,37 @@ export default function AdminContentReportsPage() {
 
   // Per-report resolution drafts (note / action / reviewer)
   const [drafts, setDrafts] = useState<Record<number, { note: string; action: string; reviewer: string }>>({})
+
+  // Auto-generated monthly exports (ComplianceExport, written by the
+  // /api/cron/ccbill-export cron on the 1st of each month)
+  const [savedExports, setSavedExports] = useState<{ month: string; createdAt: string }[]>([])
+  const loadSavedExports = async (pwd: string) => {
+    try {
+      const res = await fetch('/api/admin/compliance-exports', { headers: { 'x-admin-password': pwd } })
+      if (res.ok) setSavedExports((await res.json()).exports ?? [])
+    } catch {}
+  }
+  const openSavedExport = async (m: string, kind: 'summary' | 'csv') => {
+    try {
+      const res = await fetch(`/api/admin/compliance-exports?month=${m}`, { headers: { 'x-admin-password': adminPassword } })
+      if (!res.ok) return
+      const d = await res.json()
+      const content = kind === 'summary' ? d.export.summary : d.export.csv
+      const blob = new Blob([content], { type: kind === 'csv' ? 'text/csv' : 'text/plain' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = kind === 'csv' ? `content-violations-${m}.csv` : `ccbill-report-${m}.txt`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch {}
+  }
+  const generateExportNow = async () => {
+    try {
+      await fetch(`/api/cron/ccbill-export?month=${month}&force=1`, { headers: { 'x-admin-password': adminPassword } })
+      loadSavedExports(adminPassword)
+    } catch {}
+  }
 
   // Monthly report tab
   const [month, setMonth] = useState(() => {
@@ -119,6 +216,7 @@ export default function AdminContentReportsPage() {
     setIsLoading(true)
     try {
       const res = await fetch('/api/content-report', { headers: { 'x-admin-password': pwd } })
+      loadSavedExports(pwd)
       if (res.ok) {
         const data = await res.json()
         setReports(Array.isArray(data) ? data : [])
@@ -335,7 +433,7 @@ export default function AdminContentReportsPage() {
             <ShieldAlert className="text-cyan-400" size={24} />
             <div>
               <h1 className="text-xl font-bold">Content Reports</h1>
-              <p className="text-xs text-slate-500">Complaints, takedowns & depicted-person appeals — resolve within 7 days (NCII: 48 hours)</p>
+              <p className="text-xs text-slate-500">Complaints, takedowns & depicted-person appeals — resolve within 5 business days (NCII: 48 hours) · <a href="/admin/feedback" className="underline underline-offset-2 hover:text-slate-400">legacy feedback archive</a></p>
             </div>
           </div>
           <button
@@ -434,6 +532,7 @@ export default function AdminContentReportsPage() {
                       <TypeBadge type={r.type} />
                       <StatusBadge status={r.status} />
                       <span className="text-xs text-slate-400 truncate flex-1">{r.contentUrl}</span>
+                      <DeadlineChip createdAt={r.createdAt} type={r.type} status={r.status} resolvedAt={r.resolvedAt} now={nowTick} />
                       <span className="text-xs text-slate-600 shrink-0 hidden sm:block">{formatDate(r.createdAt)}</span>
                       {expanded ? <ChevronUp size={14} className="shrink-0 text-slate-500" /> : <ChevronDown size={14} className="shrink-0 text-slate-500" />}
                     </button>
@@ -572,6 +671,40 @@ export default function AdminContentReportsPage() {
             <pre className="p-4 rounded-xl border border-slate-800 bg-slate-950/80 text-xs text-slate-300 whitespace-pre-wrap overflow-x-auto">
               {monthlyText}
             </pre>
+
+            {/* Auto-generated monthly exports — written by the cron on the 1st,
+                ready to review & send before the 2nd-Monday deadline */}
+            <div className="p-4 rounded-xl border border-slate-800 bg-slate-900/40 space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Saved exports (auto-generated monthly)</p>
+                <button
+                  onClick={generateExportNow}
+                  className="px-2.5 py-1 rounded-lg border border-slate-600 bg-slate-800/40 text-slate-300 text-[11px] hover:bg-slate-800 transition-colors"
+                >
+                  Generate {month} now
+                </button>
+              </div>
+              {savedExports.length === 0 ? (
+                <p className="text-xs text-slate-600">
+                  None yet — the first export auto-saves on the 1st of next month (or click Generate).
+                </p>
+              ) : (
+                <div className="space-y-1">
+                  {savedExports.map(ex => (
+                    <div key={ex.month} className="flex items-center justify-between py-1.5 px-2 rounded-lg bg-slate-950/60 border border-slate-800">
+                      <span className="text-xs text-white font-mono">{ex.month}</span>
+                      <span className="text-[10px] text-slate-600">saved {new Date(ex.createdAt).toLocaleDateString()}</span>
+                      <div className="flex gap-1.5">
+                        <button onClick={() => openSavedExport(ex.month, 'summary')}
+                          className="px-2 py-1 rounded-md border border-slate-700 text-[11px] text-slate-300 hover:bg-slate-800 transition-colors">Report .txt</button>
+                        <button onClick={() => openSavedExport(ex.month, 'csv')}
+                          className="px-2 py-1 rounded-md border border-slate-700 text-[11px] text-slate-300 hover:bg-slate-800 transition-colors">CSV</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>

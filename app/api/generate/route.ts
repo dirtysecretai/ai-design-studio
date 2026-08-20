@@ -8,6 +8,7 @@ import { fal } from "@fal-ai/client"
 import { isGenerationBlocked } from '@/lib/generation-guard'
 import { reserveGenerationTickets } from '@/lib/ticket-gate'
 import { checkUserConcurrency } from '@/lib/user-concurrency'
+import { enforceContentFilter } from '@/lib/content-filter'
 
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
@@ -124,6 +125,11 @@ export async function POST(request: Request) {
 
     // Check if admin mode is requested and user is actually admin
     const isAdminUser = user.email === 'dirtysecretai@gmail.com'
+    // CCBill content filter — must pass BEFORE any charge or provider submit
+    {
+      const _cf = await enforceContentFilter(prompt, user.email)
+      if (!_cf.ok) return NextResponse.json({ error: _cf.reason }, { status: 400 })
+    }
     const skipTickets = adminMode && isAdminUser
 
     if (skipTickets) {

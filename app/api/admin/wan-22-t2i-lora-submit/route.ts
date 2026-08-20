@@ -8,6 +8,7 @@ import { claimUserGenerationRow } from '@/lib/user-concurrency'
 import { isGenerationBlocked } from '@/lib/generation-guard'
 import { deductGenerationTickets, refundGenerationTickets, isAdminEmail } from '@/lib/ticket-gate'
 import { checkIsAdmin } from '@/lib/admin-check'
+import { enforceContentFilter } from '@/lib/content-filter'
 
 fal.config({ credentials: process.env.FAL_KEY })
 
@@ -78,6 +79,11 @@ export async function POST(req: Request) {
     const chargedCost = isAdminEmail(sessionUser.email) ? 0 : ticketCost
 
     const rowParams = { falEndpoint: ENDPOINT, falInput: input, usePolling: true }
+    // CCBill content filter — must pass BEFORE any charge or provider submit
+    {
+      const _cf = await enforceContentFilter(prompt, sessionUser.email)
+      if (!_cf.ok) return NextResponse.json({ error: _cf.reason }, { status: 400 })
+    }
     const claim = await claimUserGenerationRow({
       userId: targetUserId,
       modelId: 'wan-2.2-t2i-lora',

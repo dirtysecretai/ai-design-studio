@@ -591,6 +591,21 @@ export default function TermsPage() {
               depict real events. This notice does not exempt Content Providers from the obligations in Sections 21.3 and 21.4
               where the likeness of a real person is used.
             </p>
+
+            <h3 className="text-xl font-semibold mb-3 text-slate-300">21.8 Anti-Trafficking Statement</h3>
+            <p className="mb-4">
+              We do not condone human sex trafficking in any form, and content that promotes, facilitates, or depicts human
+              trafficking is strictly prohibited on the Service. All instances of suspected human trafficking will be reported
+              to the proper authorities.
+            </p>
+
+            <h3 className="text-xl font-semibold mb-3 text-slate-300">21.9 18 U.S.C. § 2257 Exemption Statement</h3>
+            <p className="mb-4">
+              All visual content on the Service is 100% AI-generated. No real human performers are depicted, photographed, or
+              recorded in any content available on the Service. Because no content on the Service constitutes a depiction of
+              actual sexually explicit conduct involving real persons, the Service is exempt from the record-keeping
+              requirements of 18 U.S.C. § 2257 and 28 C.F.R. Part 75.
+            </p>
           </section>
 
           <section>
@@ -606,9 +621,9 @@ export default function TermsPage() {
 
             <h3 className="text-xl font-semibold mb-3 text-slate-300">22.2 Resolution Timeline</h3>
             <p className="mb-4">
-              All reported complaints are reviewed and resolved within seven (7) days. Content confirmed to be illegal
-              is removed immediately upon identification, and valid requests to remove non-consensual intimate imagery
-              are actioned within forty-eight (48) hours.
+              All reported complaints are reviewed and resolved within five (5) business days. Content confirmed to be
+              illegal is removed immediately upon identification, and valid requests to remove non-consensual intimate
+              imagery are actioned within forty-eight (48) hours.
             </p>
 
             <h3 className="text-xl font-semibold mb-3 text-slate-300">22.3 Depicted-Person Appeals</h3>

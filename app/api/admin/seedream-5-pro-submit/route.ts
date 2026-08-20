@@ -5,6 +5,7 @@ import { getUserFromSession } from '@/lib/auth'
 import prisma from '@/lib/prisma'
 import { isGenerationBlocked } from '@/lib/generation-guard'
 import { checkIsAdmin } from '@/lib/admin-check'
+import { enforceContentFilter } from '@/lib/content-filter'
 
 fal.config({ credentials: process.env.FAL_KEY })
 
@@ -55,6 +56,11 @@ export async function POST(req: Request) {
     const ticketCost = 10
 
     const ticket = await prisma.ticket.findUnique({ where: { userId: user.id } })
+    // CCBill content filter — must pass BEFORE any charge or provider submit
+    {
+      const _cf = await enforceContentFilter(prompt, user.email)
+      if (!_cf.ok) return NextResponse.json({ error: _cf.reason }, { status: 400 })
+    }
     const availableBalance = (ticket?.balance ?? 0) - (ticket?.reserved ?? 0)
     if (availableBalance < ticketCost) {
       return NextResponse.json({ error: 'Insufficient tickets' }, { status: 402 })

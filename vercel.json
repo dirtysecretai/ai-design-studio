@@ -3,6 +3,10 @@
     {
       "path": "/api/cron/drain-queue",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/ccbill-export",
+      "schedule": "0 9 1 * *"
     }
   ],
   "git": {

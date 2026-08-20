@@ -5,7 +5,7 @@ import { createPortal } from "react-dom"
 import Link from "next/link"
 import ChatWidget from "@/components/ChatWidget"
 import ChatHub, { ChatProviderSettings, ChatLayoutSettings, ChatAgentSettings, ChatAgentCapabilities, ChatApiKeysSettings } from "@/components/chat-hub"
-import { Image, Video, Type, ChevronDown, ChevronLeft, ChevronRight, Ticket, User, BookMarked, ImagePlus, X, Plus, Check, Copy, Download, RotateCcw, ShoppingBag, SlidersHorizontal, Bell, AlertTriangle, CheckCircle, Info, Sparkles, Music, BookOpen, Star, Trash2, Loader2, Eye, RefreshCw, Upload, Pencil, Eraser, Crop, Undo2, Square, Circle, Droplets, Lock, FolderPlus, Layers, Search, PanelLeft, PanelRight, PanelTop, PanelBottom, EyeOff, Folder, Maximize2, Minimize2, FolderInput, Zap, Pin, MessagesSquare, ArrowUpRight, Wand2, Scissors, List, LayoutGrid, Unlock, MousePointer2, ClipboardPaste, Play, Film, Mic, MicOff } from "lucide-react"
+import { Image, Video, Type, ChevronDown, ChevronLeft, ChevronRight, Ticket, User, BookMarked, ImagePlus, X, Plus, Check, Copy, Download, RotateCcw, ShoppingBag, SlidersHorizontal, Bell, AlertTriangle, CheckCircle, Info, Sparkles, Music, BookOpen, Star, Trash2, Loader2, Eye, RefreshCw, Upload, Pencil, Eraser, Crop, Undo2, Square, Circle, Droplets, Lock, FolderPlus, Layers, Search, PanelLeft, PanelRight, PanelTop, PanelBottom, EyeOff, Folder, Maximize2, Minimize2, FolderInput, Zap, Pin, MessagesSquare, ArrowUpRight, Wand2, Scissors, List, LayoutGrid, Unlock, MousePointer2, ClipboardPaste, Play, Film, Mic, MicOff, Shield } from "lucide-react"
 import { AddToBucketModal, type Bucket, type BucketFolder } from "@/components/AddToBucketModal"
 import { NewsManager } from "@/components/NewsManager"
 import { HomeView } from "@/components/home/HomeView"
@@ -5529,7 +5529,7 @@ function TextDropdown({
       const res = await fetch("/api/prompting-studio/generate-single", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ celebrity, baseStyle, model: imageModelName, promptModel }),
+        body: JSON.stringify({ subject: celebrity, baseStyle, model: imageModelName, promptModel }),
       })
       const data = await res.json()
       if (!res.ok || data.error) {
@@ -16261,6 +16261,48 @@ function PromptBox({
   const [showAddLora, setShowAddLora] = useState(false)
   const [newLoraName, setNewLoraName] = useState("")
   const [newLoraUrl, setNewLoraUrl] = useState("")
+  // ── CCBill content-filter admin toggle (GLOBAL, server-stored) ──
+  // Regular users are ALWAYS filtered server-side; this only controls whether
+  // the filter also applies to admin accounts. null = not yet loaded.
+  const [ccbillFilterOn, setCcbillFilterOn] = useState<boolean | null>(null)
+  const [ccbillFilterMode, setCcbillFilterMode] = useState<"gemini" | "static">("gemini")
+  useEffect(() => {
+    if (!isAdminAccount || ccbillFilterOn !== null) return
+    fetch("/api/admin/content-filter")
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (!d) return
+        setCcbillFilterOn(d.adminFilterOn !== false)
+        setCcbillFilterMode(d.mode === "static" ? "static" : "gemini")
+      })
+      .catch(() => {})
+  }, [isAdminAccount, ccbillFilterOn])
+  async function toggleCcbillFilterMode() {
+    const next = ccbillFilterMode === "gemini" ? "static" : "gemini"
+    setCcbillFilterMode(next)
+    try {
+      const r = await fetch("/api/admin/content-filter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: next }),
+      })
+      if (!r.ok) setCcbillFilterMode(ccbillFilterMode)
+    } catch { setCcbillFilterMode(ccbillFilterMode) }
+  }
+  async function toggleCcbillFilter() {
+    if (ccbillFilterOn === null) return
+    const next = !ccbillFilterOn
+    setCcbillFilterOn(next)
+    try {
+      const r = await fetch("/api/admin/content-filter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on: next }),
+      })
+      if (!r.ok) setCcbillFilterOn(!next)
+    } catch { setCcbillFilterOn(!next) }
+  }
+
   // ── Admin voice dictation: mic → /api/admin/transcribe (fal Whisper) → prompt ──
   // One button toggles: idle → recording (tap again to stop) → transcribing.
   // Mic capture needs a SECURE context (https or localhost) — on plain-http
@@ -18881,6 +18923,40 @@ function PromptBox({
                     </div>
                   )}
                 </div>
+              </>
+            )}
+
+            {/* CCBill content filter — admin-only GLOBAL toggle (users always filtered) */}
+            {isAdminAccount && ccbillFilterOn !== null && (
+              <>
+                <div className="w-px h-3 bg-white/10 shrink-0 hidden sm:block" />
+                <button
+                  onClick={toggleCcbillFilter}
+                  title={ccbillFilterOn
+                    ? "CCBill prompt filter applies to admin accounts too — click to exempt admins (regular users stay filtered)"
+                    : "Admin accounts are EXEMPT from the CCBill prompt filter — click to re-enable (regular users are always filtered)"}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] transition-all shrink-0 ${
+                    ccbillFilterOn
+                      ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                      : "border-amber-500/25 bg-amber-500/[0.08] text-amber-400 hover:bg-amber-500/15"
+                  }`}
+                >
+                  <Shield size={11} />
+                  Filter {ccbillFilterOn ? "ON" : "OFF"}
+                </button>
+                <button
+                  onClick={toggleCcbillFilterMode}
+                  title={ccbillFilterMode === "gemini"
+                    ? "Filter engine: keyword list + name list + Gemini AI check (strongest, ~$0.00007/prompt) — click for Static (free, lists only)"
+                    : "Filter engine: keyword list + static name list only (free, no API calls) — click for Gemini AI mode"}
+                  className={`flex items-center gap-1 px-2 py-1 rounded-md border text-[11px] transition-all shrink-0 ${
+                    ccbillFilterMode === "gemini"
+                      ? "bg-violet-500/15 border-violet-500/40 text-violet-300"
+                      : "bg-cyan-500/10 border-cyan-500/30 text-cyan-300"
+                  }`}
+                >
+                  {ccbillFilterMode === "gemini" ? "AI" : "List"}
+                </button>
               </>
             )}
 

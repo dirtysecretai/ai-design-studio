@@ -8,6 +8,7 @@ import { cookies } from 'next/headers'
 import { checkUserConcurrency } from '@/lib/user-concurrency'
 import { isGenerationBlocked } from '@/lib/generation-guard'
 import { deductGenerationTickets, refundGenerationTickets } from '@/lib/ticket-gate'
+import { enforceContentFilter } from '@/lib/content-filter'
 
 fal.config({ credentials: process.env.FAL_KEY })
 
@@ -78,6 +79,11 @@ export async function POST(req: Request) {
     }
 
     // Deduct tickets before submitting to FAL
+    // CCBill content filter — must pass BEFORE any charge or provider submit
+    {
+      const _cf = await enforceContentFilter(prompt, sessionUser?.email)
+      if (!_cf.ok) return NextResponse.json({ error: _cf.reason }, { status: 400 })
+    }
     const ticketResult = await deductGenerationTickets(targetUserId, sessionUser!.email, ticketCost)
     if (!ticketResult.ok) {
       return NextResponse.json(

@@ -6,6 +6,7 @@ import { uploadToR2 } from '@/lib/r2'
 import prisma from '@/lib/prisma'
 import { getTicketCost, getModelById } from '@/config/ai-models.config'
 import { isGenerationBlocked } from '@/lib/generation-guard'
+import { enforceContentFilter } from '@/lib/content-filter'
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 const GEMINI_IMAGE_MODELS = ['gemini-3-pro-image', 'gemini-2.5-flash-image']
@@ -57,6 +58,11 @@ export async function POST(req: Request) {
 
     // Check available balance and reserve tickets
     const ticket = await prisma.ticket.findUnique({ where: { userId: user.id } })
+    // CCBill content filter — must pass BEFORE any charge or provider submit
+    {
+      const _cf = await enforceContentFilter(prompt, user.email)
+      if (!_cf.ok) return NextResponse.json({ error: _cf.reason }, { status: 400 })
+    }
     const availableBalance = (ticket?.balance ?? 0) - (ticket?.reserved ?? 0)
     if (availableBalance < ticketCost) {
       return NextResponse.json(

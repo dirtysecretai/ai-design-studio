@@ -3,7 +3,7 @@ import prisma from '@/lib/prisma'
 
 // CCBill compliance: public complaint / takedown / depicted-person-appeal intake.
 // POST is intentionally unauthenticated — anyone must be able to report content
-// without an account. Complaints are reviewed and resolved within 7 days;
+// without an account. Complaints are reviewed and resolved within 5 business days;
 // confirmed-illegal content is removed immediately (admin console sets isDeleted).
 
 const REPORT_TYPES = [
