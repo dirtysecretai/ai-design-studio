@@ -2837,11 +2837,19 @@ export function agentStreamResponse(opts: {
                 send({ t: 'step', s })
                 break
               }
-              case 'error':
+              case 'error': {
                 console.error('chat-hub agent stream part error:', part.error)
                 hadError = true
-                send({ t: 'error', message: 'Generation error — check the model/key and try again' })
+                // Surface the REAL provider error (truncated) — "check the
+                // model/key" hid actionable details like schema rejections
+                const detail = (() => {
+                  const e = part.error as { message?: string; responseBody?: string } | string | undefined
+                  const raw = typeof e === 'string' ? e : (e?.responseBody || e?.message || '')
+                  return String(raw).replace(/\s+/g, ' ').slice(0, 280)
+                })()
+                send({ t: 'error', message: detail ? `Generation error: ${detail}` : 'Generation error — check the model/key and try again' })
                 break
+              }
             }
             // Graceful user cancel: any tool already in flight finishes (its
             // result arrives on later parts, which we keep consuming while

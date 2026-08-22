@@ -507,7 +507,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         // Self-hosted models (Ollama/RunPod): flatten RGBA → RGB and inline the
         // continuation's images (history + tool-result cutouts) as bytes, so
         // vLLM doesn't 500 on transparent composites.
-        if (modelSpec.ollama || modelSpec.runpod) {
+        if (modelSpec.ollama || modelSpec.runpod || modelSpec.provider === 'Google') {
           await inlineWeakModelImages(messages)
         }
 

@@ -124,7 +124,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // Self-hosted models (Ollama, RunPod) can't reliably fetch remote image URLs,
   // and vLLM/Qwen3-VL 500s on RGBA (transparent) images. Flatten alpha → RGB,
   // downscale, and inline every attachment as bytes.
-  if (modelSpec.ollama || modelSpec.runpod) {
+  // GOOGLE models need the same treatment for a different reason: the AI SDK
+  // passes URL-backed file parts to Gemini as fileData.fileUri, and the Gemini
+  // API only accepts Google-hosted URIs — arbitrary R2/blob URLs come back as
+  // a bogus "Resource has been exhausted" 429. This silently broke EVERY
+  // image-attached Google chat (the "Art Director can't do it" mystery).
+  if (modelSpec.ollama || modelSpec.runpod || modelSpec.provider === 'Google') {
     await inlineWeakModelImages(messages)
   }
 
