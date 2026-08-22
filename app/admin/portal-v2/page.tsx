@@ -25553,7 +25553,9 @@ export default function PortalV2Page() {
               }
               onClearErrors={handleClearAllErrors}
             />
-            {/* Frame Extractor — pull the sharpest frames out of a video */}
+            {/* Frame Extractor — pull the sharpest frames out of a video.
+                ADMIN ONLY for now: not yet tested/priced for regular users. */}
+            {isAdminAccount && (
             <div className="relative flex-none min-w-[90px] sm:flex-1">
               <button
                 onClick={() => setFramesOpen(true)}
@@ -25565,6 +25567,7 @@ export default function PortalV2Page() {
                 Frames
               </button>
             </div>
+            )}
             {/* AI Chat Hub moved to the logo dropdown's admin-only section */}
             </div>
           </div>

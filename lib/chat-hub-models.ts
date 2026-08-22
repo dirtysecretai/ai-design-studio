@@ -35,6 +35,9 @@ export const CHAT_HUB_MODELS: ChatHubModel[] = [
   { id: 'openai/gpt-5.4-mini',           directId: 'gpt-5.4-mini',             label: 'GPT-5.4 Mini',     provider: 'OpenAI',    maxImages: 10, strengths: 'fast and cheap for drafts and summaries' },
   { id: 'google/gemini-3.1-pro-preview', directId: 'gemini-3.1-pro-preview',   label: 'Gemini 3.1 Pro',   provider: 'Google',    maxImages: 16, strengths: 'strong reasoning, huge context, good vision' },
   { id: 'google/gemini-3.5-flash',       directId: 'gemini-3.5-flash',         label: 'Gemini 3.5 Flash', provider: 'Google',    maxImages: 16, strengths: 'very fast, cheap, good vision — great for parallel research' },
+  { id: 'google/gemini-3.5-flash-lite',  directId: 'gemini-3.5-flash-lite',    label: 'Gemini 3.5 Flash Lite', provider: 'Google', maxImages: 16, strengths: 'cheapest Google model — quick lookups and simple subtasks' },
+  { id: 'google/gemini-3.6-flash',       directId: 'gemini-3.6-flash',         label: 'Gemini 3.6 Flash', provider: 'Google',    maxImages: 16, strengths: 'fast with improved tool use over 3.5' },
+  { id: 'google/gemini-3.7-flash',       directId: 'gemini-3.7-flash',         label: 'Gemini 3.7 Flash', provider: 'Google',    maxImages: 16, strengths: 'newest flash — strongest agentic/tool-calling of the Flash line, great for employees' },
   { id: 'xai/grok-4.5',                  directId: 'grok-4.5',                 label: 'Grok 4.5',         provider: 'xAI',       maxImages: 8, strengths: 'strong reasoning, current-events knowledge' },
   { id: 'xai/grok-4.1-fast-reasoning',   directId: 'grok-4.1-fast-reasoning',  label: 'Grok 4.1 Fast',    provider: 'xAI',       maxImages: 8, strengths: 'fast reasoning at low cost' },
 ]
