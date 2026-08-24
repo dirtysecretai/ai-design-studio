@@ -14,6 +14,7 @@ import {
 } from '@/lib/chat-hub-agent'
 import { sanitizeSkillIds } from '@/lib/chat-hub-skills'
 import { isChatCancelRequested, clearChatCancel } from '@/lib/chat-hub-cancel'
+import { generateChatTitle } from '@/lib/chat-hub-title'
 
 export const maxDuration = 300
 
@@ -104,11 +105,15 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   }
 
   const userRow = await prisma.chatMessage.create({ data: { chatId, role: 'user', content, imageUrls } })
+  // First exchange: the first message stands in as the title until the run
+  // finishes, then a one-shot auto-title replaces it (see onFinish)
+  const firstExchange = chat.title === 'New chat'
+  const placeholderTitle = content.slice(0, 60)
   await prisma.chat.update({
     where: { id: chatId },
     data: {
       model,
-      ...(chat.title === 'New chat' ? { title: content.slice(0, 60) } : {}),
+      ...(firstExchange ? { title: placeholderTitle } : {}),
     },
   })
 
@@ -150,7 +155,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     chat.systemPrompt?.trim() || '',
     skillSummariesInstructions(skillSet, agentMode === 'plan'),
     skillOn(skillSet, 'delegation') ? rosterInstructions(roster) : '',
-    agentMode === 'plan' ? '' : mediaInstructions(ticketBalance, prefs.modelPrefs, skillSet),
+    // Plan mode gets the catalog too — a thorough plan names real models,
+    // settings and ticket costs (modeInstructions overrides the tool rules)
+    mediaInstructions(ticketBalance, prefs.modelPrefs, skillSet),
     agentMode === 'plan' ? '' : toolsInstructions(chat.projectId !== null, skillSet),
     globalMemory,
     chat.project?.memory?.trim()
@@ -382,6 +389,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           },
         })
         await prisma.chat.update({ where: { id: chatId }, data: { updatedAt: new Date() } })
+        // One-shot auto-title after the first exchange. Conditional on the
+        // placeholder still being in place, so a manual rename mid-run wins.
+        if (firstExchange) {
+          void generateChatTitle(content, text).then(async (title) => {
+            if (!title || title === placeholderTitle) return
+            await prisma.chat.updateMany({ where: { id: chatId, title: placeholderTitle }, data: { title } })
+          }).catch(() => {})
+        }
         // Run settled (Auto mode can finish in one stream) → sync final edit
         void persistFinalEdit(user.id, steps, pending.length)
         return row.id

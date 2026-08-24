@@ -1220,6 +1220,7 @@ model Chat {
   userId       Int
   projectId    Int?    // null = standalone chat outside any project
   title        String  @default("New chat")
+  titleLocked  Boolean @default(false) // user pinned the title — auto-titling leaves it alone
   model        String  // last-used gateway model id — preselects the header dropdown
   source       String  @default("manual") // 'manual' | future: 'delegator' | 'comparison'
   systemPrompt String? @db.Text // per-chat instructions ("you are a fashion designer…")

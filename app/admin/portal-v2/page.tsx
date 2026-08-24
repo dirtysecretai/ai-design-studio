@@ -5,7 +5,7 @@ import { createPortal } from "react-dom"
 import Link from "next/link"
 import ChatWidget from "@/components/ChatWidget"
 import ChatHub, { ChatProviderSettings, ChatLayoutSettings, ChatAgentSettings, ChatAgentCapabilities, ChatApiKeysSettings } from "@/components/chat-hub"
-import { Image, Video, Type, ChevronDown, ChevronLeft, ChevronRight, Ticket, User, BookMarked, ImagePlus, X, Plus, Check, Copy, Download, RotateCcw, ShoppingBag, SlidersHorizontal, Bell, AlertTriangle, CheckCircle, Info, Sparkles, Music, BookOpen, Star, Trash2, Loader2, Eye, RefreshCw, Upload, Pencil, Eraser, Crop, Undo2, Square, Circle, Droplets, Lock, FolderPlus, Layers, Search, PanelLeft, PanelRight, PanelTop, PanelBottom, EyeOff, Folder, Maximize2, Minimize2, FolderInput, Zap, Pin, MessagesSquare, ArrowUpRight, Wand2, Scissors, List, LayoutGrid, Unlock, MousePointer2, ClipboardPaste, Play, Film, Mic, MicOff, Shield } from "lucide-react"
+import { Image, Video, Type, ChevronDown, ChevronLeft, ChevronRight, Ticket, User, BookMarked, ImagePlus, X, Plus, Check, Copy, Download, RotateCcw, ShoppingBag, SlidersHorizontal, Bell, AlertTriangle, CheckCircle, Info, Sparkles, Music, BookOpen, Star, Trash2, Loader2, Eye, RefreshCw, Upload, Pencil, Eraser, Crop, Undo2, Redo2, Square, Circle, Droplets, Lock, FolderPlus, Layers, Search, PanelLeft, PanelRight, PanelTop, PanelBottom, EyeOff, Folder, Maximize2, Minimize2, FolderInput, Zap, Pin, MessagesSquare, ArrowUpRight, Wand2, Scissors, List, LayoutGrid, Unlock, MousePointer2, ClipboardPaste, Play, Film, Mic, MicOff, Shield } from "lucide-react"
 import { AddToBucketModal, type Bucket, type BucketFolder } from "@/components/AddToBucketModal"
 import { NewsManager } from "@/components/NewsManager"
 import { HomeView } from "@/components/home/HomeView"
@@ -8702,7 +8702,7 @@ function ImageGrid({
                   ? <StreamingSlot key={slot.slotId} dataUrl={slot.streamDataUrl} onClick={onPendingClick ? () => onPendingClick(slot) : undefined} />
                   : slot.queueJobId && !slot.nb2RequestId
                     ? <QueuedSlot key={slot.slotId} onClick={onPendingClick ? () => onPendingClick(slot) : undefined} />
-                    : <LoadingSlot key={slot.slotId} onClick={onPendingClick ? () => onPendingClick(slot) : undefined} startedAtMs={slot.execStartMs ?? slotStartMs(slot.slotId)} modelId={slot.modelId} coldStart={slot.coldStart} durVariant={fluxDurationVariant(slot.videoMetadata)} durPrior={fluxVariantPrior(slot.videoMetadata)} aspectRatio={slotAspectRatio(slot)} waiting={slot.inQueue} />)
+                    : <LoadingSlot key={slot.slotId} onClick={onPendingClick ? () => onPendingClick(slot) : undefined} startedAtMs={slot.execStartMs ?? slot.queuedAtMs ?? slotStartMs(slot.slotId)} modelId={slot.modelId} coldStart={slot.coldStart} durVariant={fluxDurationVariant(slot.videoMetadata)} durPrior={fluxVariantPrior(slot.videoMetadata)} aspectRatio={slotAspectRatio(slot)} waiting={slot.inQueue} />)
               : <FailedSlot key={slot.slotId} prompt={slot.prompt} error={slot.error || "Generation failed"} aspectRatio={slot.aspectRatio}
                   onRetry={onRetryPending ? () => onRetryPending(slot) : undefined}
                   // Click opens the fail-detail popup, same as savedFails cards
@@ -9670,6 +9670,16 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
   const [tool,       setTool]       = useState<EditorTool>('select')
   const [cropMode,   setCropMode]   = useState<CropMode>('frame')
   const [brushSize,  setBrushSize]  = useState(20)
+  // Brush slider scales WITH THE CANVAS: 0.2%–30% of its long edge (≈2–1200px
+  // on a 4K canvas, ≈2–300px on a 1K one) on a SQUARED curve, so the lower
+  // half of the slider still covers small sizes finely. A fixed 4-80px range
+  // was a pinpoint on 3000-4000px canvases.
+  const brushLongEdge = () => { const c = canvasRef.current; return c && c.width ? Math.max(c.width, c.height) : Math.max(dims?.w ?? 1024, dims?.h ?? 1024) }
+  const brushMin = () => Math.max(2, Math.round(brushLongEdge() * 0.002))
+  const brushMax = () => Math.max(64, Math.round(brushLongEdge() * 0.3))
+  const sliderToBrush = (t: number) => { const lo = brushMin(), hi = brushMax(); return Math.round(lo + Math.pow(Math.min(100, Math.max(0, t)) / 100, 2) * (hi - lo)) }
+  const brushToSlider = (px: number) => { const lo = brushMin(), hi = brushMax(); return Math.round(Math.sqrt(Math.min(1, Math.max(0, (px - lo) / (hi - lo)))) * 100) }
+  const brushPct = (px: number) => `${(100 * px / brushLongEdge()).toFixed(px / brushLongEdge() < 0.01 ? 2 : 1)}%`
   const [drawColor,  setDrawColor]  = useState('#ffffff')
   const [blurRadius, setBlurRadius] = useState(10)
   const [shapeKind,  setShapeKind]  = useState<ShapeKind>('rect')
@@ -9677,6 +9687,15 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
   const [shapeColor, setShapeColor] = useState('#ffffff')
   const [hasCropSel, setHasCropSel] = useState(false)
   const [loaded,     setLoaded]     = useState(false)
+  // First load: start the brush at ~2% of the canvas long edge (the 20px
+  // default is a pinpoint on a 4K canvas) — once per modal open only
+  const brushDefaultedRef = useRef(false)
+  useEffect(() => {
+    if (!loaded || brushDefaultedRef.current) return
+    brushDefaultedRef.current = true
+    setBrushSize(Math.min(brushMax(), Math.max(brushMin(), Math.round(brushLongEdge() * 0.02))))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded])
   const [histLen,    setHistLen]    = useState(1)
   const [fitMode,    setFitMode]    = useState<'fit' | 'native'>('fit')
   // Mask tool: AI segmentation (auto or text-prompted) → dashed outline → approve/reject
@@ -9690,9 +9709,42 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
   const [cutReady, setCutReady] = useState(false)
   // "Touch and hold to save" overlay — renders a real <img> so iPad Safari's native
   // long-press Save Image sheet works (canvas elements never get that sheet)
-  const [saveOverlay, setSaveOverlay] = useState<{ url: string; label: string } | null>(null)
+  const [saveOverlay, setSaveOverlay] = useState<{ url: string; label: string; hostedUrl?: string | null; hosting?: boolean } | null>(null)
+  // iOS long-press only reliably offers "Save Image / Add to Photos" on real
+  // https images — on data: URLs the callout is reduced or missing entirely.
+  // Show the data URL instantly, host a copy in the background, and swap the
+  // <img> to the hosted URL so the native save sheet works.
+  const openSaveOverlay = (dataUrl: string, label: string) => {
+    setSaveOverlay({ url: dataUrl, label, hostedUrl: null, hosting: true })
+    void (async () => {
+      try {
+        const res = await fetch('/api/user/ref-layer-upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: dataUrl }),
+        })
+        const data = await res.json().catch(() => ({}))
+        const hosted = res.ok && typeof data.url === 'string' ? (data.url as string) : null
+        setSaveOverlay(cur => (cur && cur.url === dataUrl ? { ...cur, hostedUrl: hosted, hosting: false } : cur))
+      } catch {
+        setSaveOverlay(cur => (cur && cur.url === dataUrl ? { ...cur, hosting: false } : cur))
+      }
+    })()
+  }
   // Current canvas resolution — shown in the header chip + Scale tool readout
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null)
+  // REAL visible viewport height: iPad Safari's vh ignores the browser chrome
+  // (bottom of the modal slid behind the toolbar in portrait) and dvh needs
+  // iPadOS 16.4+ — visualViewport works everywhere and tracks chrome/keyboard
+  const [vvh, setVvh] = useState<number | null>(null)
+  useEffect(() => {
+    const vv = window.visualViewport
+    const measure = () => setVvh(Math.round(vv?.height ?? window.innerHeight) || null)
+    measure()
+    vv?.addEventListener('resize', measure)
+    window.addEventListener('resize', measure)
+    return () => { vv?.removeEventListener('resize', measure); window.removeEventListener('resize', measure) }
+  }, [])
   // Fit mode: the canvas is DISPLAYED at pane-fit size regardless of its pixel
   // resolution (a 512px downscale stays visually large, just lower quality).
   // Plain max-width caps can only shrink — this computes the real contain-fit.
@@ -9777,24 +9829,52 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
   const layerPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map())
   const layerPinchRef = useRef<{ startDist: number; startAngle: number; orig: CropRect; origR: number; layerId: string; itemId: string } | null>(null)
   const layerImgSizes = useRef<Record<string, { w: number; h: number }>>({})
+  // Decoded layer images, so a live erase can start SYNCHRONOUSLY on pointer
+  // down (no async load between finger-down and the first punched pixel)
+  const layerImgCache = useRef<Map<string, HTMLImageElement>>(new Map())
+  // Live layer erase: while the pointer is down the selected item renders as
+  // this canvas (punched in real time); on release it is encoded + hosted
+  const liveEraseRef = useRef<{ layerId: string; itemId: string; canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; rect: CropRect; preStack: RefLayerStack; last: { x: number; y: number } } | null>(null)
+  const [liveEraseItem, setLiveEraseItem] = useState<{ layerId: string; itemId: string } | null>(null)
   const stackRef = useRef(stack)
   stackRef.current = stack
-  const updStack = (st: RefLayerStack | null) => {
+  useEffect(() => {
+    for (const l of stack?.layers ?? []) for (const it of l.items) {
+      if (layerImgCache.current.has(it.url)) continue
+      const im = new window.Image()
+      im.crossOrigin = 'anonymous'
+      im.src = it.url
+      layerImgCache.current.set(it.url, im)
+    }
+  }, [stack])
+  const updStack = (st: RefLayerStack | null, opts?: { localOnly?: boolean }) => {
     // Sync the ref immediately — synchronous flows (crop-then-flatten on Apply)
     // read stackRef before React re-renders
     stackRef.current = st
     setStack(st)
-    onLayerStackChange?.(st)
+    // localOnly: transient states holding data-URL images (optimistic layer
+    // erase) must never persist — a multi-MB data URL in the stack JSON would
+    // bloat the DB row; the hosted-URL swap that follows persists normally
+    if (!opts?.localOnly) onLayerStackChange?.(st)
   }
+  // Continuous controls (the opacity slider fires per tick) get ONE undo
+  // snapshot per burst instead of dozens
+  const lastPatchUndoRef = useRef<{ t: number; sig: string }>({ t: 0, sig: '' })
+  const pushStackUndoLater = (st: RefLayerStack) => pushStackUndo(JSON.parse(JSON.stringify(st)))
   const patchLayer = (id: string, patch: Partial<RefLayer>) => {
-    if (stack) updStack({ ...stack, layers: stack.layers.map(l => l.id === id ? { ...l, ...patch } : l) })
+    if (!stack) return
+    const sig = `${id}:${Object.keys(patch).sort().join(',')}`
+    const now = Date.now()
+    if (sig !== lastPatchUndoRef.current.sig || now - lastPatchUndoRef.current.t > 700) pushStackUndoLater(stack)
+    lastPatchUndoRef.current = { t: now, sig }
+    updStack({ ...stack, layers: stack.layers.map(l => l.id === id ? { ...l, ...patch } : l) })
   }
   const removeLayer = (id: string) => {
-    if (stack) updStack({ ...stack, layers: stack.layers.filter(l => l.id !== id) })
+    if (stack) { pushStackUndoLater(stack); updStack({ ...stack, layers: stack.layers.filter(l => l.id !== id) }) }
     if (selLayerId === id) { setSelLayerId(null); setSelItemId(null); clearOverlay() }
   }
   const removeItem = (layerId: string, itemId: string) => {
-    if (stack) updStack({ ...stack, layers: stack.layers.map(l => l.id === layerId ? { ...l, items: l.items.filter(i2 => i2.id !== itemId) } : l) })
+    if (stack) { pushStackUndoLater(stack); updStack({ ...stack, layers: stack.layers.map(l => l.id === layerId ? { ...l, items: l.items.filter(i2 => i2.id !== itemId) } : l) }) }
     if (selItemId === itemId) { setSelItemId(null); clearOverlay() }
   }
   const moveLayer = (id: string, dir: 1 | -1) => {
@@ -9804,9 +9884,11 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
     const j = i + dir
     if (i < 0 || j < 0 || j >= arr.length) return
     ;[arr[i], arr[j]] = [arr[j], arr[i]]
+    pushStackUndoLater(stack)
     updStack({ ...stack, layers: arr })
   }
   const addEmptyLayer = () => {
+    if (stack) pushStackUndoLater(stack)
     const l: RefLayer = { id: `l-${Date.now()}`, name: `Layer ${(stack?.layers.length || 0) + 1}`, visible: true, opacity: 1, items: [] }
     updStack({ enabled: true, layers: [...(stack?.layers || []), l] })
     setSelLayerId(l.id); setSelItemId(null)
@@ -9815,12 +9897,49 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
     if (!file.type.startsWith('image/')) return
     setLayerBusy(true); setLayerError(null)
     try {
-      const dataUrl = await new Promise<string>((ok, err) => {
+      let dataUrl = await new Promise<string>((ok, err) => {
         const r = new FileReader()
         r.onload = () => ok(r.result as string)
         r.onerror = () => err(new Error('Could not read the file'))
         r.readAsDataURL(file)
       })
+      // Downscale big picks CLIENT-SIDE: camera photos routinely exceed the
+      // upload route's ~15MB cap (a silent 413), and the editor canvas tops
+      // out at 4096px anyway — detail above that never survives to the
+      // composite. Re-encode anything over ~2MB, shrinking until it fits;
+      // if the browser can't decode the file at all (e.g. HEIC on some
+      // platforms), fail HERE with a clear message instead of posting a
+      // body the server will reject.
+      if (dataUrl.length > 2_500_000) {
+        let img: HTMLImageElement
+        try {
+          img = await new Promise<HTMLImageElement>((ok, err) => {
+            const im = new window.Image()
+            im.onload = () => ok(im)
+            im.onerror = () => err(new Error('decode'))
+            im.src = dataUrl
+          })
+          if (!img.naturalWidth) throw new Error('decode')
+        } catch {
+          throw new Error(`This browser can't read ${file.type.replace('image/', '.') || 'that file'} — export it as JPEG or PNG and try again`)
+        }
+        const draw = (edge: number, asPng: boolean, q: number) => {
+          const scale = Math.min(1, edge / Math.max(img.naturalWidth, img.naturalHeight))
+          const c = document.createElement('canvas')
+          c.width = Math.max(1, Math.round(img.naturalWidth * scale))
+          c.height = Math.max(1, Math.round(img.naturalHeight * scale))
+          c.getContext('2d')!.drawImage(img, 0, 0, c.width, c.height)
+          return asPng ? c.toDataURL('image/png') : c.toDataURL('image/jpeg', q)
+        }
+        // PNG keeps transparency; anything still over the route cap steps
+        // down through JPEG at shrinking sizes until it fits
+        let out = draw(4096, file.type.includes('png'), 0.92)
+        for (let edge = 4096; out.length > 19_000_000 && edge >= 1024; edge = Math.round(edge * 0.7)) {
+          out = draw(edge, false, 0.85)
+        }
+        if (out.length > 19_000_000) throw new Error('Image too large even after downscaling — try a smaller file')
+        dataUrl = out
+      }
       const res = await fetch('/api/user/ref-layer-upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -9830,6 +9949,7 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
       if (!res.ok || !data.url) throw new Error(data.error || 'Upload failed')
       const item: RefLayerItem = { id: `it-${Date.now()}`, url: data.url as string }
       const st = stackRef.current
+      if (st) pushStackUndoLater(st)
       if (st && selLayerId && st.layers.some(l => l.id === selLayerId)) {
         updStack({ enabled: true, layers: st.layers.map(l => l.id === selLayerId ? { ...l, items: [...l.items, item] } : l) })
       } else {
@@ -10140,6 +10260,159 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
     }))
   }
   const itemRot = (it: RefLayerItem) => ((it.r || 0) * Math.PI) / 180
+
+  // Erase strokes made while a layer is selected erase FROM THAT LAYER'S
+  // IMAGE (true transparency), never the base canvas: the stroke overlay is
+  // mapped through the item's rect + rotation into image space, punched out
+  // with destination-out, and the result re-hosted like any layer image.
+  // Returns true when the stroke was handled (or consumed with an error).
+  const eraseFromSelectedLayer = async (stroke: HTMLCanvasElement, alpha: number): Promise<boolean> => {
+    const st = stackRef.current
+    const layer = st?.layers.find(l => l.id === selLayerId)
+    if (!st || !layer) return false
+    const item = layer.items.find(i2 => i2.id === selItemId) ?? (layer.items.length === 1 ? layer.items[0] : null)
+    if (!item) { setLayerError('Select an image on the layer first'); return true }
+    const r = itemRectPx(item)
+    const c = canvasRef.current
+    if (!r || !c || r.w < 1 || r.h < 1) { setLayerError('Layer image not ready yet'); return true }
+    setLayerBusy(true); setLayerError(null)
+    try {
+      const img = await new Promise<HTMLImageElement>((ok, err) => {
+        const im = new window.Image()
+        im.crossOrigin = 'anonymous'
+        im.onload = () => ok(im)
+        im.onerror = () => err(new Error('Could not load the layer image'))
+        im.src = item.url
+      })
+      const natW = img.naturalWidth || 1, natH = img.naturalHeight || 1
+      // Cap working resolution so the PNG re-upload fits the route limit
+      const sc = Math.min(1, 4096 / Math.max(natW, natH))
+      const off = document.createElement('canvas')
+      off.width = Math.max(1, Math.round(natW * sc))
+      off.height = Math.max(1, Math.round(natH * sc))
+      const ectx = off.getContext('2d')!
+      ectx.drawImage(img, 0, 0, off.width, off.height)
+      // Inverse of the item's placement transform: uncenter → unrotate → unscale
+      ectx.globalCompositeOperation = 'destination-out'
+      ectx.globalAlpha = alpha
+      ectx.translate(off.width / 2, off.height / 2)
+      ectx.scale(off.width / r.w, off.height / r.h)
+      ectx.rotate(-itemRot(item))
+      ectx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2))
+      ectx.drawImage(stroke, 0, 0)
+      commitLayerCanvas(layer, item, off, r, st)
+      return true
+    } catch (e: any) {
+      setLayerError(e?.message || 'Erase failed')
+      setLayerBusy(false)
+      return true
+    }
+  }
+
+  // Shared commit for a punched layer canvas: freeze the rect, push undo,
+  // show the result INSTANTLY as a local data URL, host it in the background
+  // and swap in the permanent URL (stale-guarded against newer strokes/undo)
+  const commitLayerCanvas = (layer: RefLayer, item: RefLayerItem, off: HTMLCanvasElement, r: CropRect, preStack: RefLayerStack) => {
+    const c = canvasRef.current!
+    let out = off.toDataURL('image/png')
+    for (let edge = 4096; out.length > 19_000_000 && edge >= 1024; edge = Math.round(edge * 0.7)) {
+      const s2 = Math.min(1, edge / Math.max(off.width, off.height))
+      const c2 = document.createElement('canvas')
+      c2.width = Math.max(1, Math.round(off.width * s2))
+      c2.height = Math.max(1, Math.round(off.height * s2))
+      c2.getContext('2d')!.drawImage(off, 0, 0, c2.width, c2.height)
+      out = c2.toDataURL('image/png')
+    }
+    const frozen = { x: r.x / c.width, y: r.y / c.height, w: r.w / c.width, h: r.h / c.height }
+    const swapUrl = (url: string, localOnly: boolean) => {
+      const cur = stackRef.current
+      if (!cur) return
+      updStack({
+        ...cur,
+        layers: cur.layers.map(l => l.id !== layer.id ? l : ({
+          ...l,
+          items: l.items.map(i2 => i2.id !== item.id ? i2 : ({ ...i2, url, ...frozen })),
+        })),
+      }, { localOnly })
+    }
+    pushStackUndo(JSON.parse(JSON.stringify(preStack)))
+    swapUrl(out, true)
+    setLayerBusy(false)
+    requestAnimationFrame(drawLayerSelOverlay)
+    void (async () => {
+      try {
+        const res = await fetch('/api/user/ref-layer-upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: out }),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || !data.url) throw new Error(data.error || 'Upload failed')
+        const curItem = stackRef.current?.layers.find(l => l.id === layer.id)?.items.find(i2 => i2.id === item.id)
+        if (curItem?.url === out) swapUrl(data.url as string, false)
+      } catch (e: any) {
+        setLayerError(`Erase not saved: ${e?.message || 'upload failed'} — redo the stroke`)
+      }
+    })()
+    return out
+  }
+
+  // ── Live layer erase (real-time) ──────────────────────────────────────────
+  // Starts a stroke on the selected layer's image: the item's decoded image
+  // is copied to a canvas that REPLACES the <img> for the duration of the
+  // stroke, and every pointer move punches a segment through it with
+  // destination-out, mapped through the item's placement transform. Returns
+  // false when no layer is targeted (caller falls back to the base canvas).
+  const startLiveLayerErase = (pos: { x: number; y: number }): boolean => {
+    const st = stackRef.current
+    if (!st?.enabled || !selLayerId) return false
+    const layer = st.layers.find(l => l.id === selLayerId)
+    if (!layer) return false
+    const item = layer.items.find(i2 => i2.id === selItemId) ?? (layer.items.length === 1 ? layer.items[0] : null)
+    if (!item) { setLayerError('Select an image on the layer first'); return true }
+    const img = layerImgCache.current.get(item.url)
+    const r = itemRectPx(item)
+    if (!img || !img.complete || !img.naturalWidth || !r || r.w < 1 || r.h < 1) { setLayerError('Layer image still loading — try again'); return true }
+    const natW = img.naturalWidth, natH = img.naturalHeight
+    const sc = Math.min(1, 4096 / Math.max(natW, natH))
+    const off = document.createElement('canvas')
+    off.width = Math.max(1, Math.round(natW * sc)); off.height = Math.max(1, Math.round(natH * sc))
+    const ectx = off.getContext('2d')!
+    ectx.drawImage(img, 0, 0, off.width, off.height)
+    // Inverse placement transform: canvas-space strokes land in image space
+    ectx.globalCompositeOperation = 'destination-out'
+    ectx.globalAlpha = Math.max(0.05, paintOpacity / 100)
+    ectx.translate(off.width / 2, off.height / 2)
+    ectx.scale(off.width / r.w, off.height / r.h)
+    ectx.rotate(-itemRot(item))
+    ectx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2))
+    ectx.lineCap = 'round'; ectx.lineJoin = 'round'
+    ectx.lineWidth = brushSize
+    ectx.strokeStyle = '#000'
+    // Initial dot so a tap erases too
+    ectx.beginPath(); ectx.moveTo(pos.x, pos.y); ectx.lineTo(pos.x + 0.01, pos.y); ectx.stroke()
+    liveEraseRef.current = { layerId: layer.id, itemId: item.id, canvas: off, ctx: ectx, rect: r, preStack: JSON.parse(JSON.stringify(st)), last: pos }
+    setLiveEraseItem({ layerId: layer.id, itemId: item.id })
+    return true
+  }
+  const moveLiveLayerErase = (pos: { x: number; y: number }) => {
+    const le = liveEraseRef.current; if (!le) return
+    le.ctx.beginPath(); le.ctx.moveTo(le.last.x, le.last.y); le.ctx.lineTo(pos.x, pos.y); le.ctx.stroke()
+    le.last = pos
+  }
+  const finishLiveLayerErase = async () => {
+    const le = liveEraseRef.current; if (!le) return
+    liveEraseRef.current = null
+    const st = stackRef.current
+    const layer = st?.layers.find(l => l.id === le.layerId)
+    const item = layer?.items.find(i2 => i2.id === le.itemId)
+    if (!st || !layer || !item) { setLiveEraseItem(null); return }
+    const out = commitLayerCanvas(layer, item, le.canvas, le.rect, le.preStack)
+    // Keep the live canvas on screen until the <img> has the punched PNG
+    // decoded — swapping early would flash the un-erased image
+    try { const im = new window.Image(); im.src = out; await im.decode() } catch {}
+    setLiveEraseItem(null)
+  }
   // Rotate a point by -rad around the rect center (into the item's local space)
   const toLocalPt = (pos: { x: number; y: number }, rect: CropRect, rad: number) => {
     const cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2
@@ -10151,13 +10424,25 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
   // Unified undo: canvas paint frames and layer-transform snapshots interleave
   // in one chronological list so the Undo button reverses the LAST action of
   // either kind (double-tap fits, drags, pinches, rotations included)
-  const undoKindsRef = useRef<('canvas' | 'stack')[]>([])
+  const undoKindsRef = useRef<('canvas' | 'stack' | 'both')[]>([])
   const stackUndoRef = useRef<RefLayerStack[]>([])
   const [stackUndoLen, setStackUndoLen] = useState(0)
-  const pushStackUndo = (pre: RefLayerStack) => {
+  // Redo: every undo parks the state it removed here; any NEW action clears
+  // it (a fresh edit after an undo forks the timeline, as in every editor)
+  const redoKindsRef = useRef<('canvas' | 'stack' | 'both')[]>([])
+  const canvasRedoRef = useRef<string[]>([])
+  const stackRedoRef = useRef<RefLayerStack[]>([])
+  const [redoLen, setRedoLen] = useState(0)
+  const clearRedo = () => {
+    if (!redoKindsRef.current.length) return
+    redoKindsRef.current = []; canvasRedoRef.current = []; stackRedoRef.current = []
+    setRedoLen(0)
+  }
+  const pushStackUndo = (pre: RefLayerStack, opts?: { noKind?: boolean }) => {
     stackUndoRef.current.push(pre)
-    undoKindsRef.current.push('stack')
+    if (!opts?.noKind) undoKindsRef.current.push('stack')
     setStackUndoLen(stackUndoRef.current.length)
+    clearRedo()
   }
 
   // Double-tap on a selected image fits it to the canvas (contain, centered,
@@ -10786,6 +11071,7 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
       historyRef.current = [...historyRef.current, url]
       undoKindsRef.current.push('canvas')
       setHistLen(historyRef.current.length)
+      clearRedo()
     } catch { /* tainted canvas — skip snapshot */ }
   }
 
@@ -10807,33 +11093,95 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
   }
 
   const undo = () => {
-    if (undoKindsRef.current[undoKindsRef.current.length - 1] === 'stack') {
+    const top = undoKindsRef.current[undoKindsRef.current.length - 1]
+    // 'both' = one atomic action that changed the canvas AND the layer stack
+    // (e.g. canvas resize remapping layer rects) — restore the two together
+    if (top === 'stack' || top === 'both') {
       undoKindsRef.current.pop()
       const snap = stackUndoRef.current.pop()
       setStackUndoLen(stackUndoRef.current.length)
       if (snap) {
+        // Park the state being undone for Redo
+        stackRedoRef.current.push(JSON.parse(JSON.stringify(stackRef.current ?? snap)))
+        // Sync the ref NOW — the background layer-erase upload's stale guard
+        // reads stackRef and must see the restored stack immediately
+        stackRef.current = snap
         setStack(snap)
         onLayerStackChange?.(snap)
         requestAnimationFrame(drawLayerSelOverlay)
       }
+      if (top === 'stack') {
+        redoKindsRef.current.push('stack')
+        setRedoLen(redoKindsRef.current.length)
+        return
+      }
+    } else if (top === 'canvas') {
+      undoKindsRef.current.pop()
+    }
+    if (historyRef.current.length <= 1) {
+      // 'both' with no canvas frame left — keep the redo entry honest
+      if (top === 'both') { redoKindsRef.current.push('stack'); setRedoLen(redoKindsRef.current.length) }
       return
     }
-    if (historyRef.current.length <= 1) return
-    if (undoKindsRef.current[undoKindsRef.current.length - 1] === 'canvas') undoKindsRef.current.pop()
+    canvasRedoRef.current.push(historyRef.current[historyRef.current.length - 1])
     historyRef.current = historyRef.current.slice(0, -1)
     setHistLen(historyRef.current.length)
     restoreFrame(historyRef.current[historyRef.current.length - 1])
+    redoKindsRef.current.push(top === 'both' ? 'both' : 'canvas')
+    setRedoLen(redoKindsRef.current.length)
+  }
+
+  // Reapply the most recently undone action (mirror of undo — the restored
+  // state goes back onto the undo list so the two stay symmetric)
+  const redo = () => {
+    const kind = redoKindsRef.current.pop()
+    if (!kind) return
+    if (kind === 'stack' || kind === 'both') {
+      const next = stackRedoRef.current.pop()
+      if (next) {
+        stackUndoRef.current.push(JSON.parse(JSON.stringify(stackRef.current ?? next)))
+        setStackUndoLen(stackUndoRef.current.length)
+        stackRef.current = next
+        setStack(next)
+        onLayerStackChange?.(next)
+        requestAnimationFrame(drawLayerSelOverlay)
+      }
+    }
+    if (kind === 'canvas' || kind === 'both') {
+      const frame = canvasRedoRef.current.pop()
+      if (frame) {
+        historyRef.current = [...historyRef.current, frame]
+        setHistLen(historyRef.current.length)
+        restoreFrame(frame)
+      }
+    }
+    undoKindsRef.current.push(kind)
+    setRedoLen(redoKindsRef.current.length)
   }
 
   const reset = () => {
-    if (historyRef.current.length === 0) return
-    const orig = historyRef.current[0]
-    historyRef.current = [orig]
-    undoKindsRef.current = undoKindsRef.current.filter(k => k !== 'canvas')
-    setHistLen(1)
-    restoreFrame(orig)
-    setHasCropSel(false)
-    overlayRef.current && (overlayRef.current.getContext('2d')!.clearRect(0, 0, overlayRef.current.width, overlayRef.current.height))
+    // Layer stack back to its pristine state: the pre-state of the FIRST
+    // layer change this session (stackUndoRef[0]) — covers erases, drags,
+    // pinches, everything that pushed a stack snapshot
+    const firstStack = stackUndoRef.current[0]
+    if (firstStack) {
+      stackRef.current = firstStack
+      setStack(firstStack)
+      onLayerStackChange?.(firstStack)
+      stackUndoRef.current = []
+      setStackUndoLen(0)
+      requestAnimationFrame(drawLayerSelOverlay)
+    }
+    if (historyRef.current.length > 0) {
+      const orig = historyRef.current[0]
+      historyRef.current = [orig]
+      setHistLen(1)
+      restoreFrame(orig)
+      setHasCropSel(false)
+      overlayRef.current && (overlayRef.current.getContext('2d')!.clearRect(0, 0, overlayRef.current.width, overlayRef.current.height))
+    }
+    undoKindsRef.current = []
+    clearRedo()
   }
 
   const clearOverlay = () => {
@@ -11022,7 +11370,18 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
       cutPtsRef.current = [pos]
       setCutReady(false)
       clearOverlay()
-    } else if (tool === 'draw' || tool === 'erase') {
+    } else if (tool === 'erase') {
+      // REAL-TIME erase: a selected layer is punched live through a stand-in
+      // canvas; otherwise the base canvas is punched directly (no preview)
+      if (!startLiveLayerErase(pos)) {
+        ctx.save()
+        ctx.globalCompositeOperation = 'destination-out'
+        ctx.globalAlpha = Math.max(0.05, paintOpacity / 100)
+        ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.lineWidth = brushSize; ctx.strokeStyle = '#000'
+        ctx.beginPath(); ctx.moveTo(pos.x, pos.y); ctx.lineTo(pos.x + 0.01, pos.y); ctx.stroke()
+        ctx.restore()
+      }
+    } else if (tool === 'draw') {
       // Strokes preview on the overlay and composite onto the canvas at the
       // chosen opacity on release — uniform alpha, no darker joints where
       // stroke segments overlap
@@ -11167,8 +11526,21 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
       for (let i = 1; i < pts.length; i++) octx.lineTo(pts[i].x, pts[i].y)
       octx.stroke()
       octx.setLineDash([])
-    } else if (tool === 'draw' || tool === 'erase') {
-      octx.strokeStyle = tool === 'draw' ? drawColor : '#ffffff'
+    } else if (tool === 'erase') {
+      if (liveEraseRef.current) {
+        moveLiveLayerErase(pos)
+      } else {
+        const lp = lastPtRef.current ?? pos
+        ctx.save()
+        ctx.globalCompositeOperation = 'destination-out'
+        ctx.globalAlpha = Math.max(0.05, paintOpacity / 100)
+        ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.lineWidth = brushSize; ctx.strokeStyle = '#000'
+        ctx.beginPath(); ctx.moveTo(lp.x, lp.y); ctx.lineTo(pos.x, pos.y); ctx.stroke()
+        ctx.restore()
+      }
+      lastPtRef.current = pos
+    } else if (tool === 'draw') {
+      octx.strokeStyle = drawColor
       octx.lineWidth = brushSize
       octx.lineCap = 'round'; octx.lineJoin = 'round'
       octx.globalCompositeOperation = 'source-over'
@@ -11310,7 +11682,12 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
         cutPtsRef.current = []
         clearOverlay()
       }
-    } else if (tool === 'draw' || tool === 'erase') {
+    } else if (tool === 'erase') {
+      // Live erase already landed every segment — just commit: layer strokes
+      // encode + host the punched canvas, base strokes take a history frame
+      if (liveEraseRef.current) void finishLiveLayerErase()
+      else pushHistory()
+    } else if (tool === 'draw') {
       // Composite the previewed stroke onto the canvas at the chosen opacity
       const overlay1 = overlayRef.current!
       const canvas1 = canvasRef.current!
@@ -11361,6 +11738,10 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
     // Layer items live in canvas-fraction coords — remap into the new canvas
     // space so nothing visually moves (expansion keeps everything in place)
     const stC = stackRef.current
+    // The remap below + the pushHistory make this ONE action touching both
+    // stores — snapshot the stack kind-less and upgrade the canvas entry to
+    // 'both' so a single Undo reverses the whole resize
+    if (stC) pushStackUndo(JSON.parse(JSON.stringify(stC)), { noKind: true })
     if (stC) {
       updStack({
         ...stC,
@@ -11375,6 +11756,7 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
       })
     }
     pushHistory()
+    if (stC) undoKindsRef.current[undoKindsRef.current.length - 1] = 'both'
     syncOrbit()
   }
 
@@ -11555,7 +11937,7 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
           ectx.fillRect(0, 0, exp.width, exp.height)
           await paintItems(ectx, exp.width, exp.height, stackRef.current!)
           ectx.drawImage(canvas, 0, 0)
-          setSaveOverlay({ url: exp.toDataURL('image/png'), label: `Full composition — ${exp.width}×${exp.height} PNG` })
+          openSaveOverlay(exp.toDataURL('image/png'), `Full composition — ${exp.width}×${exp.height} PNG`)
         } catch {
           setLayerError('Could not export the composition — try again')
         }
@@ -11563,7 +11945,7 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
       return
     }
     try {
-      setSaveOverlay({ url: canvas.toDataURL('image/png'), label: `Full-size image — ${canvas.width}×${canvas.height} PNG` })
+      openSaveOverlay(canvas.toDataURL('image/png'), `Full-size image — ${canvas.width}×${canvas.height} PNG`)
     } catch {}
   }
 
@@ -11579,7 +11961,7 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
     mctx.drawImage(sil, 0, 0)
     const trimmed = trimToSilhouette(masked, sil) ?? masked
     try {
-      setSaveOverlay({ url: trimmed.toDataURL('image/png'), label: 'Masked cutout — transparent PNG' })
+      openSaveOverlay(trimmed.toDataURL('image/png'), 'Masked cutout — transparent PNG')
     } catch {}
   }
 
@@ -11717,8 +12099,19 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
   )
 
   return createPortal(
-    <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
-      <div className="relative w-full max-w-[1600px] h-[95vh] bg-[#070b14]/95 border border-white/[0.08] rounded-2xl shadow-2xl flex flex-col">
+    <div
+      className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/75 backdrop-blur-sm p-2 sm:p-4"
+      // The fixed overlay can extend under iOS Safari's collapsed toolbar;
+      // pinning its height to the measured visible viewport keeps the
+      // centered modal fully on screen
+      style={vvh ? { height: vvh } : undefined}>
+      {/* Height = measured visualViewport (not vh/dvh): iPad Safari's vh
+          measures the LARGEST viewport so 95vh slid behind the browser chrome
+          in portrait, and dvh needs iPadOS 16.4+. The JS measurement is exact
+          on every browser; the dvh class is only the pre-measure fallback. */}
+      <div
+        className="relative w-full max-w-[1600px] max-h-[calc(100dvh-1rem)] bg-[#070b14]/95 border border-white/[0.08] rounded-2xl shadow-2xl flex flex-col"
+        style={{ height: vvh ? Math.max(320, vvh - 16) : '95vh' }}>
 
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-white/[0.08] shrink-0">
@@ -11764,7 +12157,19 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
                 Full
               </button>
             </div>
-            <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors"><X size={16} /></button>
+            <button onClick={onClose}
+              className="text-[11px] px-3 py-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-white/[0.06] transition-all">
+              Cancel
+            </button>
+            <button onClick={applyEdit}
+              className="relative overflow-hidden text-[11px] px-4 py-1.5 rounded-lg bg-white/10 border border-white/25 text-white hover:bg-white/15 hover:border-white/40 transition-all font-bold">
+              <span
+                className="absolute inset-y-0 left-0 w-1/3 bg-gradient-to-r from-transparent via-white/35 to-transparent pointer-events-none"
+                style={{ animation: "sheen-sweep 2.6s infinite" }}
+              />
+              Apply
+            </button>
+            <button onClick={onClose} title="Close" className="text-slate-500 hover:text-white transition-colors"><X size={16} /></button>
           </div>
         </div>
 
@@ -11782,6 +12187,19 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
           {toolBtn('mask',  <Wand2   size={15} />, 'Mask')}
           {toolBtn('cut',   <Scissors size={15} />, 'Cut')}
           {toolBtn('resize', <Minimize2 size={15} />, 'Scale')}
+          <span className="w-px h-5 bg-white/[0.08] mx-1 shrink-0" />
+          <button onClick={undo} disabled={histLen <= 1 && stackUndoLen === 0} title="Undo"
+            className="flex items-center gap-1 text-[10px] px-2 py-1.5 rounded-lg border border-white/10 text-slate-400 hover:text-white hover:bg-white/[0.06] disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0">
+            <Undo2 size={13} /> Undo
+          </button>
+          <button onClick={redo} disabled={redoLen === 0} title="Redo"
+            className="flex items-center gap-1 text-[10px] px-2 py-1.5 rounded-lg border border-white/10 text-slate-400 hover:text-white hover:bg-white/[0.06] disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0">
+            <Redo2 size={13} /> Redo
+          </button>
+          <button onClick={reset} disabled={histLen <= 1 && stackUndoLen === 0} title="Reset all edits (canvas + layers)"
+            className="flex items-center gap-1 text-[10px] px-2 py-1.5 rounded-lg border border-white/10 text-slate-400 hover:text-white hover:bg-white/[0.06] disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0">
+            <RotateCcw size={13} /> Reset
+          </button>
           {tool === 'select' && (
             <>
               <span className="w-px h-5 bg-white/[0.08] mx-1 shrink-0" />
@@ -11812,7 +12230,7 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
                   <Trash2 size={12} />
                 </button>
               )}
-              {layerError && <span className="text-[10px] text-red-400 shrink-0 max-w-[20%] truncate" title={layerError}>{layerError}</span>}
+              {layerError && <span className="text-[11px] font-semibold text-red-400 shrink min-w-0 max-w-[50%] truncate" title={layerError}>⚠ {layerError}</span>}
             </>
           )}
           <button
@@ -11832,6 +12250,34 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
         {toolMenuOpen && CONFIG_TOOLS.includes(tool) && (
           <div className="relative z-50">
             <div className="absolute top-1 left-4 w-72 max-w-[85vw] rounded-xl border border-white/[0.08] bg-[#070b14]/95 backdrop-blur-md shadow-2xl p-3 space-y-3">
+              {/* Live brush preview — the dot is the EXACT on-screen size the
+                  stroke will paint at (brush size ÷ current canvas zoom),
+                  with the tool's color, opacity, and softness */}
+              {(tool === 'draw' || tool === 'erase' || tool === 'blur') && (() => {
+                const onscreen = Math.max(2, brushSize / (displayScale() || 1))
+                const cap = 72
+                const shown = Math.min(cap, onscreen)
+                return (
+                  <div
+                    className="relative h-20 rounded-lg border border-white/[0.06] overflow-hidden flex items-center justify-center"
+                    style={{ background: 'repeating-conic-gradient(rgba(255,255,255,0.05) 0% 25%, transparent 0% 50%) 0 0 / 14px 14px' }}
+                  >
+                    <span
+                      className="rounded-full shrink-0"
+                      style={{
+                        width: shown, height: shown,
+                        opacity: Math.max(0.05, paintOpacity / 100),
+                        background: tool === 'draw' ? drawColor : tool === 'erase' ? '#f472b6' : 'rgba(148,163,184,0.9)',
+                        ...(tool === 'blur' ? { filter: `blur(${Math.min(14, blurRadius / 2)}px)` } : {}),
+                        ...(tool === 'erase' ? { boxShadow: '0 0 0 1.5px rgba(255,255,255,0.45)' } : {}),
+                      }}
+                    />
+                    <span className="absolute bottom-1 right-2 text-[9px] font-mono text-slate-500">
+                      {brushSize}px{onscreen > cap ? ' · capped' : ''}
+                    </span>
+                  </div>
+                )
+              })()}
               {(tool === 'draw' || tool === 'erase') && (
                 <>
                   {tool === 'draw' && (
@@ -11842,8 +12288,8 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
                     </label>
                   )}
                   <label className="flex items-center gap-2 text-[11px] text-slate-400">
-                    Size <span className="text-slate-300 w-7 text-center">{brushSize}</span>
-                    <input type="range" min={4} max={80} value={brushSize} onChange={e => setBrushSize(+e.target.value)}
+                    Size <span className="text-slate-300 w-16 text-center tabular-nums" title="Brush diameter in canvas pixels / % of the canvas long edge">{brushSize}px · {brushPct(brushSize)}</span>
+                    <input type="range" min={0} max={100} value={brushToSlider(brushSize)} onChange={e => setBrushSize(sliderToBrush(+e.target.value))}
                       className="flex-1 accent-white" />
                   </label>
                   <label className="flex items-center gap-2 text-[11px] text-slate-400">
@@ -11861,8 +12307,8 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
                       className="flex-1 accent-white" />
                   </label>
                   <label className="flex items-center gap-2 text-[11px] text-slate-400">
-                    Brush <span className="text-slate-300 w-7 text-center">{brushSize}</span>
-                    <input type="range" min={10} max={120} value={brushSize} onChange={e => setBrushSize(+e.target.value)}
+                    Brush <span className="text-slate-300 w-16 text-center tabular-nums" title="Brush diameter in canvas pixels / % of the canvas long edge">{brushSize}px · {brushPct(brushSize)}</span>
+                    <input type="range" min={0} max={100} value={brushToSlider(brushSize)} onChange={e => setBrushSize(sliderToBrush(+e.target.value))}
                       className="flex-1 accent-white" />
                   </label>
                   <label className="flex items-center gap-2 text-[11px] text-slate-400">
@@ -11985,6 +12431,11 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
         <div
           ref={editorPaneRef}
           onPointerDown={onPanePointerDown}
+          // Any pointer down on the canvas area OUTSIDE the layers popup
+          // dismisses it (capture phase so tool handlers can't swallow it)
+          onPointerDownCapture={e => {
+            if (showLayersPanel && !(e.target as HTMLElement).closest?.('[data-layers-panel]')) setShowLayersPanel(false)
+          }}
           onPointerMove={onPanePointerMove}
           onPointerUp={onPanePointerUp}
           onPointerCancel={onPanePointerUp}
@@ -12055,6 +12506,33 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
                 (contain-fit, per-layer opacity) — matches the generation-time flatten */}
             {stack?.enabled && stack.layers.filter(l => l.visible).map(l => l.items.map(it => {
               const hasRect = typeof it.x === 'number' && typeof it.y === 'number' && typeof it.w === 'number' && typeof it.h === 'number'
+              if (liveEraseItem && liveEraseItem.itemId === it.id && liveEraseItem.layerId === l.id && liveEraseRef.current) {
+                // Mid-stroke: the punched stand-in canvas renders in the
+                // item's exact place so the erase is visible in real time
+                return (
+                  <div
+                    key={`${l.id}-${it.id}-live`}
+                    ref={el => {
+                      const cv = liveEraseRef.current?.canvas
+                      if (el && cv && cv.parentElement !== el) {
+                        cv.style.width = '100%'; cv.style.height = '100%'; cv.style.display = 'block'
+                        el.appendChild(cv)
+                      }
+                    }}
+                    className={`absolute pointer-events-none ${hasRect ? '' : 'inset-0 w-full h-full'}`}
+                    style={{
+                      opacity: l.opacity,
+                      ...(it.r ? { transform: `rotate(${it.r}deg)` } : {}),
+                      ...(hasRect ? {
+                        left: `${(it.x as number) * 100}%`,
+                        top: `${(it.y as number) * 100}%`,
+                        width: `${(it.w as number) * 100}%`,
+                        height: `${(it.h as number) * 100}%`,
+                      } : {}),
+                    }}
+                  />
+                )
+              }
               return (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
@@ -12190,9 +12668,12 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
             mediaScale={canvasView.s}
           />
 
-          {/* Layers column — slides in from the right so the artboard keeps the
-              full pane by default (same pattern as the popup settings section) */}
-          <div className={`absolute top-0 right-0 bottom-0 w-64 max-w-[85%] z-30 bg-[#070b14]/95 backdrop-blur-md border-l border-white/[0.08] flex flex-col transition-transform duration-200 ${showLayersPanel ? 'translate-x-0' : 'translate-x-full pointer-events-none'}`}>
+          {/* Layers popup — a compact floating card sized to its content
+              (was a full-height column that sat mostly empty); any pointer
+              down on the canvas outside it dismisses it */}
+          <div
+            data-layers-panel
+            className={`absolute top-2 right-2 w-64 max-w-[85%] max-h-[calc(100%-1rem)] z-30 bg-[#070b14]/95 backdrop-blur-md border border-white/[0.08] rounded-xl shadow-2xl flex flex-col overflow-hidden transition-all duration-150 origin-top-right ${showLayersPanel ? 'opacity-100 scale-100' : 'opacity-0 scale-95 pointer-events-none'}`}>
             <div className="flex items-center justify-between px-3 py-2.5 border-b border-white/[0.06] shrink-0">
               <span className="text-[10px] font-mono font-semibold uppercase tracking-[0.2em] text-slate-400">Layers</span>
               <button onClick={() => setShowLayersPanel(false)} className="text-slate-500 hover:text-white transition-colors"><X size={13} /></button>
@@ -12385,34 +12866,6 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
           </div>
         )}
 
-        {/* Footer */}
-        <div className="flex items-center justify-between px-5 py-3 border-t border-white/[0.08] shrink-0">
-          <div className="flex items-center gap-2">
-            <button onClick={undo} disabled={histLen <= 1 && stackUndoLen === 0}
-              className="flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-white/[0.06] disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-              <Undo2 size={13} /> Undo
-            </button>
-            <button onClick={reset} disabled={histLen <= 1}
-              className="flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-white/[0.06] disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-              <RotateCcw size={13} /> Reset
-            </button>
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={onClose}
-              className="text-[11px] px-3.5 py-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-white/[0.06] transition-all">
-              Cancel
-            </button>
-            <button onClick={applyEdit}
-              className="relative overflow-hidden text-[11px] px-4 py-1.5 rounded-lg bg-white/10 border border-white/25 text-white hover:bg-white/15 hover:border-white/40 transition-all font-bold">
-              <span
-                className="absolute inset-y-0 left-0 w-1/3 bg-gradient-to-r from-transparent via-white/35 to-transparent pointer-events-none"
-                style={{ animation: "sheen-sweep 2.6s infinite" }}
-              />
-              Apply
-            </button>
-          </div>
-        </div>
-
         {/* Touch-and-hold save overlay — a real <img> so the native iPad Save Image
             sheet appears on long-press (checkerboard backs transparent cutouts) */}
         {saveOverlay && (
@@ -12425,19 +12878,29 @@ function RefImageEditorModal({ image, onApply, onClose, canUseLayers = false, la
             </button>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={saveOverlay.url}
+              // The hosted https copy is what makes the iOS long-press sheet
+              // offer "Save Image / Add to Photos" — data URLs get a reduced
+              // callout. Falls back to the data URL if hosting failed.
+              src={saveOverlay.hostedUrl ?? saveOverlay.url}
               alt="Touch and hold to save"
               className="max-w-full max-h-[65vh] object-contain rounded-lg"
               style={{
+                WebkitTouchCallout: 'default',
                 background:
                   'repeating-conic-gradient(rgba(255,255,255,0.08) 0% 25%, transparent 0% 50%) 0 0 / 20px 20px',
               }}
             />
             <p className="text-[12px] text-white font-medium">{saveOverlay.label}</p>
-            <p className="text-[11px] text-slate-400 text-center leading-relaxed">
-              Touch and hold the image, then choose <span className="text-white">“Save Image”</span> / <span className="text-white">“Add to Photos”</span>.
-              <span className="hidden sm:inline"> On desktop, right-click → Save Image As.</span>
-            </p>
+            {saveOverlay.hosting ? (
+              <p className="flex items-center gap-1.5 text-[11px] text-slate-400 text-center leading-relaxed">
+                <Loader2 size={11} className="animate-spin" /> Preparing “Save Image”… one moment
+              </p>
+            ) : (
+              <p className="text-[11px] text-slate-400 text-center leading-relaxed">
+                Touch and hold the image, then choose <span className="text-white">“Save Image”</span> / <span className="text-white">“Add to Photos”</span>.
+                <span className="hidden sm:inline"> On desktop, right-click → Save Image As.</span>
+              </p>
+            )}
             <a
               href={saveOverlay.url}
               download={`ai-design-studio-${Date.now()}.png`}
@@ -22261,6 +22724,72 @@ export default function PortalV2Page() {
   const [chatRefCap, setChatRefCap] = useState<number | null>(null)
   // Chat-hub media viewer: reuses the session feed's ImageDetailModal
   const [chatMediaItem, setChatMediaItem] = useState<ImageItem | null>(null)
+  // Layer stack for the chat-media editor canvas — in-memory only (chat media
+  // has no UserReference row to persist onto); reset whenever a new image opens
+  const [chatMediaLayers, setChatMediaLayers] = useState<RefLayerStack | null>(null)
+  // Open a chat-hub media item in the Edit Reference canvas. When the image
+  // was produced by an edit_image chain, DECOMPOSE the recipe instead of
+  // showing the flattened result: the recipe's source image becomes the base
+  // canvas and every overlay op becomes its own editable layer (fractional
+  // rect + rotation + opacity), so individual pasted pieces can be moved,
+  // resized, or deleted. Falls back to the flattened image when the chain has
+  // no overlays or changed the canvas dimensions before the first overlay
+  // (crop/resize/pad/rotate would break the coordinate mapping).
+  const openChatMedia = useCallback((info: { url: string; prompt?: string; modelId?: string | null; settings?: Record<string, string>; recipe?: { image_url?: string; canvas?: { width: number; height: number; color?: string }; operations: unknown[] } | null }) => {
+    const item: ImageItem = {
+      id: 0,
+      imageUrl: info.url,
+      prompt: info.prompt ?? "",
+      // chat create id → portal apiId where they differ
+      model: info.modelId === "kling-image-v3" ? "kling-v3-image" : (info.modelId ?? ""),
+      aspectRatio: info.settings?.aspect,
+      quality: info.settings?.quality ?? info.settings?.resolution,
+    } as ImageItem
+    const rec = info.recipe
+    const ops: any[] = Array.isArray(rec?.operations) ? (rec!.operations as any[]) : []
+    const overlays = ops.filter(o => o?.op === 'overlay' && typeof o?.image_url === 'string')
+    const firstOv = ops.findIndex(o => o?.op === 'overlay' && typeof o?.image_url === 'string')
+    const dimChangers = new Set(['crop', 'resize', 'pad', 'rotate'])
+    const decomposable = overlays.length > 0 && !!rec?.image_url
+      && !ops.slice(0, firstOv).some(o => dimChangers.has(o?.op))
+    if (!decomposable) { setChatMediaLayers(null); setChatMediaItem(item); return }
+    const loadDims = (u: string) => new Promise<{ w: number; h: number } | null>(res => {
+      const im = new window.Image()
+      im.crossOrigin = 'anonymous'
+      im.onload = () => res(im.naturalWidth ? { w: im.naturalWidth, h: im.naturalHeight } : null)
+      im.onerror = () => res(null)
+      im.src = u
+    })
+    void Promise.all([loadDims(rec!.image_url!), ...overlays.map(o => loadDims(o.image_url))]).then(([base, ...ovDims]) => {
+      if (!base) { setChatMediaLayers(null); setChatMediaItem(item); return }
+      const layers: RefLayer[] = overlays.map((o, i) => {
+        const nat = ovDims[i]
+        let wPx = Number(o.width)
+        let hPx = Number(o.height)
+        if (!Number.isFinite(wPx) || wPx <= 0) wPx = nat?.w ?? base.w
+        if (!Number.isFinite(hPx) || hPx <= 0) hPx = nat ? wPx * (nat.h / nat.w) : base.h
+        return {
+          id: `chat-ov-${i}`,
+          name: `Overlay ${i + 1}`,
+          visible: true,
+          // Snap near-opaque ops to fully opaque — models emit 0.9x opacities
+          // that render every layer faintly translucent in the editor
+          opacity: typeof o.opacity === 'number' && o.opacity < 0.95 ? Math.max(0, o.opacity) : 1,
+          items: [{
+            id: `chat-ov-it-${i}`,
+            url: o.image_url,
+            x: (Number(o.x) || 0) / base.w,
+            y: (Number(o.y) || 0) / base.h,
+            w: wPx / base.w,
+            h: hPx / base.h,
+            ...(Number.isFinite(Number(o.rotate)) && Number(o.rotate) !== 0 ? { r: Number(o.rotate) } : {}),
+          }],
+        }
+      })
+      setChatMediaLayers({ enabled: true, layers })
+      setChatMediaItem({ ...item, imageUrl: rec!.image_url! })
+    })
+  }, [])
   const [chatActionRequest, setChatActionRequest] = useState<{ kind: "edit" | "useprompt"; text: string; url?: string; nonce: number } | null>(null)
   const [isAuditAccount, setIsAuditAccount] = useState(false)
   const [isGenerationMaintenance, setIsGenerationMaintenance] = useState(false)
@@ -22909,7 +23438,7 @@ export default function PortalV2Page() {
       const s = p.find(x => x.slotId === slotId)
       // Time from EXECUTION start when known — queue wait must not distort the
       // duration history. A job removed while still queued records nothing.
-      const t0 = s?.execStartMs ?? slotStartMs(slotId)
+      const t0 = s?.execStartMs ?? s?.queuedAtMs ?? slotStartMs(slotId)
       if (s?.modelId && t0 && s.status === "loading" && !s.inQueue) {
         const sec = (Date.now() - t0) / 1000
         // Record into the tier-specific bucket (custom flux upscale tiers time
@@ -23639,10 +24168,15 @@ export default function PortalV2Page() {
         // history all run from the moment a worker actually starts the job.
         // notFound responses (purged/unregistered job) say nothing about
         // execution — they must not start or restart the timer.
-        if (statusData.status === 'processing' && !statusData.notFound) {
+        // Covers BOTH shapes: RunPod ({status:'processing', queued}) and fal
+        // ({status:'in_progress', falStatus:'IN_QUEUE'|'IN_PROGRESS'}). Without
+        // the fal branch, queued fal jobs never got execStartMs — the tile
+        // said GENERATING with a timer counting from QUEUE time (hours off).
+        if ((statusData.status === 'processing' || statusData.status === 'in_progress') && !statusData.notFound) {
           try {
             const cur = pendingSlotsRef.current.find(s => slotIds.includes(s.slotId))
-            if (statusData.queued) {
+            const stillQueued = statusData.queued || statusData.falStatus === 'IN_QUEUE'
+            if (stillQueued) {
               if (cur && !cur.inQueue) slotIds.forEach(sid => handleUpdatePending(sid, { inQueue: true }))
             } else if (cur && (cur.inQueue || !cur.execStartMs)) {
               slotIds.forEach(sid => handleUpdatePending(sid, { inQueue: false, execStartMs: cur.execStartMs ?? Date.now() }))
@@ -25625,17 +26159,22 @@ export default function PortalV2Page() {
         />
       )}
 
-      {/* Chat hub media viewer — the same modal as the session feed, with
-          chat actions (Edit → back into the chat; Ref → reference library) */}
+      {/* Chat hub media viewer — the full Edit Reference canvas with the
+          clicked image as the base: same tools as the reference editor
+          (draw, blur, crop, mask, cut, shapes, Dev-Tier layers). Apply
+          saves the flattened canvas as a new ACTIVE library reference, so
+          it feeds straight back into the chat. */}
       {chatMediaItem && (
-        <ImageDetailModal
-          image={chatMediaItem}
+        <RefImageEditorModal
+          image={{ id: `chat-media:${chatMediaItem.imageUrl}`, url: chatMediaItem.imageUrl }}
+          canUseLayers={hasEffectiveDevAccess}
+          layerStack={chatMediaLayers}
+          onLayerStackChange={(st) => setChatMediaLayers(st)}
+          onApply={(newUrl) => {
+            void addRefsToAccount([{ url: newUrl }], null, { autoActivate: true })
+            setChatMediaItem(null)
+          }}
           onClose={() => setChatMediaItem(null)}
-          chatMode
-          onChatEdit={(prompt) => setChatActionRequest({ kind: "edit", text: prompt, url: chatMediaItem.imageUrl, nonce: Date.now() })}
-          onRescan={() => {}}
-          onUsePrompt={(text) => setChatActionRequest({ kind: "useprompt", text, nonce: Date.now() })}
-          onAddRef={(url) => { addRefsToAccount([{ url }], null, {}) }}
         />
       )}
 
@@ -25742,15 +26281,7 @@ export default function PortalV2Page() {
           onUploadRefs={(files) => addRefsToAccount(files, null, { autoActivate: true, activateAll: true })}
           onAddRefUrl={(url) => addRefsToAccount([{ url }], null, {})}
           onRefCapChange={setChatRefCap}
-          onOpenMedia={(info) => setChatMediaItem({
-            id: 0,
-            imageUrl: info.url,
-            prompt: info.prompt ?? "",
-            // chat create id → portal apiId where they differ
-            model: info.modelId === "kling-image-v3" ? "kling-v3-image" : (info.modelId ?? ""),
-            aspectRatio: info.settings?.aspect,
-            quality: info.settings?.quality ?? info.settings?.resolution,
-          })}
+          onOpenMedia={openChatMedia}
           actionRequest={chatActionRequest}
         />
       ) : scannerMode === "chat" ? (

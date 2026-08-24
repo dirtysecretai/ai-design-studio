@@ -16,7 +16,7 @@ import {
   Megaphone, Smartphone, Camera, SwatchBook, Video, ScrollText, Film,
   Brush, UserCheck, Type, LayoutTemplate, MousePointerClick, MessageSquareText,
   Instagram, User as UserIcon, ExternalLink, Pipette,
-  Lightbulb, Landmark, Aperture, Gem, PersonStanding, UsersRound, Layers, EyeOff, Copy, RotateCw, Eraser, GripVertical, Pin, PinOff,
+  Lightbulb, Landmark, Aperture, Gem, PersonStanding, UsersRound, Layers, EyeOff, Copy, RotateCw, Eraser, GripVertical, Pin, PinOff, Star,
 } from "lucide-react"
 import {
   CHAT_HUB_MODELS, CHAT_HUB_PROVIDERS, CHAT_CREATE_MODELS, CHAT_CREATE_GROUPS, usableCreateModels,
@@ -30,6 +30,7 @@ import type { AgentStep, StreamEvent, PendingCall, AgentMode } from "@/lib/chat-
 import {
   ALL_SCOPES, DEFAULT_PERMISSIONS, modelCatalogForKeys, type ApiKeyPermissions,
 } from "@/lib/api-key-permissions"
+import { SiteLogoBox } from "@/components/SitePageHeader"
 import {
   AGENT_SKILLS, ALL_SKILL_IDS, BUILT_IN_EMPLOYEES, SKILL_CATEGORIES, estimateRunCost,
 } from "@/lib/chat-hub-skills"
@@ -92,6 +93,30 @@ interface KeyStatus {
 
 // Saved instruction presets ("personas"), stored in account preferences.
 // modelId set = auto-applied to NEW chats started with that model.
+// Sitewide design system: animated silver rim (masked spinning band) hugging
+// a rounded container — the same chrome as the portal popups and SiteLogoBox
+const SILVER_RIM_CONIC =
+  "conic-gradient(from 0deg, rgba(226,232,240,0.1), #f8fafc, #94a3b8, rgba(226,232,240,0.15), #cbd5e1, #64748b, rgba(226,232,240,0.1))"
+function SilverRim({ rounded = 16, inset = 1.5, opacity = 0.55 }: { rounded?: number; inset?: number; opacity?: number }) {
+  return (
+    <span
+      aria-hidden
+      className="absolute inset-0 pointer-events-none overflow-hidden"
+      style={{
+        borderRadius: rounded,
+        padding: inset,
+        opacity,
+        WebkitMask: "linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)",
+        WebkitMaskComposite: "xor",
+        mask: "linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)",
+        maskComposite: "exclude",
+      } as React.CSSProperties}
+    >
+      <span className="absolute -inset-[75%] animate-spin" style={{ background: SILVER_RIM_CONIC, animationDuration: "6s" }} />
+    </span>
+  )
+}
+
 interface Persona {
   id: string
   name: string
@@ -637,9 +662,10 @@ export default function ChatHub({
   // Reports the current model's ref limit up to the taskbar Refs dropdown so
   // activation there is capped exactly like the image/video scanners
   onRefCapChange?: (cap: number) => void
-  // Open media in the parent's session-feed ImageDetailModal (preferred over
-  // the built-in fallback viewer)
-  onOpenMedia?: (info: { url: string; prompt?: string; modelId?: string | null; settings?: Record<string, string>; cost?: number }) => void
+  // Open media in the parent's editor modal (preferred over the built-in
+  // fallback viewer). recipe carries the edit_image chain that produced the
+  // image so the parent can decompose it into editable layers.
+  onOpenMedia?: (info: { url: string; prompt?: string; modelId?: string | null; settings?: Record<string, string>; cost?: number; recipe?: { image_url?: string; canvas?: { width: number; height: number; color?: string }; operations: unknown[] } | null }) => void
   // Actions coming back from that modal: Edit (send prompt + image into the
   // chat) or Use Prompt (fill the composer)
   actionRequest?: { kind: "edit" | "useprompt"; text: string; url?: string; nonce: number } | null
@@ -788,6 +814,8 @@ export default function ChatHub({
             agentMode: p.agentMode === "plan" || p.agentMode === "accept" || p.agentMode === "approved" ? p.agentMode : null,
           })))
         }
+        const de = d?.preferences?.chatHubDefaultEmployee
+        setDefaultEmployeeId(typeof de === "string" && de ? de : null)
         const customs = d?.preferences?.chatHubCustomModels
         if (Array.isArray(customs)) {
           setCustomModels(customs.filter((m: any) =>
@@ -822,6 +850,15 @@ export default function ChatHub({
       })
       .catch(() => {})
   }, [])
+
+  const persistDefaultEmployee = (id: string | null) => {
+    setDefaultEmployeeId(id)
+    fetch("/api/user/preferences", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chatHubDefaultEmployee: id }),
+    }).catch(() => {})
+  }
 
   const persistPersonas = (next: Persona[]) => {
     setPersonas(next)
@@ -2219,6 +2256,13 @@ export default function ChatHub({
           url, modelId: m.model, prompt: m.createInfo ? undefined : (m.content || undefined),
           settings: m.createInfo?.settings, cost: m.createInfo?.ticketCost,
         }
+    // Prefer the parent's editor modal for ALL images — the portal mounts the
+    // full Edit Reference canvas (draw/blur/crop/mask/cut/layers) there. The
+    // built-in viewer remains the fallback for videos and standalone embeds.
+    if (onOpenMedia && !isVideoUrl(url)) {
+      onOpenMedia({ ...info, recipe: step?.editRecipe ?? null })
+      return
+    }
     // Edit-recipe images open in the BUILT-IN viewer — it has the layer editor
     if (step?.editRecipe && typeof m.id === "number" && !isVideoUrl(url)) {
       resetViewerExtras()
@@ -2231,11 +2275,6 @@ export default function ChatHub({
         recipe: step.editRecipe as MediaViewerState["recipe"],
         messageId: m.id, stepId: step.id,
       })
-      return
-    }
-    // Prefer the parent's session-feed modal; built-in viewer is the fallback
-    if (onOpenMedia && !isVideoUrl(url)) {
-      onOpenMedia(info)
       return
     }
     resetViewerExtras()
@@ -2302,9 +2341,24 @@ export default function ChatHub({
 
   // Per-chat instructions + saved presets
   const [instructionsOpen, setInstructionsOpen] = useState(false)
+  // Click-away: a pointer down anywhere outside the Employees popup (and its
+  // toggle) closes it — except while an employee is being edited, where an
+  // accidental tap must not discard the draft (use X / Cancel there)
+  useEffect(() => {
+    if (!instructionsOpen || empDraft) return
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t?.closest?.("[data-employees-panel],[data-employees-toggle]")) return
+      setInstructionsOpen(false)
+    }
+    document.addEventListener("pointerdown", onDown, true)
+    return () => document.removeEventListener("pointerdown", onDown, true)
+  }, [instructionsOpen, empDraft])
   const [spDraft, setSpDraft] = useState("")       // instructions editor draft
   const [spSaved, setSpSaved] = useState("")       // last saved value for the active chat
   const [personas, setPersonas] = useState<Persona[]>([])
+  // Employee applied to every NEW chat (id of a built-in or saved employee)
+  const [defaultEmployeeId, setDefaultEmployeeId] = useState<string | null>(null)
 
   // ── Global memory manager (Employees panel → Memory tab) ──────────────────
   type MemoryEntry = { id: number; content: string; category: string | null; source: string; createdAt: string }
@@ -2462,6 +2516,25 @@ export default function ChatHub({
   }, [])
 
   useEffect(() => { loadSidebar() }, [loadSidebar])
+
+  // The server auto-titles a chat a few seconds after its FIRST reply lands
+  // (flash-lite call after the stream closes) — refetch the sidebar once
+  // more shortly after a run ends and sync the header title if still open
+  const syncTitlesLater = useCallback((chatId: number) => {
+    setTimeout(async () => {
+      try {
+        const res = await fetch("/api/chat-hub/projects", { cache: "no-store" })
+        if (!res.ok) return
+        const data = await res.json()
+        const projects: Project[] = data.projects ?? []
+        const loose: ChatSummary[] = data.looseChats ?? []
+        setProjects(projects)
+        setLooseChats(loose)
+        const found = loose.find(c => c.id === chatId) ?? projects.flatMap(p => p.chats).find(c => c.id === chatId)
+        if (found && activeChatIdRef.current === chatId) setActiveChatTitle(found.title)
+      } catch { /* sidebar keeps last state */ }
+    }, 4500)
+  }, [])
 
   const openChat = useCallback(async (chatId: number) => {
     abortRef.current?.abort()
@@ -2643,15 +2716,30 @@ export default function ChatHub({
   }
 
   const createChat = async (projectId: number | null): Promise<ChatSummary | null> => {
-    // A preset bound to the selected model auto-applies to new chats
-    const boundPersona = personas.find(p => p.modelId === model)
+    // The pinned default employee applies to every new chat (instructions,
+    // skills, permission mode, and its bound model if it has one); without
+    // one, a preset bound to the selected model still auto-applies
+    const def = resolveDefaultEmployee()
+    const boundPersona = def ? null : personas.find(p => p.modelId === model)
+    const defModelOk = !!def?.modelId && (CHAT_HUB_MODELS.some(m => m.id === def.modelId) || customModels.some(m => m.id === def.modelId))
+    const chatModel = def && defModelOk ? def.modelId! : model
     const res = await fetch("/api/chat-hub/chats", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ projectId, model, systemPrompt: boundPersona?.text, agentMode }),
+      body: JSON.stringify({
+        projectId,
+        model: chatModel,
+        systemPrompt: def?.text || boundPersona?.text,
+        agentMode: def?.agentMode ?? agentMode,
+        ...(def ? { skills: def.skills ?? null } : {}),
+      }),
     })
     if (!res.ok) { await apiError(res, "Creating the chat"); return null }
     const { chat } = await res.json()
+    if (def) {
+      if (defModelOk) setModel(chatModel)
+      if (def.agentMode) setAgentMode(def.agentMode)
+    }
     const summary = { id: chat.id, title: chat.title, model: chat.model, updatedAt: chat.updatedAt }
     if (projectId === null) {
       setLooseChats(prev => [summary, ...prev])
@@ -2987,6 +3075,7 @@ export default function ChatHub({
       setStreaming(false)
       markRunning(chatId, false)
       loadSidebar()
+      syncTitlesLater(chatId)
       reloadMessages(chatId)
     }
   }
@@ -3071,6 +3160,7 @@ export default function ChatHub({
       setStreaming(false)
       markRunning(chatId, false)
       loadSidebar()
+      syncTitlesLater(chatId)
       if (activeChatIdRef.current === chatId) reloadMessages(chatId)
     }
   }
@@ -3218,7 +3308,7 @@ export default function ChatHub({
 
   const autoGrow = (el: HTMLTextAreaElement) => {
     el.style.height = "auto"
-    el.style.height = Math.min(el.scrollHeight, 200) + "px"
+    el.style.height = Math.min(el.scrollHeight, 320) + "px"
   }
 
   const toggleProject = (id: number) => {
@@ -3280,6 +3370,16 @@ export default function ChatHub({
   )
 
   const activeModel = CHAT_HUB_MODELS.find(m => m.id === model)
+  // The employee to auto-apply to a new chat: built-in, app-style, or saved
+  const resolveDefaultEmployee = (): Persona | null => {
+    if (!defaultEmployeeId) return null
+    const b = BUILT_IN_EMPLOYEES.find(e => e.id === defaultEmployeeId)
+    if (b) return { id: b.id, name: b.name, text: b.text, modelId: null, skills: b.skills.length === ALL_SKILL_IDS.length ? null : b.skills, agentMode: null }
+    if (defaultEmployeeId === "emp-app-style") {
+      return { id: "emp-app-style", name: "App-Style Chat", text: activeModel ? appStyleInstructions(activeModel) : "", modelId: null, skills: null, agentMode: null }
+    }
+    return personas.find(p => p.id === defaultEmployeeId) ?? null
+  }
   const providers = CHAT_HUB_PROVIDERS
   // Ref limit follows whatever will consume the next message: the armed create
   // model's scanner cap, or the LLM's vision input cap
@@ -3937,6 +4037,7 @@ export default function ChatHub({
           >
             <PanelLeft size={14} />
           </button>
+          <SiteLogoBox size={22} rounded={7} />
           <span className="flex-1 min-w-0 truncate text-sm text-white font-medium">
             {activeChatId ? activeChatTitle : "AI Chat Hub"}
           </span>
@@ -3945,6 +4046,7 @@ export default function ChatHub({
           {activeChatId !== null && (
             <div className="relative">
               <button
+                data-employees-toggle
                 onClick={() => setInstructionsOpen(o => !o)}
                 className={`flex items-center gap-1.5 pl-2.5 pr-2 py-1.5 rounded-lg text-xs border transition-colors ${
                   spSaved
@@ -3957,7 +4059,7 @@ export default function ChatHub({
                 Employees
               </button>
               {instructionsOpen && (
-                <div className="absolute right-0 top-full mt-1.5 w-[min(420px,92vw)] max-h-[74vh] overflow-y-auto overscroll-contain rounded-xl border border-white/10 bg-slate-900/95 backdrop-blur-xl shadow-2xl z-50 p-3 flex flex-col gap-2.5">
+                <div data-employees-panel className="absolute right-0 top-full mt-1.5 w-[min(420px,92vw)] max-h-[74vh] overflow-y-auto overscroll-contain rounded-xl border border-white/10 bg-slate-900/95 backdrop-blur-xl shadow-2xl z-50 p-3 flex flex-col gap-2.5">
                   <div className="flex items-center justify-between">
                     <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                       <Users size={12} className="text-cyan-400" /> {empDraft ? (empDraft.id ? "Edit employee" : "New employee") : panelTab === "memory" ? "Memory" : "Employees"}
@@ -4200,6 +4302,7 @@ export default function ChatHub({
                         emoji: e.id === "emp-full-studio" ? "🎛️"
                           : e.id === "emp-art-director" ? "🎨"
                           : e.id === "emp-art-director-editor" ? "🖌️"
+                          : e.id === "emp-face-swap" ? "🎭"
                           : e.id === "emp-video-producer" ? "🎬"
                           : e.id === "emp-marketing-studio" ? "📣"
                           : e.id === "emp-film-director" ? "🎥"
@@ -4238,8 +4341,16 @@ export default function ChatHub({
                                   {skillCount}/{ALL_SKILL_IDS.length} skills · ~{(tok / 1000).toFixed(1)}k tok
                                   {e.modelId ? ` · ${labelFor(e.modelId)}` : ""}
                                   {e.agentMode ? ` · ${e.agentMode === "approved" ? "Auto" : e.agentMode === "plan" ? "Plan" : "Ask"}` : ""}
+                                  {defaultEmployeeId === e.id ? " · default for new chats" : ""}
                                 </span>
                               </span>
+                            </button>
+                            <button
+                              onClick={() => persistDefaultEmployee(defaultEmployeeId === e.id ? null : e.id)}
+                              className={`p-1 rounded shrink-0 ${defaultEmployeeId === e.id ? "text-amber-300 hover:bg-white/10" : "text-slate-600 hover:text-amber-300 hover:bg-white/10"}`}
+                              title={defaultEmployeeId === e.id ? "Default for new chats — click to clear" : "Set as default for new chats"}
+                            >
+                              <Star size={11} fill={defaultEmployeeId === e.id ? "currentColor" : "none"} />
                             </button>
                             {e.builtIn ? (
                               <span className="shrink-0 px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-[8px] text-slate-500">built-in</span>
@@ -4302,9 +4413,7 @@ export default function ChatHub({
         <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overscroll-contain px-4 py-4">
           {!activeChatId ? (
             <div className="h-full flex flex-col items-center justify-center gap-4 px-6">
-              <div className="w-12 h-12 rounded-2xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center">
-                <Bot size={22} className="text-cyan-400" />
-              </div>
+              <SiteLogoBox size={56} rounded={16} />
               <div className="text-center">
                 <div className="text-sm text-white font-medium mb-1">AI Chat Hub</div>
                 <div className="text-xs text-slate-500 max-w-sm leading-relaxed">
@@ -4313,18 +4422,19 @@ export default function ChatHub({
                 </div>
               </div>
               {/* Centered starter composer — sends the first message and creates the chat */}
-              <div className="w-full max-w-xl rounded-2xl border border-white/10 bg-slate-900/80 backdrop-blur px-3 pt-3 pb-2.5 focus-within:border-cyan-500/40 transition-colors">
+              <div className="relative isolate w-full max-w-xl rounded-2xl border border-white/10 bg-slate-900/80 backdrop-blur px-3.5 pt-3 pb-2.5 focus-within:border-cyan-500/40 transition-colors">
+                <SilverRim rounded={16} />
                 {editChip}
                 {createChip}
                 {refStrip}
                 <textarea
                   ref={inputRef}
-                  rows={2}
+                  rows={3}
                   value={input}
                   onChange={e => { setInput(e.target.value); autoGrow(e.target); historyIndexRef.current = null }}
                   onKeyDown={handleComposerKey}
                   placeholder={composerPlaceholder}
-                  className="w-full bg-transparent resize-none outline-none text-[13px] leading-relaxed text-white placeholder:text-slate-500 max-h-[200px]"
+                  className="w-full bg-transparent resize-none outline-none text-[13px] leading-relaxed text-white placeholder:text-slate-500 max-h-[320px]"
                 />
                 <div className="flex items-center gap-1.5 pt-1.5 flex-wrap">
                   {renderPlusMenu("down")}
@@ -4877,7 +4987,13 @@ export default function ChatHub({
                           .filter(s => s.tool === "record_evaluation" && s.imageUrl && s.resultPreview?.startsWith("REVISE"))
                           .map(s => s.imageUrl!))
                       const editUrls = mediaSteps.filter(s => s.tool === "edit_image" && s.imageUrl).map(s => s.imageUrl!)
-                      const draftEditUrls = new Set(editUrls.filter(u => revisedUrls.has(u)))
+                      // Current-canvas view: only the LATEST edit stays in the
+                      // grid — every earlier edit is an intermediate canvas
+                      // state and collapses into the history drawer below.
+                      const draftEditUrls = new Set(editUrls.slice(0, -1))
+                      for (const u of editUrls) if (revisedUrls.has(u)) draftEditUrls.add(u)
+                      const latestEdit = editUrls[editUrls.length - 1]
+                      if (latestEdit) draftEditUrls.delete(latestEdit)
                       const mainUrls = (m.imageUrls ?? []).filter(u => !draftEditUrls.has(u))
                       return (
                         <div className={floating ? "py-1" : "rounded-lg border border-white/10 bg-black/20 p-2"}>
@@ -4908,7 +5024,7 @@ export default function ChatHub({
                             <details className="mt-1.5 group/attempts">
                               <summary className="cursor-pointer list-none flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-wider text-slate-600 hover:text-slate-400 transition-colors">
                                 <ChevronRight size={10} className="transition-transform group-open/attempts:rotate-90" />
-                                Edit attempts · {draftEditUrls.size} superseded
+                                Edit history · {draftEditUrls.size}
                               </summary>
                               <div className="pt-1.5 columns-3 gap-1.5 max-w-[420px]">
                                 {[...draftEditUrls].map((u, i) => (
@@ -5560,7 +5676,8 @@ export default function ChatHub({
         {/* Composer */}
         {activeChatId && (
           <div className="px-4 pb-4 pt-1">
-            <div className={`${chatWidthClass} mx-auto rounded-2xl border border-white/10 bg-slate-900/80 backdrop-blur px-3 pt-2.5 pb-2 focus-within:border-cyan-500/40 transition-colors`}>
+            <div className={`relative isolate ${chatWidthClass} mx-auto rounded-2xl border border-white/10 bg-slate-900/80 backdrop-blur px-3.5 pt-3 pb-2 focus-within:border-cyan-500/40 transition-colors`}>
+              <SilverRim rounded={16} />
               {editChip}
               {createChip}
               {refStrip}
@@ -5571,8 +5688,8 @@ export default function ChatHub({
                 onChange={e => { setInput(e.target.value); autoGrow(e.target); historyIndexRef.current = null }}
                 onKeyDown={handleComposerKey}
                 placeholder={composerPlaceholder}
-                style={{ fontSize: chatTextPx }}
-                className="w-full bg-transparent resize-none outline-none leading-relaxed text-white placeholder:text-slate-500 max-h-[200px]"
+                style={{ fontSize: chatTextPx, minHeight: 72 }}
+                className="w-full bg-transparent resize-none outline-none leading-relaxed text-white placeholder:text-slate-500 max-h-[320px]"
               />
               <div className="flex items-center gap-1.5 pt-1.5 flex-wrap">
                 {renderPlusMenu("up")}
