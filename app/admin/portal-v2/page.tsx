@@ -4119,9 +4119,13 @@ function laplacianVariance(data: Uint8ClampedArray, w: number, h: number): numbe
   return sumSq / n - mean * mean
 }
 
-function FrameExtractorModal({ onClose, onAddRefs }: {
+const SILVER_RIM_CONIC_PV2 =
+  "conic-gradient(from 0deg, rgba(226,232,240,0.1), #f8fafc, #94a3b8, rgba(226,232,240,0.15), #cbd5e1, #64748b, rgba(226,232,240,0.1))"
+
+function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
   onClose: () => void
   onAddRefs: (files: File[]) => Promise<{ added: number; failed: number; limitHit: boolean }>
+  canUseLayers?: boolean
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cancelRef = useRef(false)
@@ -4136,6 +4140,13 @@ function FrameExtractorModal({ onClose, onAddRefs }: {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
   const [addState, setAddState] = useState<"idle" | "adding" | "done" | "limit">("idle")
+  // View mode: tapping a frame opens the full Edit Reference canvas on it;
+  // Select mode keeps the multi-select for batch actions
+  const [tileMode, setTileMode] = useState<"view" | "select">("view")
+  const [editingFrame, setEditingFrame] = useState<ExtractedFrame | null>(null)
+  const [frameLayers, setFrameLayers] = useState<RefLayerStack | null>(null)
+  const [dlState, setDlState] = useState<"idle" | "zipping" | "done">("idle")
+  const [gifConverting, setGifConverting] = useState(false)
 
   const MAX_DURATION = 120  // seconds
   const MAX_FRAMES = 300    // hard cap — interval auto-widens beyond it
@@ -4152,7 +4163,30 @@ function FrameExtractorModal({ onClose, onAddRefs }: {
   const handleFile = (file: File) => {
     reset()
     cancelRef.current = false
-    if (!file.type.startsWith("video/")) { setError("That's not a video file."); return }
+    const isGif = file.type === "image/gif" || /\.gif$/i.test(file.name)
+    if (isGif) {
+      // Browsers can't seek GIFs in a <video> element — a transient server
+      // ffmpeg pass turns it into an MP4 and extraction proceeds as normal
+      if (file.size > 80 * 1024 * 1024) { setError("GIF too large (max 80MB)."); return }
+      setGifConverting(true)
+      void (async () => {
+        try {
+          const res = await fetch("/api/admin/frames-gif", { method: "POST", body: file })
+          if (!res.ok) {
+            const d = await res.json().catch(() => ({}))
+            throw new Error((d as { error?: string }).error || `Conversion failed (${res.status})`)
+          }
+          const blob = await res.blob()
+          handleFile(new File([blob], file.name.replace(/\.gif$/i, "") + ".mp4", { type: "video/mp4" }))
+        } catch (e) {
+          setError(e instanceof Error ? e.message : "GIF conversion failed.")
+        } finally {
+          setGifConverting(false)
+        }
+      })()
+      return
+    }
+    if (!file.type.startsWith("video/")) { setError("That's not a video or GIF file."); return }
     if (file.size > 200 * 1024 * 1024) { setError("Video too large (max 200MB)."); return }
     const url = URL.createObjectURL(file)
     const probe = document.createElement("video")
@@ -4241,15 +4275,72 @@ function FrameExtractorModal({ onClose, onAddRefs }: {
     setTimeout(() => setAddState("idle"), 3000)
   }
 
+  // Batch download: original-quality frames zipped client-side — one save
+  // works on desktop, iPad and iPhone alike (multi-file downloads don't)
+  const downloadSelected = async () => {
+    if (selected.size === 0 || dlState === "zipping") return
+    setDlState("zipping")
+    try {
+      const { default: JSZip } = await import("jszip")
+      const zip = new JSZip()
+      for (const f of frames.filter(fr => selected.has(fr.url))) {
+        zip.file(`frame-${f.t.toFixed(2)}s.jpg`, f.blob)
+      }
+      const blob = await zip.generateAsync({ type: "blob" })
+      const a = document.createElement("a")
+      a.href = URL.createObjectURL(blob)
+      a.download = `${(videoName || "frames").replace(/\.[a-z0-9]+$/i, "")}-frames.zip`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(a.href), 30_000)
+      setDlState("done")
+    } catch {
+      setError("Could not build the ZIP — try fewer frames.")
+      setDlState("idle")
+      return
+    }
+    setTimeout(() => setDlState("idle"), 3000)
+  }
+
+  // Edit Reference canvas Apply → the flattened result saves into the refs
+  // library (same contract as everywhere else on the portal)
+  const applyFrameEdit = async (newUrl: string) => {
+    try {
+      const blob = await (await fetch(newUrl)).blob()
+      const t = editingFrame ? editingFrame.t.toFixed(2) : "0"
+      await onAddRefs([new File([blob], `frame-${t}s-edit.jpg`, { type: blob.type || "image/jpeg" })])
+      setAddState("done")
+      setTimeout(() => setAddState("idle"), 3000)
+    } catch { /* ref add surfaces its own errors */ }
+    setEditingFrame(null)
+  }
+
   const scoreColor = (n: number) => n >= 75 ? "text-emerald-300 bg-emerald-500/20" : n >= 45 ? "text-amber-300 bg-amber-500/20" : "text-red-300 bg-red-500/20"
 
   return (
     <div className="fixed inset-0 z-[240] bg-black/85 backdrop-blur-sm flex items-center justify-center p-3" onClick={extracting ? undefined : onClose}>
-      <div className="w-full max-w-4xl max-h-[92vh] rounded-2xl border border-white/10 bg-[#070b14]/98 flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+      <div className="relative isolate w-full max-w-4xl max-h-[92vh] rounded-2xl border border-white/10 bg-[#070b14]/98 flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+        {/* Sitewide chrome: animated silver rim hugging the popup */}
+        <span
+          aria-hidden
+          className="absolute inset-0 pointer-events-none z-20"
+          style={{
+            borderRadius: 16,
+            padding: 1.5,
+            opacity: 0.55,
+            WebkitMask: "linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)",
+            WebkitMaskComposite: "xor",
+            mask: "linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)",
+            maskComposite: "exclude",
+          } as React.CSSProperties}
+        >
+          <span className="absolute -inset-[75%] animate-spin" style={{ background: SILVER_RIM_CONIC_PV2, animationDuration: "6s" }} />
+        </span>
         {/* Header */}
         <div className="shrink-0 px-4 py-3 border-b border-white/[0.06] flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
-            <Film size={16} className="text-slate-300 shrink-0" />
+            <SiteLogoBox size={26} rounded={9} />
             <div className="min-w-0">
               <p className="text-sm font-bold text-white leading-none">Frame Extractor</p>
               <p className="text-[10px] text-slate-500 mt-1 leading-none truncate">
@@ -4262,27 +4353,43 @@ function FrameExtractorModal({ onClose, onAddRefs }: {
 
         <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
           {/* Source picker */}
-          <input ref={fileInputRef} type="file" accept="video/*" className="hidden"
+          <input ref={fileInputRef} type="file" accept="video/*,image/gif" className="hidden"
             onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = "" }} />
           {!videoUrl ? (
-            <button onClick={() => fileInputRef.current?.click()}
-              className="w-full py-14 rounded-xl border-2 border-dashed border-white/10 hover:border-white/25 bg-white/[0.02] hover:bg-white/[0.04] transition-all flex flex-col items-center gap-2 text-slate-500 hover:text-slate-300">
-              <Film size={26} />
-              <span className="text-sm font-medium">Choose a video</span>
-              <span className="text-[11px] text-slate-600">Up to 2 minutes · stays on this device</span>
+            <button onClick={() => fileInputRef.current?.click()} disabled={gifConverting}
+              className="w-full py-14 rounded-xl border-2 border-dashed border-white/10 hover:border-white/25 bg-white/[0.02] hover:bg-white/[0.04] transition-all flex flex-col items-center gap-2 text-slate-500 hover:text-slate-300 disabled:opacity-60">
+              {gifConverting ? <Loader2 size={26} className="animate-spin" /> : <Film size={26} />}
+              <span className="text-sm font-medium">{gifConverting ? "Converting GIF…" : "Choose a video or GIF"}</span>
+              <span className="text-[11px] text-slate-600">{gifConverting ? "ffmpeg is turning it into a clip — a few seconds" : "Up to 2 minutes · videos stay on this device (GIFs convert via the server, nothing is stored)"}</span>
             </button>
-          ) : (
-            <div className="flex items-center gap-3 flex-wrap">
-              <video src={videoUrl} muted playsInline preload="metadata" className="h-20 rounded-lg bg-black" />
+          ) : (() => {
+            // Live count: what THIS interval yields on THIS video (the 300-
+            // frame cap widens the step instead of truncating the tail)
+            const effStep = Math.max(interval_, duration / MAX_FRAMES)
+            const expected = duration > 0 ? Math.max(1, Math.ceil(duration / effStep)) : 0
+            const widened = effStep > interval_ + 1e-6
+            return (
+            <div className="space-y-3">
+              {/* The uploaded video — autoplaying, as large as the popup
+                  allows: width-capped by the modal, height-capped by the
+                  viewport, so portrait clips tower instead of letterboxing */}
+              <video src={videoUrl} autoPlay loop controls muted playsInline preload="auto"
+                className="block mx-auto max-w-full rounded-xl bg-black"
+                style={{ maxHeight: "min(60vh, 860px)" }} />
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500">Frame every</span>
-                {[0.25, 0.5, 1, 2].map(s => (
+                {[0.1, 0.25, 0.5, 1, 2, 3, 5].map(s => (
                   <button key={s} onClick={() => setInterval_(s)} disabled={extracting}
                     className={`px-2.5 py-1 rounded-lg border text-[11px] font-mono transition-colors ${
                       interval_ === s ? "bg-white/15 border-white/30 text-white" : "border-white/10 text-slate-500 hover:text-white"}`}>
                     {s}s
                   </button>
                 ))}
+                <span
+                  title={widened ? `Capped at ${MAX_FRAMES} frames — the interval widens to ${effStep.toFixed(2)}s on this video` : `${duration.toFixed(1)}s ÷ ${interval_}s`}
+                  className={`px-2.5 py-1 rounded-lg border text-[11px] font-mono ${widened ? "border-amber-500/40 bg-amber-500/10 text-amber-300" : "border-white/10 bg-white/[0.04] text-slate-300"}`}>
+                  ≈ {expected} frames{widened ? ` · every ${effStep.toFixed(2)}s` : ""}
+                </span>
                 <button onClick={extract} disabled={extracting}
                   className="px-4 py-1.5 rounded-lg bg-white/10 border border-white/25 text-[12px] font-bold text-white hover:bg-white/15 transition-all disabled:opacity-50 flex items-center gap-1.5">
                   {extracting ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
@@ -4294,7 +4401,8 @@ function FrameExtractorModal({ onClose, onAddRefs }: {
                 </button>
               </div>
             </div>
-          )}
+            )
+          })()}
 
           {error && <p className="text-[12px] text-red-400 bg-red-500/10 border border-red-500/25 rounded-lg px-3 py-2">{error}</p>}
           {extracting && (
@@ -4318,13 +4426,31 @@ function FrameExtractorModal({ onClose, onAddRefs }: {
                   ))}
                 </div>
                 <div className="flex items-center gap-2">
-                  <button onClick={() => setSelected(new Set(shown.slice(0, 10).map(f => f.url)))}
+                  <div className="flex rounded-lg overflow-hidden border border-white/[0.08]">
+                    {(["view", "select"] as const).map(m => (
+                      <button key={m} onClick={() => setTileMode(m)}
+                        title={m === "view" ? "Tap a frame to open it in the editor" : "Tap frames to multi-select"}
+                        className={`px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                          tileMode === m ? "bg-white/15 text-white" : "text-slate-500 hover:text-white"}`}>
+                        {m === "view" ? "View" : "Select"}
+                      </button>
+                    ))}
+                  </div>
+                  <button onClick={() => { setTileMode("select"); setSelected(new Set(shown.slice(0, 10).map(f => f.url))) }}
                     className="px-2.5 py-1 rounded-lg border border-white/10 text-[11px] text-slate-400 hover:text-white transition-colors">
                     Select top 10
                   </button>
                   <button onClick={() => setSelected(new Set())} disabled={selected.size === 0}
                     className="px-2.5 py-1 rounded-lg border border-white/10 text-[11px] text-slate-400 hover:text-white transition-colors disabled:opacity-40">
                     Clear
+                  </button>
+                  <button onClick={downloadSelected} disabled={selected.size === 0 || dlState === "zipping"}
+                    title="Download the selected frames at original quality as one ZIP"
+                    className={`px-3 py-1.5 rounded-lg border text-[11px] font-bold transition-all flex items-center gap-1.5 ${
+                      dlState === "done" ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                      : "bg-white/10 border-white/25 text-white hover:bg-white/15 disabled:opacity-40"}`}>
+                    {dlState === "zipping" ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
+                    {dlState === "done" ? "Saved!" : dlState === "zipping" ? "Zipping…" : `Download ${selected.size || ""}`}
                   </button>
                   <button onClick={addSelectedToRefs} disabled={selected.size === 0 || addState === "adding"}
                     className={`px-3.5 py-1.5 rounded-lg border text-[11px] font-bold transition-all flex items-center gap-1.5 ${
@@ -4337,15 +4463,16 @@ function FrameExtractorModal({ onClose, onAddRefs }: {
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2">
+              <div className="columns-2 sm:columns-3 lg:columns-4 gap-2">
                 {shown.map(f => {
                   const isSel = selected.has(f.url)
                   return (
-                    <div key={f.url} className="relative group">
-                      <button onClick={() => toggleSel(f.url)}
+                    <div key={f.url} className="relative group mb-2 break-inside-avoid">
+                      <button onClick={() => { if (tileMode === "select") toggleSel(f.url); else { setFrameLayers(null); setEditingFrame(f) } }}
+                        title={tileMode === "select" ? "Toggle selection" : "Open in the editor"}
                         className={`w-full rounded-lg overflow-hidden border-2 transition-all ${
                           isSel ? "border-white ring-1 ring-white/40" : "border-transparent hover:border-white/30"}`}>
-                        <img src={f.url} alt="" className="w-full aspect-video object-cover" loading="lazy" decoding="async" />
+                        <img src={f.url} alt="" className="w-full h-auto block" loading="lazy" decoding="async" />
                       </button>
                       {/* Sharpness + timestamp badges */}
                       <span className={`absolute top-1 left-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold leading-none pointer-events-none ${scoreColor(f.norm)}`}>
@@ -4370,12 +4497,29 @@ function FrameExtractorModal({ onClose, onAddRefs }: {
               </div>
               <p className="text-[10px] text-slate-600 leading-relaxed">
                 The badge is a relative sharpness score (variance-of-Laplacian) — <span className="text-emerald-300">green</span> frames are the crispest in this video,
-                <span className="text-red-300"> red</span> ones carry motion blur. Selected frames upload to your refs library as JPEGs.
+                <span className="text-red-300"> red</span> ones carry motion blur. View mode opens a frame in the editor; Select mode batches frames for Refs or a ZIP download.
               </p>
             </>
           )}
         </div>
       </div>
+      {/* Full Edit Reference canvas on the tapped frame — Apply saves the
+          flattened result into the refs library. The editor PORTALS to body,
+          but React events still bubble through the REACT tree — without this
+          stop, every click inside it (the X included) hits the frames
+          overlay's close-on-backdrop handler and kills the whole popup. */}
+      {editingFrame && (
+        <div onClick={e => e.stopPropagation()} onPointerDown={e => e.stopPropagation()}>
+        <RefImageEditorModal
+          image={{ id: `frame-${editingFrame.t.toFixed(2)}`, url: editingFrame.url }}
+          canUseLayers={canUseLayers}
+          layerStack={frameLayers}
+          onLayerStackChange={(st) => setFrameLayers(st)}
+          onApply={(newUrl) => { void applyFrameEdit(newUrl) }}
+          onClose={() => setEditingFrame(null)}
+        />
+        </div>
+      )}
     </div>
   )
 }
@@ -4610,6 +4754,41 @@ function RefDropdown({
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0, z: 1 })
   const [selectMode, setSelectMode] = useState(false)
+  const [downloadingRefs, setDownloadingRefs] = useState<"idle" | "zipping" | "done">("idle")
+  // Batch-download the selected references at ORIGINAL quality as one ZIP —
+  // works the same on desktop, iPad and iPhone (multi-file saves don't)
+  const handleDownloadSelected = async () => {
+    if (selectedForDelete.size === 0 || downloadingRefs === "zipping") return
+    setDownloadingRefs("zipping")
+    try {
+      const { default: JSZip } = await import("jszip")
+      const zip = new JSZip()
+      const picked = library.filter(r => selectedForDelete.has(r.id))
+      let i = 0
+      for (const r of picked) {
+        i++
+        const res = await fetch(r.url)
+        if (!res.ok) continue
+        const blob = await res.blob()
+        const tail = r.url.split("?")[0].split("/").pop() || ""
+        const ext = /\.[a-z0-9]{2,4}$/i.test(tail) ? tail.slice(tail.lastIndexOf(".")) : (isVideoRefUrl(r.url) ? ".mp4" : ".jpg")
+        zip.file(`ref-${String(i).padStart(2, "0")}${ext}`, blob)
+      }
+      const blob = await zip.generateAsync({ type: "blob" })
+      const a = document.createElement("a")
+      a.href = URL.createObjectURL(blob)
+      a.download = `references-${picked.length}.zip`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(a.href), 30_000)
+      setDownloadingRefs("done")
+    } catch {
+      setDownloadingRefs("idle")
+      return
+    }
+    setTimeout(() => setDownloadingRefs("idle"), 3000)
+  }
   const [selectedForDelete, setSelectedForDelete] = useState<Set<string>>(new Set())
   // Batch staging — uncapped, and an image may appear in any number of batches
   const [staged, setStaged] = useState<Set<string>>(new Set())
@@ -5286,6 +5465,18 @@ function RefDropdown({
                     Move
                   </button>
                 )}
+                <button
+                  onClick={handleDownloadSelected}
+                  disabled={selectedForDelete.size === 0 || downloadingRefs === "zipping"}
+                  title="Download the selected references at original quality as one ZIP"
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[11px] font-medium disabled:opacity-30 disabled:cursor-not-allowed transition-all ${
+                    downloadingRefs === "done"
+                      ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-300"
+                      : "bg-white/10 border-white/25 text-white hover:bg-white/15"}`}
+                >
+                  {downloadingRefs === "zipping" ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
+                  {downloadingRefs === "done" ? "Saved!" : downloadingRefs === "zipping" ? "Zipping…" : "Download"}
+                </button>
                 <button
                   onClick={handleDeleteSelected}
                   disabled={selectedForDelete.size === 0}
@@ -24720,10 +24911,18 @@ export default function PortalV2Page() {
           currentSlots.flatMap((s) => [s.queueJobId, s.queueId].filter((v): v is number => v != null))
         )
         const doneNb2Ids = new Set(JSON.parse(localStorage.getItem("pv2-nb2-done") || "[]") as string[])
+        // Dismissed ledger: a job the user dismissed must NOT resurrect as a
+        // fresh loading tile just because its DB row is still 'processing'
+        // (a dead-poller orphan). If it later completes, the harvest saves the
+        // image into the feed anyway — only the placeholder stays gone.
+        const dismissed = loadDismissedFails()
+        const dismissedIds = new Set(dismissed.ids)
+        const dismissedReqs = new Set(dismissed.reqs)
 
         for (const j of nb2DbJobs) {
           // Skip if already tracked by requestId, by any DB queue job ID, or already completed
           if (trackedRequestIds.has(j.falRequestId) || trackedDbJobIds.has(j.id) || doneNb2Ids.has(j.falRequestId)) continue
+          if (dismissedIds.has(j.id) || dismissedReqs.has(j.falRequestId)) continue
           // SYNCHRONOUS guard: pendingSlotsRef only catches up after React
           // commits, so two poll passes in the same tick both read it as
           // empty. A ref Set updates immediately and closes that window.
@@ -26183,6 +26382,7 @@ export default function PortalV2Page() {
         <FrameExtractorModal
           onClose={() => setFramesOpen(false)}
           onAddRefs={(files) => addRefsToAccount(files, null, {})}
+          canUseLayers={hasEffectiveDevAccess}
         />
       )}
 

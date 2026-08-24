@@ -706,7 +706,9 @@ export async function executeCreateMedia(
         await refundGenerationTickets(ctx.user.id, ctx.user.email, ticketCost)
         return { error: call.error }
       }
-      const result = await fal.subscribe(call.endpoint, { input: call.input as any, logs: false })
+      // 15 min ceiling: video generations legitimately run long, but a
+      // stalled connection must throw (the catch refunds) — not hang the run
+      const result = await falWithTimeout(spec.label + ' generation', 900_000, () => fal.subscribe(call.endpoint, { input: call.input as any, logs: false }))
       const data = result.data as any
       mediaUrl = data?.images?.[0]?.url ?? data?.video?.url
     }
@@ -767,7 +769,7 @@ export type EditImageOp =
   | { op: 'erase_shape'; shape: 'rect' | 'ellipse' | 'polygon'; x?: number; y?: number; width?: number; height?: number; cx?: number; cy?: number; rx?: number; ry?: number; points?: string; feather?: number; keep?: boolean }
   | { op: 'choke'; amount?: number; feather?: number }
   | { op: 'face_swap'; face_image_url: string }
-  | { op: 'segment'; points?: SegPoint[]; box?: SegBox; parts?: { name?: string; points?: SegPoint[]; box?: SegBox }[] }
+  | { op: 'segment'; points?: SegPoint[]; box?: SegBox; parts?: { name?: string; points?: SegPoint[]; box?: SegBox }[]; invert?: boolean }
 
 // User-drawn eraser strokes (media-viewer layer editor). Coordinates and
 // brush size are NORMALIZED (0..1) to the layer's own box — the fitted
@@ -800,12 +802,12 @@ const hexStr = (c?: string): string | null => {
 // to ≤2048px and scale the mask back up.
 async function birefnetCutout(buf: Buffer): Promise<Buffer> {
   const dataUri = `data:image/png;base64,${buf.toString('base64')}`
-  const result: any = await fal.subscribe('fal-ai/birefnet/v2', {
+  const result: any = await falWithTimeout('Subject masking', 120_000, () => fal.subscribe('fal-ai/birefnet/v2', {
     input: { image_url: dataUri, output_format: 'png' },
-  })
+  }))
   const url = result?.data?.image?.url ?? result?.image?.url
   if (!url) throw new Error('BiRefNet returned no image')
-  const res = await fetch(url)
+  const res = await fetch(url, { signal: AbortSignal.timeout(60_000) })
   if (!res.ok) throw new Error(`Could not fetch the cutout (${res.status})`)
   return despeckleAlpha(Buffer.from(await res.arrayBuffer()))
 }
@@ -926,6 +928,20 @@ async function stencilMask(
   return mask
 }
 
+// Time-box a fal call: a stalled connection must fail the edit cleanly in
+// seconds, not hang it for minutes (fal.subscribe has no client timeout)
+async function falWithTimeout<T>(label: string, ms: number, run: () => Promise<T>): Promise<T> {
+  let th: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      run(),
+      new Promise<never>((_, rej) => { th = setTimeout(() => rej(new Error(`${label} timed out after ${Math.round(ms / 1000)}s — network or provider stall; retry the operation`)), ms) }),
+    ])
+  } finally {
+    clearTimeout(th)
+  }
+}
+
 // Promptable segmentation via fal SAM2: point/box prompts select EXACTLY one
 // region (a face+hair, one arm, a single object) — unlike BiRefNet's whole-
 // subject cut. Returns the selected region as RGBA on transparency at the
@@ -938,6 +954,7 @@ async function sam2Cutout(
   points?: SegPoint[],
   box?: SegBox,
   parts?: { name?: string; points?: SegPoint[]; box?: SegBox }[],
+  invert?: boolean,
 ): Promise<Buffer> {
   const { default: sharp } = await import('sharp')
   const meta = await sharp(buf, { failOn: 'none' }).metadata()
@@ -966,12 +983,12 @@ async function sam2Cutout(
       ? [{ x_min: Math.round(Number(bx.x_min) * sc), y_min: Math.round(Number(bx.y_min) * sc), x_max: Math.round(Number(bx.x_max) * sc), y_max: Math.round(Number(bx.y_max) * sc), frame_index: 0 }]
       : []
     if (!prompts.length && !boxPrompts.length) return null
-    const result: any = await fal.subscribe('fal-ai/sam2/image', {
+    const result: any = await falWithTimeout('SAM2 segmentation', 120_000, () => fal.subscribe('fal-ai/sam2/image', {
       input: { image_url: dataUri, prompts, box_prompts: boxPrompts, output_format: 'png' },
-    })
+    }))
     const url = result?.data?.image?.url ?? result?.image?.url
     if (!url) throw new Error('SAM2 returned no mask')
-    const res = await fetch(url)
+    const res = await fetch(url, { signal: AbortSignal.timeout(60_000) })
     if (!res.ok) throw new Error(`Could not fetch the mask (${res.status})`)
     const maskBuf = Buffer.from(await res.arrayBuffer())
     // The endpoint returns the MASK (white = selected). Normalize to the
@@ -990,11 +1007,54 @@ async function sam2Cutout(
   }
   if ((Array.isArray(points) && points.length) || box) jobs.push({ name: 'main', pts: points, bx: box })
   if (!jobs.length) throw new Error('segment needs points, a box, or parts[]')
-  const masks = (await Promise.all(jobs.map(j => maskFor(j.pts, j.bx)))).filter((m): m is Buffer => !!m)
-  if (!masks.length) throw new Error('segment: every part was empty — each part needs points or a box')
+  const results = await Promise.all(jobs.map(async j => ({ name: j.name, mask: await maskFor(j.pts, j.bx) })))
+  const emptyNames = results.filter(r => !r.mask).map(r => r.name)
+  const masks = results.filter((r): r is { name: string; mask: Buffer } => !!r.mask).map(r => r.mask)
+  if (!masks.length) {
+    throw new Error(`segment: no part had usable coordinates (${emptyNames.join(', ')}). A part's NAME is only a label — SAM cannot find "face" or "hair" by name. EVERY part needs its own points array with REAL pixel coordinates read from the image (e.g. {name:"face",points:[{x:512,y:300,label:1},{x:470,y:360,label:1},{x:512,y:520,label:0}]}) or a box`)
+  }
   // Union: a pixel belongs to the cutout if ANY part selected it
-  const lum = Buffer.alloc(w * h)
+  let lum = Buffer.alloc(w * h)
   for (const m of masks) for (let i = 0; i < lum.length; i++) if (m[i] > lum[i]) lum[i] = m[i]
+  if (masks.length >= 2) {
+    // Morphological CLOSE (dilate → erode): adjacent part masks meet with a
+    // hairline gap neither covers — without this the union renders a thin
+    // erased seam line between face and hair. Gaps up to ~8px fuse; the
+    // outer boundary comes back to within a pixel of where it was.
+    const compact = (r: { data: Buffer; info: { channels: number } }) => {
+      if (r.info.channels === 1) return r.data
+      const o = Buffer.alloc(w * h)
+      for (let i = 0; i < o.length; i++) o[i] = r.data[i * r.info.channels]
+      return o
+    }
+    const d1 = compact(await sharp(lum, { raw: { width: w, height: h, channels: 1 } }).blur(3).raw().toBuffer({ resolveWithObject: true }))
+    const dil = Buffer.alloc(w * h)
+    for (let i = 0; i < dil.length; i++) { const v = (d1[i] - 40) * 8; dil[i] = v < 0 ? 0 : v > 255 ? 255 : v }
+    const d2 = compact(await sharp(dil, { raw: { width: w, height: h, channels: 1 } }).blur(3).raw().toBuffer({ resolveWithObject: true }))
+    const ero = Buffer.alloc(w * h)
+    for (let i = 0; i < ero.length; i++) { const v = (d2[i] - 200) * 8; ero[i] = v < 0 ? 0 : v > 255 ? 255 : v }
+    lum = ero
+  }
+  if (invert) {
+    // HOLE mode (backward swap): ERASE the selected region instead of keeping
+    // it. The hole is grown ~6px and feathered so no ring of head pixels
+    // survives at the boundary — hand-drawn contours kept missing at scale,
+    // SAM + dilation is machine-precise.
+    const compactI = (r: { data: Buffer; info: { channels: number } }) => {
+      if (r.info.channels === 1) return r.data
+      const o = Buffer.alloc(w * h)
+      for (let i = 0; i < o.length; i++) o[i] = r.data[i * r.info.channels]
+      return o
+    }
+    const g1 = compactI(await sharp(lum, { raw: { width: w, height: h, channels: 1 } }).blur(4).raw().toBuffer({ resolveWithObject: true }))
+    let grown: Buffer = Buffer.alloc(w * h)
+    for (let i = 0; i < grown.length; i++) { const v = (g1[i] - 30) * 8; grown[i] = v < 0 ? 0 : v > 255 ? 255 : v }
+    grown = compactI(await sharp(grown, { raw: { width: w, height: h, channels: 1 } }).blur(3).raw().toBuffer({ resolveWithObject: true }))
+    const rgbaH = Buffer.alloc(w * h * 4, 255)
+    for (let i = 0; i < w * h; i++) rgbaH[i * 4 + 3] = grown[i]
+    const holeMask = await sharp(rgbaH, { raw: { width: w, height: h, channels: 4 } }).png().toBuffer()
+    return sharp(buf, { failOn: 'none' }).ensureAlpha().composite([{ input: holeMask, blend: 'dest-out' }]).png().toBuffer()
+  }
   const rgba = Buffer.alloc(w * h * 4, 255)
   for (let i = 0; i < w * h; i++) rgba[i * 4 + 3] = lum[i]
   const alphaMask = await sharp(rgba, { raw: { width: w, height: h, channels: 4 } }).png().toBuffer()
@@ -1140,6 +1200,7 @@ export async function executeEditImage(
     const { default: sharp } = await import('sharp')
     let img: import('sharp').Sharp
     let srcMeta: { width?: number; height?: number }
+    let srcBuf: Buffer | null = null
     if (hasCanvas) {
       // Blank canvas: composition sketches, pose blocking, layout studies
       const cw = Math.min(4096, Math.max(64, Math.round(input.canvas!.width || 1024)))
@@ -1153,13 +1214,23 @@ export async function executeEditImage(
     } else {
       const srcRes = await fetch(input.image_url!)
       if (!srcRes.ok) return { error: 'Could not download the source image' }
-      const srcBuf = Buffer.from(await srcRes.arrayBuffer())
+      srcBuf = Buffer.from(await srcRes.arrayBuffer())
       srcMeta = await sharp(srcBuf, { failOn: 'none' }).metadata()
       img = sharp(srcBuf, { failOn: 'none' })
     }
 
     for (const raw of input.operations) {
       const op = raw as EditImageOp
+      // Gemini habitually DROPS the op field on stencil erases. When the
+      // shape is unambiguous (shape + feather/keep, no fill/stroke = cannot
+      // be the vector-drawing op), repair it instead of burning a retry
+      // round; everything else still hits the loud catch-all below.
+      const o0 = op as unknown as Record<string, unknown>
+      if (o0.op === undefined && typeof o0.shape === 'string'
+          && (o0.feather !== undefined || o0.keep !== undefined)
+          && o0.fill === undefined && o0.stroke === undefined) {
+        o0.op = 'erase_shape'
+      }
       opNo++
       opName = op.op
       if (op.op === 'crop') {
@@ -1225,7 +1296,7 @@ export async function executeEditImage(
         // — the precision tool for face+hair cutouts and partial-subject work
         const base = await img.png().toBuffer()
         try {
-          const cut = await sam2Cutout(base, op.points, op.box, op.parts)
+          const cut = await sam2Cutout(base, op.points, op.box, op.parts, op.invert === true)
           img = sharp(cut, { failOn: 'none' })
         } catch (err: any) {
           return { error: `Segment masking failed: ${String(err?.message || err).slice(0, 150)}` }
@@ -1301,15 +1372,15 @@ export async function executeEditImage(
         const baseIsOpaque = !baseMeta.hasAlpha
         const base = baseIsOpaque ? await img.clone().jpeg({ quality: 95 }).toBuffer() : await img.png().toBuffer()
         try {
-          const result: any = await fal.subscribe('fal-ai/face-swap', {
+          const result: any = await falWithTimeout('Face swap', 240_000, () => fal.subscribe('fal-ai/face-swap', {
             input: {
               base_image_url: `data:image/${baseIsOpaque ? 'jpeg' : 'png'};base64,${base.toString('base64')}`,
               swap_image_url: src,
             },
-          })
+          }))
           const outUrl = result?.data?.image?.url ?? result?.image?.url
           if (!outUrl) throw new Error('face-swap returned no image')
-          const res2 = await fetch(outUrl)
+          const res2 = await fetch(outUrl, { signal: AbortSignal.timeout(60_000) })
           if (!res2.ok) throw new Error(`could not fetch result (${res2.status})`)
           img = sharp(Buffer.from(await res2.arrayBuffer()), { failOn: 'none' })
         } catch (err: any) {
@@ -1605,6 +1676,40 @@ export async function executeEditImage(
           ov = ov.extract({ left: cl, top: ct, width: cw2, height: ch2 })
           srcW = cw2; srcH = ch2
         }
+        // GUARDRAIL — the bare-paste blunder: overlaying a fully OPAQUE image
+        // across the whole canvas buries everything built so far (the classic
+        // failed face swap: the second photo pasted over the first). Reject it
+        // with the correction. Legit full-bleed cases stay allowed: a base
+        // photo onto a BLANK canvas, reduced opacity, blend modes, erase
+        // strokes, or a pre-crop.
+        {
+          const plainPaste = (op.opacity === undefined || op.opacity >= 0.95)
+            && (!op.blend || op.blend === 'over')
+            && !(Array.isArray(op.erase) && op.erase.length)
+            && !op.crop
+          if (plainPaste) {
+            const baseProbe = await img.clone().png().toBuffer()
+            const bpm = await sharp(baseProbe, { failOn: 'none' }).metadata()
+            const bw2 = bpm.width ?? 1, bh2 = bpm.height ?? 1
+            const destW2 = op.width ? Math.round(op.width) : mw
+            const destH2 = op.height ? Math.round(op.height) : Math.round(destW2 * (mh / mw))
+            const coversAll = destW2 >= bw2 * 0.92 && destH2 >= bh2 * 0.92
+              && Math.abs(Number(op.x) || 0) <= bw2 * 0.05 && Math.abs(Number(op.y) || 0) <= bh2 * 0.05
+            if (coversAll) {
+              const ovAlpha = om.hasAlpha ? (await sharp(ovBuf0, { failOn: 'none' }).stats()).channels[3] : null
+              const ovOpaque = !om.hasAlpha || (ovAlpha ? ovAlpha.min >= 250 : true)
+              if (ovOpaque) {
+                const baseAlpha = (await sharp(baseProbe, { failOn: 'none' }).stats()).channels[3]
+                const baseBlank = !baseAlpha || baseAlpha.max <= 10
+                if (!baseBlank) {
+                  return {
+                    error: 'REJECTED: this overlay is a fully OPAQUE image covering the ENTIRE canvas — it would bury everything beneath it (the classic failed face swap: one photo pasted over the other). Overlay CUTOUTS or edited results only: for the backward swap, first erase_shape the head region out of this image (its RESULT url gets transparency) and overlay THAT result; for the forward swap, overlay the segment cutout RESULT urls. Never overlay an original photo full-frame.',
+                  }
+                }
+              }
+            }
+          }
+        }
         // Mirror the overlay so subjects can face INTO the composition
         if (op.flip) ov = op.flip === 'vertical' ? ov.flip() : ov.flop()
         // GUARDRAIL: width+height stretches (fit:fill). Warping people is the
@@ -1697,6 +1802,16 @@ export async function executeEditImage(
         } else {
           img = sharp(base) // fully off-canvas — nothing visible to composite
         }
+      } else {
+        // Unknown / op-less operation: FAIL LOUDLY. Silently skipping these
+        // produced "successful" edits that changed NOTHING — the model then
+        // composited untouched images believing its erases had happened (the
+        // classic result: two photos pasted on top of each other).
+        const keys = Object.keys(raw ?? {}).filter(k => k !== 'op').slice(0, 8).join(', ')
+        const got = (op as { op?: unknown }).op
+        return {
+          error: `operation ${opNo} ${got === undefined ? 'has NO "op" field' : `has unknown op "${String(got)}"`} (received keys: ${keys || 'none'}). Every operation MUST name its op — ${keys.includes('shape') || keys.includes('points') ? 'this one looks like {op:"erase_shape",...} (stencil eraser) or {op:"shape",...} (vector drawing) — pick one and resend. ' : ''}Nothing was applied; fix the operation and resend the FULL chain.`,
+        }
       }
     }
 
@@ -1730,6 +1845,47 @@ export async function executeEditImage(
         }
       }
     } catch { /* audit is best-effort */ }
+    // CHANGE MAP for composites: WHERE did this edit actually change pixels?
+    // A face/head paste that changed the torso means donor outfit rode along
+    // (or an erase hole ate the outfit) — the model cannot reliably see that
+    // in a thumbnail, but it can read a diff bounding box.
+    let changeNote = ''
+    try {
+      const opsUsed = new Set((input.operations as { op?: string }[]).map(o => o?.op))
+      const compositing = opsUsed.has('overlay') || opsUsed.has('face_swap') || opsUsed.has('patch')
+      if (compositing && srcBuf && outMeta.width && outMeta.height
+          && srcMeta.width === outMeta.width && srcMeta.height === outMeta.height) {
+        const dw = Math.max(1, Math.min(384, outMeta.width))
+        const dh = Math.max(1, Math.round(dw * (outMeta.height / outMeta.width)))
+        const flat = (buf: Buffer) => sharp(buf, { failOn: 'none' })
+          .flatten({ background: '#808080' })
+          .resize(dw, dh, { fit: 'fill' })
+          .raw().toBuffer({ resolveWithObject: true })
+        const [ra, rb] = await Promise.all([flat(srcBuf), flat(out)])
+        const ca = ra.info.channels, cb = rb.info.channels
+        let changed = 0, minX = dw, minY = dh, maxX = -1, maxY = -1
+        for (let y = 0; y < dh; y++) {
+          for (let x = 0; x < dw; x++) {
+            const ia = (y * dw + x) * ca, ib = (y * dw + x) * cb
+            const d = Math.abs(ra.data[ia] - rb.data[ib])
+              + Math.abs(ra.data[ia + 1] - rb.data[ib + 1])
+              + Math.abs(ra.data[ia + 2] - rb.data[ib + 2])
+            if (d > 60) {
+              changed++
+              if (x < minX) minX = x
+              if (x > maxX) maxX = x
+              if (y < minY) minY = y
+              if (y > maxY) maxY = y
+            }
+          }
+        }
+        if (maxY >= 0) {
+          const sx = outMeta.width / dw, sy = outMeta.height / dh
+          const pct = (100 * changed) / (dw * dh)
+          changeNote = ` CHANGE MAP: vs the source, this edit changed ${pct.toFixed(1)}% of the canvas, inside box x ${Math.round(minX * sx)}-${Math.round(maxX * sx)}, y ${Math.round(minY * sy)}-${Math.round(maxY * sy)} (full-res px). Check this against your INTENT: a face/head paste should change ONLY the head region — a change box that reaches below the collarbone means donor outfit fabric rode along on the cutout or your erase hole ate the target outfit. If so: verdict revise, restart from the ORIGINALS with a tighter cutout/hole.`
+        }
+      }
+    } catch { /* change map is best-effort */ }
     const { uploadToR2 } = await import('@/lib/r2')
     const url = await uploadToR2(`chat-edit-${ctx.user.id}-${Date.now()}.png`, out, 'image/png')
     // NOTE: no GeneratedImage row here — drafts/sketches would pollute the
@@ -1740,7 +1896,7 @@ export async function executeEditImage(
       height: outMeta.height ?? null,
       note: hasCanvas
         ? `Sketch created at ${outMeta.width}x${outMeta.height}px. Use it in reference_image_urls as a composition/pose blocking reference — tell the generation model it is a rough sketch to follow, not final art.`
-        : `Edit applied — source was ${srcMeta.width}x${srcMeta.height}px, result is ${outMeta.width}x${outMeta.height}px. Use these EXACT dimensions for any follow-up coordinates.${alphaNote} The result is shown to the user automatically — describe what changed, do not print the URL.`,
+        : `Edit applied — source was ${srcMeta.width}x${srcMeta.height}px, result is ${outMeta.width}x${outMeta.height}px. Use these EXACT dimensions for any follow-up coordinates.${alphaNote}${changeNote} The result is shown to the user automatically — describe what changed, do not print the URL.`,
     }
   } catch (err: any) {
     console.error('chat-hub edit_image error:', err)
@@ -2186,7 +2342,7 @@ export async function executeGenerateImage(
       enable_safety_checker: false,
     }
     if (useRefs) falInput.image_urls = ctx.attachedImageUrls
-    const result = await fal.subscribe(endpoint, { input: falInput as any, logs: false })
+    const result = await falWithTimeout('Image generation', 300_000, () => fal.subscribe(endpoint, { input: falInput as any, logs: false }))
     const url = (result.data as any)?.images?.[0]?.url
     if (!url) {
       await refundGenerationTickets(ctx.user.id, ctx.user.email, CHAT_TOOL_IMAGE_COST)
@@ -2382,8 +2538,12 @@ export function makeAgentTools(ctx: {
       },
       operations: {
         type: 'array',
-        description: 'Up to 20 ops applied in order. Ops: {op:"crop",x,y,width,height} {op:"resize",width?,height?} {op:"rotate",degrees} {op:"flip",direction:"horizontal"|"vertical"} {op:"grayscale"} {op:"blur",sigma?} {op:"region_blur",x,y,width,height,sigma?} (blur only that rectangle) {op:"patch",from:{x,y,width,height},to:{x,y,width,height}} (copy a clean region of the SAME image and stretch it over another area — THE way to cover unwanted text/objects with background, in one op; optionally region_blur the seam after) {op:"sharpen",sigma?} {op:"adjust",brightness?,saturation?,hue?} (1.0 = unchanged, hue in degrees) {op:"tint",color:"#rrggbb"} {op:"filter",name:"noir"|"bw"|"vivid"|"matte"|"warm"|"cool"|"vintage"|"golden"|"dreamy"|"cinematic",strength?:0-1} (one-op Instagram-style grade over everything painted so far — the FINISHING move; apply BEFORE text ops to keep type pure, or after for a unified cast) {op:"rounded",radius?} (rounded corners, transparent outside) {op:"vignette",strength?} (0-1 darkened edges) {op:"starfield",density?,seed?,color?,region?:{x,y,width,height}} (procedural realistic night-sky stars with halos and flares — THE way to fill empty dark space in space/night designs; density 0.5 sparse - 2 dense, same seed = same sky; add BEFORE text/subjects so stars sit behind them) {op:"pad",top?,bottom?,left?,right?,color?} (extend canvas / borders) {op:"text",text,x,y,size?,color?,font?:"sans"|"serif"|"mono"|"impact"|"script"|"condensed",weight?,align?:"left"|"center" (center = x is the midpoint),stroke?,stroke_width?,opacity?,rotate? (degrees around the text center)} (overlay EXACT text — ONE line per op; for multi-line chain one op per line, stepping y by ~1.25×size) {op:"shape",shape:"rect"|"circle"|"ellipse"|"line"|"polygon",x,y,width,height,cx,cy,r,x2,y2,points?,fill?,stroke?,stroke_width?,opacity?,corner_radius?,rotate? (degrees around the shape center),gradient?:{from,to,direction?:"down"|"up"|"left"|"right",from_opacity?,to_opacity?}} (vector primitives — gradient rect = pro fade scrim; chain shapes to build badges, dividers, color blocks. FRAMES/BORDERS: stroke + NO fill = outline only; a fill value paints the whole shape SOLID — a filled full-canvas rect covers everything beneath it) {op:"overlay",image_url,x,y,width?,height?,rotate?,opacity?,blend?:"over"|"multiply"|"screen"|"overlay"|"soft-light",crop?:{x,y,width,height},flip?:"horizontal"|"vertical"} (width alone keeps aspect; width+height stretches and is REJECTED beyond 7% aspect distortion unless stretch:true — textures only, NEVER people: fill mismatched cells by crop-to-cell-aspect + uniform width; rotate spins degrees around the overlay center; x/y may be NEGATIVE or overflow — the overlay crops at the canvas edge, which is exactly HOW you bleed a cutout\'s flat side off-canvas. Overlays landing >40% off-canvas are REJECTED unless you set bleed:true (declare big bleeds deliberately; verify x+width vs canvas arithmetic for every subject). crop trims the overlay SOURCE before placing — in source-image pixels — THE tool for cutting flat truncated edges off a cutout. flip mirrors the overlay: subjects must look/lean INTO the canvas) {op:"remove_background",trim_regions?:[{x,y,width,height}]} (AI subject segmentation — the working image becomes the dominant subject cut out on transparency; floating junk blobs are auto-removed. USUALLY OMIT trim_regions — the cutout is already clean. trim_regions ERASES pixels inside each rect (it does NOT crop-to-keep); use it ONLY for a small stray background patch still stuck to the subject, sized to that patch in source pixels. A rect near the full image size erases the WHOLE subject → blank result, so never pass one; if unsure, omit it) {op:"silhouette",color?:"#hex" (default white),on_original?:boolean,trim_regions?} (pixel-perfect solid-color silhouette of the auto-detected subject — on_original true (default) stamps it over the image, false returns the silhouette alone on transparency) {op:"segment",parts?:[{name,points?:[{x,y,label?:1 keep|0 exclude}],box?:{x_min,y_min,x_max,y_max}}],points?,box?} (SAM2 promptable masking — cuts out EXACTLY what you point at, on transparency. ONE SAM CALL = ONE OBJECT, so anything made of several things is a list of PARTS, each segmented separately and unioned: a full head is parts:[{name:"face",points:[forehead,cheek,cheek,chin + 2 label:0 on the collar]},{name:"hair",points:[top of hair mass,left hair,right hair,any long lengths + 1-2 label:0 on the collar/shoulders]}]; a hat, a sleeve, an arm, a hand, a necklace are each their own part. Mixing face and hair points in ONE part makes SAM keep only one of them. Up to 6 parts, 14 points each; label:0 negatives on the outfit are MANDATORY for any head part — without them SAM bleeds into fabric. Plain points/box (no parts) = one object. Read the TRANSPARENCY AUDIT in the result: box below the chin = outfit survived; box hugging the face tighter than the visible hair = the hair part failed. Far more surgical than remove_background whole-subject cut) {op:"face_swap",face_image_url} (dedicated AI face swap — transplants the FACE from face_image_url onto the person in the working image with professional blending: correct scale, angle, skin tone. Keeps the working image hair/body/outfit/lighting. THE FIRST CHOICE for identity swaps — use the manual segment+overlay pipeline ONLY when the HAIR must move too) {op:"choke",amount?:px (default 3),feather?:px (default 1.5)} (matte defringe — pulls the cutout alpha edge INWARD and re-feathers, killing the halo band of leftover background color every AI cutout carries. Run on every segment/remove_background cutout BEFORE overlaying it — halo bands read as a sticker outline in the composite) {op:"erase_shape",shape:"rect"|"ellipse"|"polygon",x,y,width,height (rect) | cx,cy,rx,ry (ellipse) | points:"x1,y1 x2,y2 x3,y3 ..." (polygon, 3-64 vertices),feather?:px,keep?:boolean} (stencil eraser — makes the pixels INSIDE the shape transparent; keep:true inverts it to a cookie-cutter that keeps ONLY the inside. feather (try 4-15) softens the edge so trims blend invisibly. THE tool for shaving outfit scraps, overlapping arms, or any awkward region off a cutout before overlaying — polygon hugs any contour)',
-        items: { type: 'object' },
+        description: 'Up to 20 ops applied in order. Ops: {op:"crop",x,y,width,height} {op:"resize",width?,height?} {op:"rotate",degrees} {op:"flip",direction:"horizontal"|"vertical"} {op:"grayscale"} {op:"blur",sigma?} {op:"region_blur",x,y,width,height,sigma?} (blur only that rectangle) {op:"patch",from:{x,y,width,height},to:{x,y,width,height}} (copy a clean region of the SAME image and stretch it over another area — THE way to cover unwanted text/objects with background, in one op; optionally region_blur the seam after) {op:"sharpen",sigma?} {op:"adjust",brightness?,saturation?,hue?} (1.0 = unchanged, hue in degrees) {op:"tint",color:"#rrggbb"} {op:"filter",name:"noir"|"bw"|"vivid"|"matte"|"warm"|"cool"|"vintage"|"golden"|"dreamy"|"cinematic",strength?:0-1} (one-op Instagram-style grade over everything painted so far — the FINISHING move; apply BEFORE text ops to keep type pure, or after for a unified cast) {op:"rounded",radius?} (rounded corners, transparent outside) {op:"vignette",strength?} (0-1 darkened edges) {op:"starfield",density?,seed?,color?,region?:{x,y,width,height}} (procedural realistic night-sky stars with halos and flares — THE way to fill empty dark space in space/night designs; density 0.5 sparse - 2 dense, same seed = same sky; add BEFORE text/subjects so stars sit behind them) {op:"pad",top?,bottom?,left?,right?,color?} (extend canvas / borders) {op:"text",text,x,y,size?,color?,font?:"sans"|"serif"|"mono"|"impact"|"script"|"condensed",weight?,align?:"left"|"center" (center = x is the midpoint),stroke?,stroke_width?,opacity?,rotate? (degrees around the text center)} (overlay EXACT text — ONE line per op; for multi-line chain one op per line, stepping y by ~1.25×size) {op:"shape",shape:"rect"|"circle"|"ellipse"|"line"|"polygon",x,y,width,height,cx,cy,r,x2,y2,points?,fill?,stroke?,stroke_width?,opacity?,corner_radius?,rotate? (degrees around the shape center),gradient?:{from,to,direction?:"down"|"up"|"left"|"right",from_opacity?,to_opacity?}} (vector primitives — gradient rect = pro fade scrim; chain shapes to build badges, dividers, color blocks. FRAMES/BORDERS: stroke + NO fill = outline only; a fill value paints the whole shape SOLID — a filled full-canvas rect covers everything beneath it) {op:"overlay",image_url,x,y,width?,height?,rotate?,opacity?,blend?:"over"|"multiply"|"screen"|"overlay"|"soft-light",crop?:{x,y,width,height},flip?:"horizontal"|"vertical"} (width alone keeps aspect; width+height stretches and is REJECTED beyond 7% aspect distortion unless stretch:true — textures only, NEVER people: fill mismatched cells by crop-to-cell-aspect + uniform width; rotate spins degrees around the overlay center; x/y may be NEGATIVE or overflow — the overlay crops at the canvas edge, which is exactly HOW you bleed a cutout\'s flat side off-canvas. Overlays landing >40% off-canvas are REJECTED unless you set bleed:true (declare big bleeds deliberately; verify x+width vs canvas arithmetic for every subject). crop trims the overlay SOURCE before placing — in source-image pixels — THE tool for cutting flat truncated edges off a cutout. flip mirrors the overlay: subjects must look/lean INTO the canvas) {op:"remove_background",trim_regions?:[{x,y,width,height}]} (AI subject segmentation — the working image becomes the dominant subject cut out on transparency; floating junk blobs are auto-removed. USUALLY OMIT trim_regions — the cutout is already clean. trim_regions ERASES pixels inside each rect (it does NOT crop-to-keep); use it ONLY for a small stray background patch still stuck to the subject, sized to that patch in source pixels. A rect near the full image size erases the WHOLE subject → blank result, so never pass one; if unsure, omit it) {op:"silhouette",color?:"#hex" (default white),on_original?:boolean,trim_regions?} (pixel-perfect solid-color silhouette of the auto-detected subject — on_original true (default) stamps it over the image, false returns the silhouette alone on transparency) {op:"segment",parts?:[{name,points?:[{x,y,label?:1 keep|0 exclude}],box?:{x_min,y_min,x_max,y_max}}],points?,box?} (SAM2 promptable masking — cuts out EXACTLY what you point at, on transparency. ONE SAM CALL = ONE OBJECT, so anything made of several things is a list of PARTS, each segmented separately and unioned: a full head is parts:[{name:"face",points:[forehead,cheek,cheek,chin + 2 label:0 on the collar]},{name:"hair",points:[top of hair mass,left hair,right hair,any long lengths + 1-2 label:0 on the collar/shoulders]}]; a hat, a sleeve, an arm, a hand, a necklace are each their own part. The part name is ONLY a label — SAM cannot locate "face" by name: EVERY part must carry its own points (or box) with real pixel coordinates you read off the image. Mixing face and hair points in ONE part makes SAM keep only one of them. Up to 6 parts, 14 points each; label:0 negatives on the outfit are MANDATORY for any head part — without them SAM bleeds into fabric. Plain points/box (no parts) = one object. invert:true ERASES the selected region instead of keeping it (auto-grown ~6px + feathered) — THE way to cut a head-shaped hole for the backward swap; NEVER hand-draw an erase_shape polygon around a head, your contours miss at full resolution. Read the TRANSPARENCY AUDIT in the result: box below the chin = outfit survived; box hugging the face tighter than the visible hair = the hair part failed. Far more surgical than remove_background whole-subject cut) {op:"face_swap",face_image_url} (dedicated AI face swap — transplants the FACE from face_image_url onto the person in the working image with professional blending: correct scale, angle, skin tone. Keeps the working image hair/body/outfit/lighting. THE FIRST CHOICE for identity swaps — use the manual segment+overlay pipeline ONLY when the HAIR must move too) {op:"choke",amount?:px (default 3),feather?:px (default 1.5)} (matte defringe — pulls the cutout alpha edge INWARD and re-feathers, killing the halo band of leftover background color every AI cutout carries. Run on every segment/remove_background cutout BEFORE overlaying it — halo bands read as a sticker outline in the composite) {op:"erase_shape",shape:"rect"|"ellipse"|"polygon",x,y,width,height (rect) | cx,cy,rx,ry (ellipse) | points:"x1,y1 x2,y2 x3,y3 ..." (polygon, 3-64 vertices),feather?:px,keep?:boolean} (stencil eraser — makes the pixels INSIDE the shape transparent; keep:true inverts it to a cookie-cutter that keeps ONLY the inside. feather (try 4-15) softens the edge so trims blend invisibly. THE tool for shaving outfit scraps, overlapping arms, or any awkward region off a cutout before overlaying — polygon hugs any contour)',
+        items: {
+          type: 'object',
+          properties: { op: { type: 'string', description: 'REQUIRED on every operation — the operation name (e.g. "erase_shape", "overlay", "segment")' } },
+          required: ['op'],
+        },
       },
     },
     required: ['operations'],
@@ -2909,6 +3069,10 @@ export function agentStreamResponse(opts: {
         let text = ''
         let hadError = false
         let wasCanceled = false
+        // First moment a cancel request was OBSERVED — after a 12s grace the
+        // run ends even if a tool is still executing (the old behavior waited
+        // for the tool, so a minutes-long edit chain ignored Stop entirely)
+        let cancelSeenAt: number | null = null
         // Throttled live-progress mirror (survives client disconnects)
         let progAt = 0
         let progTimer: ReturnType<typeof setTimeout> | null = null
@@ -2962,23 +3126,45 @@ export function agentStreamResponse(opts: {
           const IDLE_TOOL_MS = Math.max(480_000, IDLE_MS)   // while a tool call is in flight
           const drain = async (stream: AsyncIterable<any>) => {
           const it = stream[Symbol.asyncIterator]()
+          // The pending it.next() survives race ticks — re-calling next()
+          // after an abandoned race would pull and silently DROP a part
+          let pendingNext: Promise<IteratorResult<any>> | null = null
+          let lastPartAt = Date.now()
           while (true) {
             const toolRunning = [...steps.values()].some(s =>
               s.status === 'running' && s.tool !== 'reasoning')
+            if (!pendingNext) pendingNext = it.next()
             let th: ReturnType<typeof setTimeout> | undefined
             const winner = await Promise.race([
-              it.next(),
-              new Promise<'timeout'>(res => { th = setTimeout(() => res('timeout'), toolRunning ? IDLE_TOOL_MS : IDLE_MS) }),
+              pendingNext,
+              new Promise<'tick'>(res => { th = setTimeout(() => res('tick'), 1500) }),
             ])
             clearTimeout(th)
-            if (winner === 'timeout') {
-              hadError = true
-              console.error('chat-hub stream watchdog: no output for', toolRunning ? IDLE_TOOL_MS : IDLE_MS, 'ms — aborting')
-              send({ t: 'error', message: 'The model stopped responding — run aborted. Send again or retry with another model (↺).' })
-              try { await it.return?.(undefined) } catch {}
-              break
+            if (winner === 'tick') {
+              // No part this tick (usually a slow tool executing). Cancel is
+              // enforced HERE too: 12s after the request the in-flight step
+              // is abandoned and the run winds down as canceled.
+              if (opts.isCanceled?.() && !wasCanceled) {
+                if (cancelSeenAt === null) cancelSeenAt = Date.now()
+                else if (Date.now() - cancelSeenAt > 12_000) {
+                  wasCanceled = true
+                  try { await it.return?.(undefined) } catch {}
+                  break
+                }
+              }
+              const idleLimit = toolRunning ? IDLE_TOOL_MS : IDLE_MS
+              if (Date.now() - lastPartAt > idleLimit) {
+                hadError = true
+                console.error('chat-hub stream watchdog: no output for', idleLimit, 'ms — aborting')
+                send({ t: 'error', message: 'The model stopped responding — run aborted. Send again or retry with another model (↺).' })
+                try { await it.return?.(undefined) } catch {}
+                break
+              }
+              continue
             }
+            pendingNext = null
             if (winner.done) break
+            lastPartAt = Date.now()
             const part = winner.value
             switch (part.type) {
               case 'text-delta':
@@ -3149,6 +3335,8 @@ export function agentStreamResponse(opts: {
                 wasCanceled = true
                 try { await it.return?.(undefined) } catch {}
                 break
+              } else if (cancelSeenAt === null) {
+                cancelSeenAt = Date.now()
               }
             }
           }

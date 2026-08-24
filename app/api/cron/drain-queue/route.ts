@@ -11,7 +11,11 @@ import { releaseQueueSlot } from '@/lib/admin-queue-helpers'
 // NB2 edit jobs routinely take 6-11 min and video models far longer, so live
 // work was being destroyed and refunded. Nothing is failed now without asking
 // fal first (see verifyWithFal below); this is just the "worth checking" line.
-const STALE_MINUTES = 25
+// 12 (was 25): verifyWithFal makes a low line SAFE — live jobs are always
+// spared — while a dead poller's COMPLETED job gets harvested well inside
+// NanoBanana's ~1h result purge. At 25 min a job that finished in 2 min but
+// lost its poller (page reload) raced the purge and often lost the image.
+const STALE_MINUTES = 12
 // Video generation is legitimately slow — give it a much longer leash
 const STALE_MINUTES_VIDEO = 60
 
