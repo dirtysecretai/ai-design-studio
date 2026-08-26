@@ -311,6 +311,7 @@ function parsePreset(filename: string): ParsedPreset {
   else if (raw.startsWith('sd 1'))                family = 'SD 1.5'
   else if (raw.startsWith('chroma'))              family = 'Chroma'
   else if (raw.startsWith('hidream'))             family = 'HiDream'
+  else if (raw.startsWith('wan 2.2'))             family = 'Wan 2.2 Video (fal)'
   else if (raw.startsWith('wan'))                 family = 'Wan 2.7 Video'
   else if (raw.startsWith('hunyuan'))             family = 'Hunyuan Video'
   else if (raw.startsWith('pixart alpha'))        family = 'PixArt-α'
@@ -325,7 +326,7 @@ function parsePreset(filename: string): ParsedPreset {
 const FAMILY_ORDER = [
   'FLUX 1', 'FLUX 2', 'ERNIE', 'Z-Image', 'Z-Image DeTurbo',
   'SDXL', 'SD 3', 'SD 2', 'SD 1.5',
-  'Chroma', 'HiDream', 'Wan 2.7 Video', 'Hunyuan Video', 'PixArt-α', 'PixArt-Σ',
+  'Chroma', 'HiDream', 'Wan 2.2 Video (fal)', 'Wan 2.7 Video', 'Hunyuan Video', 'PixArt-α', 'PixArt-Σ',
   'Qwen', 'Sana', 'Stable Cascade', 'Würstchen', 'Other',
 ]
 
@@ -342,6 +343,7 @@ const FAMILY_COLOR: Record<string, string> = {
   'Chroma':          'text-purple-400',
   'HiDream':         'text-pink-400',
   'Hunyuan Video':   'text-rose-400',
+  'Wan 2.2 Video (fal)': 'text-emerald-400',
   'Wan 2.7 Video':   'text-orange-400',
 }
 
@@ -3393,7 +3395,7 @@ export default function OneTrainerPage() {
   // Local/cloud toggle — persisted; hydrated in an effect (NOT a lazy
   // initializer: that runs during SSR too, where localStorage is missing, and
   // the server/client mismatch threw a React hydration error)
-  const [mode, setMode] = useState<'local' | 'cloud'>('cloud')
+  const [mode, setMode] = useState<'local' | 'cloud' | 'fal'>('cloud')
 
   // Server (local mode)
   const [serverRunning, setServerRunning] = useState(false)
@@ -3405,6 +3407,16 @@ export default function OneTrainerPage() {
 
   // Overrides
   const [runName,    setRunName]    = useState('My Training Run')
+  // fal API mode (Wan 2.2 Video via fal-ai/wan-22-trainer): trains on the
+  // datasets composed below — clips + GIFs (GIFs auto-convert server-side)
+  const [falCfg, setFalCfg] = useState({
+    variant: 't2v-a14b' as 't2v-a14b' | 'i2v-a14b',
+    steps: '400',
+    learningRate: '0.0002',
+    triggerPhrase: '',
+    autoScale: true,
+  })
+  const [falJobId, setFalJobId] = useState<number | null>(null)
   const [lr,         setLr]         = useState('')
   const [batchSize,  setBatchSize]  = useState('')
   const [epochs,     setEpochs]     = useState('')
@@ -3654,7 +3666,10 @@ export default function OneTrainerPage() {
         if (t === 'loras' || t === 'history') loadRuns()
       }
     } catch {}
-    try { if (localStorage.getItem('ot-mode') === 'local') setMode('local') } catch {}
+    try {
+      const m = localStorage.getItem('ot-mode')
+      if (m === 'local' || m === 'fal') setMode(m)
+    } catch {}
     setUiPrefsHydrated(true)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -3923,7 +3938,7 @@ export default function OneTrainerPage() {
 
   const loadPresets = useCallback(async () => {
     try {
-      if (mode === 'cloud') {
+      if (mode === 'cloud' || mode === 'fal') {
         const res = await fetch('/api/admin/onetrainer/presets-local', { headers: ah() })
         if (res.ok) setPresets(await res.json())
       } else {
@@ -3935,7 +3950,7 @@ export default function OneTrainerPage() {
 
   // Load presets immediately in cloud mode, or when server comes online in local mode
   useEffect(() => {
-    if (mode === 'cloud') { loadPresets() }
+    if (mode === 'cloud' || mode === 'fal') { loadPresets() }
   }, [mode, loadPresets])
 
   useEffect(() => {
@@ -3968,6 +3983,16 @@ export default function OneTrainerPage() {
     setOptimizerName(''); setTimestepDist(''); setTrainTextEncoder(false)
     setSaveEpochs(true); setSaveEvery('1'); setSaveEveryUnit('EPOCH')
     setRecipeSubject(null); setRecipeSize(null)
+    if (String(p.config.base_model_name ?? '') === 'fal-ai/wan-22-trainer') {
+      setFalCfg(f => ({
+        ...f,
+        variant: p.config.variant === 'i2v-a14b' ? 'i2v-a14b' : 't2v-a14b',
+        steps: String(p.config.steps ?? 400),
+        learningRate: String(p.config.learning_rate ?? 0.0002),
+        triggerPhrase: String(p.config.trigger_phrase ?? ''),
+        autoScale: p.config.auto_scale_input !== false,
+      }))
+    }
   }
 
   // ── Local checkpoint scan ──────────────────────────────────────────────────
@@ -4288,10 +4313,35 @@ export default function OneTrainerPage() {
   // ── Start training ─────────────────────────────────────────────────────────
 
   async function startTraining() {
-    if (!selectedPreset) return
+    if (!selectedPreset && mode !== 'fal') return
     setLaunching(true)
     setLiveLogs([])
     try {
+      // ── fal API mode: submit the composed dataset's image IDs to the
+      // existing fal LoRA pipeline (prepare converts GIFs, zips clips,
+      // handles webhooks/finalize; jobs monitor on /admin/lora-training) ──
+      if (mode === 'fal') {
+        const snaps = concepts.map(c => conceptSnapshots[c.id]).filter((x): x is DatasetSnapshot => !!x)
+        const ids = [...new Set(snaps.flatMap(sn => sn.images.map(i => i.id)))]
+        if (ids.length === 0) { alert('Build a dataset below first — fal training uses the items selected in the dataset composer.'); return }
+        const cfg = {
+          variant: falCfg.variant,
+          steps: Math.max(100, parseInt(falCfg.steps) || 400),
+          learning_rate: Math.max(0.000001, parseFloat(falCfg.learningRate) || 0.0002),
+          trigger_phrase: falCfg.triggerPhrase.trim(),
+          auto_scale_input: falCfg.autoScale,
+        }
+        const res = await fetch('/api/admin/lora-training/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...ah() },
+          body: JSON.stringify({ imageIds: ids, modelId: 'fal-ai/wan-22-trainer', name: runName.trim(), config: cfg }),
+        })
+        const d = await res.json().catch(() => ({}))
+        if (!res.ok || !d.jobId) { alert(d.error ?? `Error ${res.status}`); return }
+        setFalJobId(d.jobId)
+        return
+      }
+      if (!selectedPreset) return // narrow: local/cloud always have one (guarded above)
       const config: Record<string, unknown> = { ...selectedPreset.config }
       if (lr)         config.learning_rate            = parseFloat(lr)
       if (batchSize)  config.batch_size               = parseInt(batchSize)
@@ -4453,9 +4503,14 @@ export default function OneTrainerPage() {
 
   // Cloud mode allows CONCURRENT runs (each is its own RunPod worker) — only
   // local mode is single-run
+  // Wan 2.2 preset trains on fal's hosted trainer — no checkpoint, and the
+  // run settings collapse to the trainer's own four knobs
+  const isFalPreset = String(selectedPreset?.config?.base_model_name ?? '') === 'fal-ai/wan-22-trainer'
   const canTrain = mode === 'local'
     ? (serverRunning && !!selectedPreset && concepts.some(c => c.path.trim()) && !isTraining)
-    : (!!selectedPreset && !!selectedCheckpoint && concepts.some(c => c.r2DatasetKey))
+    : mode === 'fal'
+      ? (isFalPreset && !!runName.trim() && concepts.some(c => (conceptSnapshots[c.id]?.images?.length ?? 0) > 0))
+      : (!!selectedPreset && !!selectedCheckpoint && concepts.some(c => c.r2DatasetKey))
 
   const activeLogs    = mode === 'local' ? trainStatus.logs
     : cloudStatus?.status === 'running' ? liveLogs
@@ -4504,17 +4559,24 @@ export default function OneTrainerPage() {
 
         {/* Mode toggle */}
         <div className="flex items-center gap-1 p-0.5 rounded-lg bg-white/[0.04] border border-white/[0.06]">
-          <button onClick={() => setMode('local')}
+          <button onClick={() => { setMode('local'); try { localStorage.setItem('ot-mode', 'local') } catch {} }}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
               mode === 'local' ? 'bg-white/[0.08] text-white' : 'text-slate-500 hover:text-slate-300'
             }`}>
             <HardDrive size={10} /> Local
           </button>
-          <button onClick={() => setMode('cloud')}
+          <button onClick={() => { setMode('cloud'); try { localStorage.setItem('ot-mode', 'cloud') } catch {} }}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
               mode === 'cloud' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300'
             }`}>
             <Cloud size={10} /> Cloud
+          </button>
+          <button onClick={() => { setMode('fal'); try { localStorage.setItem('ot-mode', 'fal') } catch {} }}
+            title="Train on fal's hosted trainers (Wan 2.2 Video) using the datasets composed below"
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${
+              mode === 'fal' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300'
+            }`}>
+            <Sparkles size={10} /> API
           </button>
         </div>
 
@@ -4539,10 +4601,15 @@ export default function OneTrainerPage() {
               {serverLoading ? 'Starting…' : serverRunning ? 'Stop Server' : 'Start Server'}
             </button>
           </div>
-        ) : (
+        ) : mode === 'cloud' ? (
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-white/20 bg-white/[0.06] text-slate-300 text-[11px]">
             <Cloud size={9} />
             RunPod Cloud
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 text-emerald-300 text-[11px]">
+            <Sparkles size={9} />
+            fal API · Wan 2.2
           </div>
         )}
       </div>
@@ -4620,6 +4687,10 @@ export default function OneTrainerPage() {
                         {(() => {
                           const grouped: Record<string, Preset[]> = {}
                           for (const p of presets) {
+                            // fal trainer presets only exist in API mode; the
+                            // OneTrainer presets can't run there
+                            const falP = String(p.config?.base_model_name ?? '') === 'fal-ai/wan-22-trainer'
+                            if (mode === 'fal' ? !falP : falP) continue
                             const { family } = parsePreset(p.filename)
                             ;(grouped[family] ??= []).push(p)
                           }
@@ -4670,7 +4741,7 @@ export default function OneTrainerPage() {
 
               {!selectedPreset ? (
               <div className="flex items-center justify-center py-12 text-slate-700 text-sm px-6 text-center">
-                {mode === 'cloud' ? 'Choose a preset above to begin.' : serverRunning ? 'Choose a preset above to begin.' : 'Start the server, then choose a preset.'}
+                {mode !== 'local' ? 'Choose a preset above to begin.' : serverRunning ? 'Choose a preset above to begin.' : 'Start the server, then choose a preset.'}
               </div>
             ) : (
               <div className="space-y-5">
@@ -4699,7 +4770,22 @@ export default function OneTrainerPage() {
                       : <span className="text-[10px] text-slate-600 shrink-0">preset default</span>}
                   </div>
 
-                  {mode === 'local' ? (
+                  {isFalPreset ? (
+                    <div className="space-y-2">
+                      <label className="space-y-1 block max-w-xs">
+                        <span className="text-[9px] text-slate-600 uppercase tracking-wider font-mono">Variant</span>
+                        <select value={falCfg.variant} onChange={e => setFalCfg(f => ({ ...f, variant: e.target.value as 't2v-a14b' | 'i2v-a14b' }))}
+                          className="w-full px-3 py-2 rounded-lg bg-[#0a101d] border border-white/[0.08] text-sm text-white focus:outline-none focus:border-white/30 cursor-pointer">
+                          <option value="t2v-a14b">Text-to-video (t2v-a14b)</option>
+                          <option value="i2v-a14b">Image-to-video (i2v-a14b)</option>
+                        </select>
+                      </label>
+                      <p className="text-[10px] text-slate-600 leading-relaxed">
+                        Hosted trainer on fal — no checkpoint to pick. Wan 2.2 A14B is the newest OPEN Wan;
+                        the LoRA it produces serves through the portal's Wan 2.2 pickers automatically.
+                      </p>
+                    </div>
+                  ) : mode === 'local' ? (
                     <>
                       <div className="flex gap-2">
                         <div className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] focus-within:border-white/25 transition-colors">
@@ -4831,6 +4917,43 @@ export default function OneTrainerPage() {
                     <p className="text-[9px] text-slate-600 leading-snug">Names this training run — and the saved LoRA file in R2.</p>
                   </div>
 
+                  {isFalPreset ? (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] text-slate-600 uppercase tracking-wider font-mono">Steps</label>
+                          <input type="number" value={falCfg.steps} onChange={e => setFalCfg(f => ({ ...f, steps: e.target.value }))} placeholder="400"
+                            className="w-full px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-white placeholder:text-slate-700 focus:outline-none focus:border-white/30" />
+                          <p className="text-[9px] text-slate-600 leading-snug">Total training steps. ~400 is the trainer default; more learns harder but risks overfitting motion.</p>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] text-slate-600 uppercase tracking-wider font-mono">Learning Rate</label>
+                          <input value={falCfg.learningRate} onChange={e => setFalCfg(f => ({ ...f, learningRate: e.target.value }))} placeholder="0.0002"
+                            className="w-full px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-white placeholder:text-slate-700 focus:outline-none focus:border-white/30" />
+                          <p className="text-[9px] text-slate-600 leading-snug">Trainer default 2e-4. Lower for subtle styles, higher fries motion fast.</p>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] text-slate-600 uppercase tracking-wider font-mono">Trigger Phrase</label>
+                          <input value={falCfg.triggerPhrase} onChange={e => setFalCfg(f => ({ ...f, triggerPhrase: e.target.value }))} placeholder="optional, e.g. TOK_MOTION"
+                            className="w-full px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-white placeholder:text-slate-700 focus:outline-none focus:border-white/30" />
+                          <p className="text-[9px] text-slate-600 leading-snug">Optional word to bind the concept to — use it in prompts when serving the LoRA.</p>
+                        </div>
+                      </div>
+                      <label className="flex items-center gap-2 text-[11px] text-slate-400 cursor-pointer select-none">
+                        <input type="checkbox" checked={falCfg.autoScale} onChange={e => setFalCfg(f => ({ ...f, autoScale: e.target.checked }))} className="accent-emerald-400" />
+                        Auto-scale clips to 81 frames @ 16fps (recommended)
+                      </label>
+                      <p className="text-[10px] text-slate-600 font-mono">
+                        ~$0.005/step on the fal account — est. ${(Math.max(100, parseInt(falCfg.steps) || 400) * 0.005).toFixed(2)} at {Math.max(100, parseInt(falCfg.steps) || 400)} steps · typical run 30–90 min
+                      </p>
+                      {falJobId !== null && (
+                        <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-300">
+                          Job #{falJobId} started — dataset preparing &amp; submitting to fal.{' '}
+                          <a href="/admin/lora-training" className="underline underline-offset-2 hover:text-white">Monitor on the LoRA Training page</a>.
+                        </div>
+                      )}
+                    </div>
+                  ) : (<>
                   {/* ── Training method: LoRA adapter vs full fine-tune ── */}
                   <div className="space-y-1.5">
                     <label className="text-[10px] text-slate-600 uppercase tracking-wider font-mono">Method</label>
@@ -5020,6 +5143,7 @@ export default function OneTrainerPage() {
                       </div>
                     </div>
                   </div>
+                  </>)}
                 </div>
 
                 {/* ── Section 3: Training Concepts ── */}
@@ -5028,7 +5152,7 @@ export default function OneTrainerPage() {
                     <div>
                       <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">3 · Training Concepts</p>
                       <p className="text-[10px] text-slate-600 mt-0.5">
-                        {mode === 'local' ? 'Each concept is a local folder of images.' : 'Upload a .zip of your image + caption pairs for each concept.'}
+                        {mode === 'local' ? 'Each concept is a local folder of images.' : isFalPreset ? 'Compose datasets of CLIPS and GIFs (5–50 items total) — stills are rejected; GIFs auto-convert server-side.' : 'Upload a .zip of your image + caption pairs for each concept.'}
                       </p>
                     </div>
                     <button onClick={() => setConcepts(p => [...p, emptyConcept()])}
@@ -5255,8 +5379,8 @@ export default function OneTrainerPage() {
                   {canTrain && !launching && !isTraining && (
                     <span className="absolute inset-y-0 left-0 w-1/3 bg-gradient-to-r from-transparent via-white/35 to-transparent pointer-events-none" style={{ animation: 'sheen-sweep 2.6s infinite' }} />
                   )}
-                  {launching ? <Loader2 size={15} className="animate-spin" /> : mode === 'cloud' ? <Cloud size={15} /> : <Play size={15} />}
-                  {launching ? 'Launching…' : isTraining ? 'Training in progress…' : mode === 'cloud' ? 'Train on RunPod' : 'Start Training'}
+                  {launching ? <Loader2 size={15} className="animate-spin" /> : mode === 'cloud' ? <Cloud size={15} /> : mode === 'fal' ? <Sparkles size={15} /> : <Play size={15} />}
+                  {launching ? 'Launching…' : isTraining ? 'Training in progress…' : mode === 'cloud' ? 'Train on RunPod' : mode === 'fal' ? 'Train on fal (Wan 2.2 Video)' : 'Start Training'}
                 </button>
 
               </div>

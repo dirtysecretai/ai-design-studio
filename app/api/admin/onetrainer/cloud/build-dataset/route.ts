@@ -233,6 +233,17 @@ export async function GET(req: Request) {
     return NextResponse.json(rows)
   }
   if (sp.get('active') === '1') {
+    // Reap zombies first: the build worker writes progress every ~2s, so a
+    // 'running' row silent for 10+ minutes died with its server process (dev
+    // restart, crash). Without this it haunts every page load as a stuck
+    // "Building… 0/N" bar forever.
+    try {
+      await prisma.$executeRaw`
+        UPDATE "DatasetBuildJob" SET "status" = 'failed',
+          "error" = 'Stale build — its worker died (server restart). Start a fresh build.',
+          "updatedAt" = NOW()
+        WHERE "status" = 'running' AND "updatedAt" < NOW() - INTERVAL '10 minutes'`
+    } catch { /* reap is best-effort */ }
     const rows = await prisma.$queryRawUnsafe<Record<string, unknown>[]>(
       `${JOB_SELECT} WHERE "consumedAt" IS NULL AND "status" != 'cancelled'
          AND ("status" = 'running' OR "updatedAt" > NOW() - INTERVAL '2 hours')

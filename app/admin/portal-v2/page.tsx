@@ -4102,6 +4102,27 @@ interface ExtractedFrame {
   norm: number     // 0-100 normalized within this extraction
 }
 
+// One uploaded video in the extractor (GIFs arrive already converted to MP4)
+interface FrameSource {
+  id: string
+  file: File
+  url: string      // object URL
+  name: string
+  duration: number
+}
+
+// A short clip cut out of the source video server-side (MP4 or GIF)
+interface ExtractedClip {
+  t: number
+  dur: number
+  url: string      // object URL of the clip blob
+  blob: Blob
+  name: string
+  kind: 'mp4' | 'gif'
+  score: number    // Laplacian variance of a mid-clip frame (same metric as frames)
+  norm: number     // 0-100, normalized jointly with the frames
+}
+
 function laplacianVariance(data: Uint8ClampedArray, w: number, h: number): number {
   const gray = new Float32Array(w * h)
   for (let i = 0; i < w * h; i++) {
@@ -4132,6 +4153,13 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [videoName, setVideoName] = useState("")
   const [duration, setDuration] = useState(0)
+  // Multiple uploads: each source keeps ITS OWN extracted results (cached on
+  // switch); the selection set spans all sources so one Add-to-Refs / ZIP
+  // can batch the best of several videos
+  const [sources, setSources] = useState<FrameSource[]>([])
+  const sourcesRef = useRef<FrameSource[]>([])
+  const [activeSourceId, setActiveSourceId] = useState<string | null>(null)
+  const resultsCacheRef = useRef<Map<string, { frames: ExtractedFrame[]; clips: ExtractedClip[] }>>(new Map())
   const [interval_, setInterval_] = useState(0.5) // seconds between samples
   const [extracting, setExtracting] = useState(false)
   const [progress, setProgress] = useState(0)
@@ -4144,9 +4172,21 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
   // Select mode keeps the multi-select for batch actions
   const [tileMode, setTileMode] = useState<"view" | "select">("view")
   const [editingFrame, setEditingFrame] = useState<ExtractedFrame | null>(null)
+  const [viewingClip, setViewingClip] = useState<ExtractedClip | null>(null)
   const [frameLayers, setFrameLayers] = useState<RefLayerStack | null>(null)
   const [dlState, setDlState] = useState<"idle" | "zipping" | "done">("idle")
   const [gifConverting, setGifConverting] = useState(false)
+  // What to extract: still frames (client-side), short clips/GIFs (server-side
+  // ffmpeg via R2 — bodies are size-capped on prod), or both at once
+  const [extractMode, setExtractMode] = useState<"frames" | "clips" | "both">("frames")
+  const [clipLen, setClipLen] = useState(3)        // seconds per clip
+  const [clipEvery, setClipEvery] = useState(0)    // 0 = back-to-back
+  const [clipFormat, setClipFormat] = useState<"mp4" | "gif">("mp4")
+  // Frame output: JPEG (small, visually transparent) or PNG (pixel-lossless —
+  // for frames that will be re-edited or used as exact training stills)
+  const [frameFormat, setFrameFormat] = useState<"jpeg" | "png">("png")
+  const [clips, setClips] = useState<ExtractedClip[]>([])
+  const [clipPhase, setClipPhase] = useState<string | null>(null)
 
   const MAX_DURATION = 120  // seconds
   const MAX_FRAMES = 300    // hard cap — interval auto-widens beyond it
@@ -4154,6 +4194,16 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
   const reset = useCallback(() => {
     cancelRef.current = true
     setFrames(f => { f.forEach(fr => URL.revokeObjectURL(fr.url)); return [] })
+    setClips(c => { c.forEach(cl => URL.revokeObjectURL(cl.url)); return [] })
+    for (const v of resultsCacheRef.current.values()) {
+      v.frames.forEach(fr => URL.revokeObjectURL(fr.url))
+      v.clips.forEach(cl => URL.revokeObjectURL(cl.url))
+    }
+    resultsCacheRef.current.clear()
+    setSources(prev => { prev.forEach(src => URL.revokeObjectURL(src.url)); return [] })
+    sourcesRef.current = []
+    setActiveSourceId(null)
+    setClipPhase(null)
     setSelected(new Set())
     setVideoUrl(v => { if (v) URL.revokeObjectURL(v); return null })
     setDuration(0); setProgress(0); setExtracting(false); setError(null); setAddState("idle")
@@ -4161,8 +4211,9 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
   useEffect(() => () => { reset() }, [reset])
 
   const handleFile = (file: File) => {
-    reset()
     cancelRef.current = false
+    setError(null)
+    if (sources.length >= 8) { setError("Up to 8 videos at a time — remove one first."); return }
     const isGif = file.type === "image/gif" || /\.gif$/i.test(file.name)
     if (isGif) {
       // Browsers can't seek GIFs in a <video> element — a transient server
@@ -4193,28 +4244,212 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
     probe.preload = "metadata"
     probe.muted = true
     probe.onloadedmetadata = () => {
-      if (probe.duration > MAX_DURATION) {
-        setError(`Video is ${Math.round(probe.duration)}s — the extractor takes up to ${MAX_DURATION}s (2 minutes). Trim it down first.`)
+      // CUMULATIVE budget: all uploaded videos together may total 2 minutes
+      const used = sourcesRef.current.reduce((a, x) => a + x.duration, 0)
+      if (used + probe.duration > MAX_DURATION + 0.5) {
+        const left = Math.max(0, Math.floor(MAX_DURATION - used))
+        setError(`"${file.name}" is ${Math.round(probe.duration)}s but only ${left}s of the 2-minute TOTAL budget remain${left === 0 ? " — remove a video first" : ""}.`)
         URL.revokeObjectURL(url)
         return
       }
-      setVideoName(file.name)
-      setDuration(probe.duration)
-      setVideoUrl(url)
+      const src: FrameSource = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, file, url, name: file.name, duration: probe.duration }
+      sourcesRef.current = [...sourcesRef.current, src]
+      setSources(sourcesRef.current)
+      // First upload (or nothing active) becomes the working source
+      setActiveSourceId(prev => {
+        if (prev) return prev
+        sourceFileRef.current = file
+        setVideoName(file.name)
+        setDuration(probe.duration)
+        setVideoUrl(url)
+        return src.id
+      })
     }
-    probe.onerror = () => { setError("Couldn't read that video — convert it to MP4 (H.264) and retry."); URL.revokeObjectURL(url) }
+    probe.onerror = () => { setError(`Couldn't read "${file.name}" — convert it to MP4 (H.264) and retry.`); URL.revokeObjectURL(url) }
     probe.src = url
+  }
+
+  // Switch the working source: stash the current results, restore the target's
+  const switchSource = (id: string) => {
+    if (id === activeSourceId || extracting) return
+    const src = sources.find(x => x.id === id)
+    if (!src) return
+    if (activeSourceId) resultsCacheRef.current.set(activeSourceId, { frames, clips })
+    setActiveSourceId(id)
+    sourceFileRef.current = src.file
+    setVideoName(src.name)
+    setDuration(src.duration)
+    setVideoUrl(src.url)
+    const cached = resultsCacheRef.current.get(id)
+    setFrames(cached?.frames ?? [])
+    setClips(cached?.clips ?? [])
+    setProgress(0)
+    setError(null)
+  }
+
+  const removeSource = (id: string) => {
+    if (extracting) return
+    const src = sources.find(x => x.id === id)
+    if (!src) return
+    const cached = resultsCacheRef.current.get(id)
+    const goneUrls = new Set<string>([...(cached?.frames ?? []).map(f => f.url), ...(cached?.clips ?? []).map(c => c.url),
+      ...(id === activeSourceId ? [...frames.map(f => f.url), ...clips.map(c => c.url)] : [])])
+    cached?.frames.forEach(f => URL.revokeObjectURL(f.url))
+    cached?.clips.forEach(c => URL.revokeObjectURL(c.url))
+    resultsCacheRef.current.delete(id)
+    URL.revokeObjectURL(src.url)
+    setSelected(prev => new Set([...prev].filter(u => !goneUrls.has(u))))
+    const rest = sources.filter(x => x.id !== id)
+    sourcesRef.current = rest
+    setSources(rest)
+    if (id === activeSourceId) {
+      if (rest.length > 0) {
+        const nxt = rest[0]
+        setActiveSourceId(nxt.id)
+        sourceFileRef.current = nxt.file
+        setVideoName(nxt.name)
+        setDuration(nxt.duration)
+        setVideoUrl(nxt.url)
+        const cached2 = resultsCacheRef.current.get(nxt.id)
+        setFrames(cached2?.frames ?? [])
+        setClips(cached2?.clips ?? [])
+      } else {
+        setActiveSourceId(null)
+        sourceFileRef.current = null
+        setVideoUrl(null)
+        setVideoName("")
+        setDuration(0)
+        setFrames([])
+        setClips([])
+      }
+    }
+  }
+
+  // Every source's results (active state + cache) — batch actions span them all
+  const allResults = () => {
+    const fr = [...frames]
+    const cl = [...clips]
+    for (const [id, v] of resultsCacheRef.current.entries()) {
+      if (id === activeSourceId) continue
+      fr.push(...v.frames)
+      cl.push(...v.clips)
+    }
+    return { frames: fr, clips: cl }
+  }
+
+  // The source File is needed for the server upload — object URLs can't be
+  // re-read as the original bytes reliably across browsers
+  const sourceFileRef = useRef<File | null>(null)
+
+  const extractClips = async () => {
+    const file = sourceFileRef.current
+    if (!file) throw new Error("Re-pick the video to extract clips (source file not held)")
+    setClipPhase("Uploading video…")
+    const pre = await fetch("/api/admin/frames-clips", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ presign: { mimeType: file.type || "video/mp4" } }),
+    })
+    const preData = await pre.json().catch(() => ({}))
+    if (!pre.ok || !preData.uploadUrl) throw new Error(preData.error || "Could not start the clip upload")
+    const put = await fetch(preData.uploadUrl, { method: "PUT", headers: { "Content-Type": file.type || "video/mp4" }, body: file })
+    if (!put.ok) throw new Error(`Video upload failed (${put.status})`)
+    setClipPhase("Slicing on the server…")
+    const res = await fetch("/api/admin/frames-clips", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(290_000),
+      body: JSON.stringify({
+        sourceUrl: preData.publicUrl,
+        clipLen,
+        every: clipEvery > 0 ? clipEvery : clipLen,
+        format: clipFormat,
+      }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok || !data.zipUrl) throw new Error(data.error || `Clip extraction failed (${res.status})`)
+    setClipPhase("Downloading clips…")
+    const zipRes = await fetch(data.zipUrl)
+    if (!zipRes.ok) throw new Error("Could not download the clips")
+    const { default: JSZip } = await import("jszip")
+    const zip = await JSZip.loadAsync(await zipRes.arrayBuffer())
+    const out: ExtractedClip[] = []
+    const meta: { name: string; t: number; dur: number }[] = data.clips || []
+    for (const m of meta) {
+      const entry = zip.file(m.name)
+      if (!entry) continue
+      const kind = m.name.endsWith(".gif") ? "gif" as const : "mp4" as const
+      const blob = new Blob([await entry.async("arraybuffer")], { type: kind === "gif" ? "image/gif" : "video/mp4" })
+      out.push({ t: m.t, dur: m.dur, url: URL.createObjectURL(blob), blob, name: m.name, kind, score: 0, norm: 0 })
+    }
+    // Spent working files — best-effort cleanup
+    fetch(`/api/admin/frames-clips?url=${encodeURIComponent(data.zipUrl)}`, { method: "DELETE" }).catch(() => {})
+    // Score each clip on the SAME sharpness metric as frames (mid-clip frame
+    // → Laplacian variance) so the mixed feed can rank them together
+    setClipPhase("Scoring clips…")
+    await Promise.all(out.map(c => new Promise<void>(done => {
+      const finish = (score: number) => { c.score = score; done() }
+      const guard = setTimeout(() => finish(0), 8000)
+      const measure = (el: HTMLVideoElement | HTMLImageElement, w0: number, h0: number) => {
+        try {
+          const sw = 320, sh = Math.max(2, Math.round(320 * h0 / Math.max(1, w0)))
+          const cv = document.createElement("canvas")
+          cv.width = sw; cv.height = sh
+          const cx = cv.getContext("2d", { willReadFrequently: true })!
+          cx.drawImage(el, 0, 0, sw, sh)
+          clearTimeout(guard)
+          finish(laplacianVariance(cx.getImageData(0, 0, sw, sh).data, sw, sh))
+        } catch { clearTimeout(guard); finish(0) }
+      }
+      if (c.kind === "gif") {
+        const im = new window.Image()
+        im.onload = () => measure(im, im.naturalWidth, im.naturalHeight)
+        im.onerror = () => { clearTimeout(guard); finish(0) }
+        im.src = c.url
+      } else {
+        const v = document.createElement("video")
+        v.muted = true; v.playsInline = true; v.preload = "auto"
+        v.onloadeddata = () => { v.currentTime = Math.min(c.dur / 2, Math.max(0, (v.duration || c.dur) - 0.05)) }
+        v.onseeked = () => measure(v, v.videoWidth, v.videoHeight)
+        v.onerror = () => { clearTimeout(guard); finish(0) }
+        v.src = c.url
+      }
+    })))
+    setClipPhase(null)
+    return out
   }
 
   const extract = async () => {
     if (!videoUrl || extracting) return
     cancelRef.current = false
     setExtracting(true)
+    // Re-extracting replaces THIS source's results — drop only their urls
+    // from the (cross-source) selection
+    const replaced = new Set<string>([...frames.map(f => f.url), ...clips.map(c => c.url)])
+    setSelected(prev => new Set([...prev].filter(u => !replaced.has(u))))
     setFrames(f => { f.forEach(fr => URL.revokeObjectURL(fr.url)); return [] })
-    setSelected(new Set())
+    setClips(c => { c.forEach(cl => URL.revokeObjectURL(cl.url)); return [] })
     setProgress(0)
     setError(null)
     try {
+      let clipsOut: ExtractedClip[] = []
+      if (extractMode !== "frames") {
+        try {
+          clipsOut = await extractClips()
+        } catch (e) {
+          setClipPhase(null)
+          setError(e instanceof Error ? e.message : "Clip extraction failed.")
+          if (extractMode === "clips") { setExtracting(false); return }
+        }
+      }
+      if (extractMode === "clips") {
+        const cmax = Math.max(1, ...clipsOut.map(c => c.score))
+        clipsOut.forEach(c => { c.norm = Math.round((c.score / cmax) * 100) })
+        setClips(clipsOut)
+        if (activeSourceId) resultsCacheRef.current.set(activeSourceId, { frames: [], clips: clipsOut })
+        setExtracting(false)
+        return
+      }
       const v = document.createElement("video")
       v.muted = true
       v.playsInline = true
@@ -4244,13 +4479,18 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
         fctx.drawImage(v, 0, 0)
         sctx.drawImage(v, 0, 0, sw, sh)
         const score = laplacianVariance(sctx.getImageData(0, 0, sw, sh).data, sw, sh)
-        const blob = await new Promise<Blob | null>(res => full.toBlob(res, "image/jpeg", 0.92))
+        const blob = await new Promise<Blob | null>(res => frameFormat === "png" ? full.toBlob(res, "image/png") : full.toBlob(res, "image/jpeg", 0.92))
         if (blob) out.push({ t, url: URL.createObjectURL(blob), blob, score, norm: 0 })
         setProgress(Math.min(1, (t + step) / v.duration))
       }
-      const max = Math.max(1, ...out.map(f => f.score))
-      out.forEach(f => { f.norm = Math.round((f.score / max) * 100) })
+      // Joint normalization: frames AND clips share one 0-100 quality scale
+      // so the mixed feed's "sharpest first" ordering is honest across types
+      const allMax = Math.max(1, ...out.map(f => f.score), ...clipsOut.map(c => c.score))
+      out.forEach(f => { f.norm = Math.round((f.score / allMax) * 100) })
+      clipsOut.forEach(c => { c.norm = Math.round((c.score / allMax) * 100) })
       setFrames(out)
+      setClips(clipsOut)
+      if (activeSourceId) resultsCacheRef.current.set(activeSourceId, { frames: out, clips: clipsOut })
     } catch {
       setError("Frame extraction failed — the video format may not decode in this browser. MP4 (H.264) is safest.")
     } finally {
@@ -4268,8 +4508,14 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
   const addSelectedToRefs = async () => {
     if (selected.size === 0 || addState === "adding") return
     setAddState("adding")
-    const files = frames.filter(f => selected.has(f.url))
-      .map(f => new File([f.blob], `frame-${f.t.toFixed(2)}s.jpg`, { type: "image/jpeg" }))
+    const pool = allResults()
+    const files: File[] = [
+      ...pool.frames.filter(f => selected.has(f.url))
+        .map(f => new File([f.blob], `frame-${f.t.toFixed(2)}s.${f.blob.type === "image/png" ? "png" : "jpg"}`, { type: f.blob.type || "image/jpeg" })),
+      // MP4 clips ride the video-ref path; GIF clips upload as GIF files
+      ...pool.clips.filter(c => selected.has(c.url))
+        .map(c => new File([c.blob], c.name, { type: c.kind === "gif" ? "image/gif" : "video/mp4" })),
+    ]
     const res = await onAddRefs(files)
     setAddState(res.limitHit ? "limit" : "done")
     setTimeout(() => setAddState("idle"), 3000)
@@ -4283,8 +4529,16 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
     try {
       const { default: JSZip } = await import("jszip")
       const zip = new JSZip()
-      for (const f of frames.filter(fr => selected.has(fr.url))) {
-        zip.file(`frame-${f.t.toFixed(2)}s.jpg`, f.blob)
+      const pool = allResults()
+      let fi = 0
+      for (const f of pool.frames.filter(fr => selected.has(fr.url))) {
+        fi++
+        zip.file(`frame-${String(fi).padStart(2, "0")}-${f.t.toFixed(2)}s.${f.blob.type === "image/png" ? "png" : "jpg"}`, f.blob)
+      }
+      let ci = 0
+      for (const c of pool.clips.filter(cl => selected.has(cl.url))) {
+        ci++
+        zip.file(`${String(ci).padStart(2, "0")}-${c.name}`, c.blob)
       }
       const blob = await zip.generateAsync({ type: "blob" })
       const a = document.createElement("a")
@@ -4353,14 +4607,14 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
 
         <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
           {/* Source picker */}
-          <input ref={fileInputRef} type="file" accept="video/*,image/gif" className="hidden"
-            onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = "" }} />
+          <input ref={fileInputRef} type="file" accept="video/*,image/gif" multiple className="hidden"
+            onChange={e => { for (const f of Array.from(e.target.files ?? [])) handleFile(f); e.target.value = "" }} />
           {!videoUrl ? (
             <button onClick={() => fileInputRef.current?.click()} disabled={gifConverting}
               className="w-full py-14 rounded-xl border-2 border-dashed border-white/10 hover:border-white/25 bg-white/[0.02] hover:bg-white/[0.04] transition-all flex flex-col items-center gap-2 text-slate-500 hover:text-slate-300 disabled:opacity-60">
               {gifConverting ? <Loader2 size={26} className="animate-spin" /> : <Film size={26} />}
               <span className="text-sm font-medium">{gifConverting ? "Converting GIF…" : "Choose a video or GIF"}</span>
-              <span className="text-[11px] text-slate-600">{gifConverting ? "ffmpeg is turning it into a clip — a few seconds" : "Up to 2 minutes · videos stay on this device (GIFs convert via the server, nothing is stored)"}</span>
+              <span className="text-[11px] text-slate-600">{gifConverting ? "ffmpeg is turning it into a clip — a few seconds" : "Multiple videos/GIFs · 2 minutes TOTAL · videos stay on this device (GIFs convert via the server, nothing is stored)"}</span>
             </button>
           ) : (() => {
             // Live count: what THIS interval yields on THIS video (the 300-
@@ -4370,12 +4624,54 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
             const widened = effStep > interval_ + 1e-6
             return (
             <div className="space-y-3">
-              {/* The uploaded video — autoplaying, as large as the popup
+              {/* Source strip — switch between the uploaded videos; each keeps
+                  its own extracted results */}
+              {sources.length > 0 && (
+                <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                  {sources.map(src => (
+                    <div key={src.id} className="relative shrink-0 group">
+                      <button onClick={() => switchSource(src.id)} disabled={extracting}
+                        title={src.name}
+                        className={`block rounded-lg overflow-hidden border-2 transition-all ${
+                          src.id === activeSourceId ? "border-white ring-1 ring-white/40" : "border-white/10 hover:border-white/30"}`}>
+                        <video src={src.url} muted playsInline preload="metadata" className="h-16 w-auto bg-black pointer-events-none" />
+                      </button>
+                      <span className="absolute bottom-0.5 left-0.5 right-5 px-1 rounded bg-black/70 text-white text-[8px] font-mono leading-3 truncate pointer-events-none">
+                        {src.duration.toFixed(0)}s{(resultsCacheRef.current.get(src.id)?.frames.length || resultsCacheRef.current.get(src.id)?.clips.length || (src.id === activeSourceId && (frames.length || clips.length))) ? " ✓" : ""}
+                      </span>
+                      <button onClick={() => removeSource(src.id)} disabled={extracting}
+                        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/80 flex items-center justify-center text-slate-400 hover:text-white transition-colors">
+                        <X size={9} />
+                      </button>
+                    </div>
+                  ))}
+                  <button onClick={() => fileInputRef.current?.click()} disabled={extracting || gifConverting || sources.length >= 8}
+                    title={`${Math.max(0, Math.floor(MAX_DURATION - sources.reduce((a, x) => a + x.duration, 0)))}s of the 2-minute total budget left`}
+                    className="shrink-0 h-16 px-3 rounded-lg border-2 border-dashed border-white/10 hover:border-white/25 text-slate-500 hover:text-white transition-all flex flex-col items-center justify-center gap-0.5 disabled:opacity-40">
+                    {gifConverting ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+                    <span className="text-[9px]">{gifConverting ? "converting" : `add · ${Math.max(0, Math.floor(MAX_DURATION - sources.reduce((a, x) => a + x.duration, 0)))}s left`}</span>
+                  </button>
+                </div>
+              )}
+              {/* The active video — autoplaying, as large as the popup
                   allows: width-capped by the modal, height-capped by the
                   viewport, so portrait clips tower instead of letterboxing */}
-              <video src={videoUrl} autoPlay loop controls muted playsInline preload="auto"
+              <video key={videoUrl} src={videoUrl} autoPlay loop controls muted playsInline preload="auto"
                 className="block mx-auto max-w-full rounded-xl bg-black"
                 style={{ maxHeight: "min(60vh, 860px)" }} />
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500">Extract</span>
+                <div className="flex rounded-lg overflow-hidden border border-white/[0.08]">
+                  {(["frames", "clips", "both"] as const).map(m => (
+                    <button key={m} onClick={() => setExtractMode(m)} disabled={extracting}
+                      className={`px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                        extractMode === m ? "bg-white/15 text-white" : "text-slate-500 hover:text-white"}`}>
+                      {m === "frames" ? "Frames" : m === "clips" ? "Clips/GIFs" : "Both"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {extractMode !== "clips" && (
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500">Frame every</span>
                 {[0.1, 0.25, 0.5, 1, 2, 3, 5].map(s => (
@@ -4390,14 +4686,62 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
                   className={`px-2.5 py-1 rounded-lg border text-[11px] font-mono ${widened ? "border-amber-500/40 bg-amber-500/10 text-amber-300" : "border-white/10 bg-white/[0.04] text-slate-300"}`}>
                   ≈ {expected} frames{widened ? ` · every ${effStep.toFixed(2)}s` : ""}
                 </span>
+                <div className="flex rounded-lg overflow-hidden border border-white/[0.08]">
+                  {(["jpeg", "png"] as const).map(f => (
+                    <button key={f} onClick={() => setFrameFormat(f)} disabled={extracting}
+                      title={f === "png" ? "Lossless PNG — bigger files, exact pixels" : "JPEG 92% — small, visually transparent"}
+                      className={`px-2.5 py-1 text-[11px] font-mono uppercase transition-colors ${
+                        frameFormat === f ? "bg-white/15 text-white" : "text-slate-500 hover:text-white"}`}>
+                      {f === "jpeg" ? "JPG" : "PNG"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              )}
+              {extractMode !== "frames" && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500">Clip length</span>
+                {[1.5, 2, 3, 4, 5].map(v => (
+                  <button key={v} onClick={() => setClipLen(v)} disabled={extracting}
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-mono transition-colors ${
+                      clipLen === v ? "bg-white/15 border-white/30 text-white" : "border-white/10 text-slate-500 hover:text-white"}`}>
+                    {v}s
+                  </button>
+                ))}
+                <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500 ml-1">every</span>
+                {[0, 5, 10, 15].map(v => (
+                  <button key={v} onClick={() => setClipEvery(v)} disabled={extracting}
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-mono transition-colors ${
+                      clipEvery === v ? "bg-white/15 border-white/30 text-white" : "border-white/10 text-slate-500 hover:text-white"}`}>
+                    {v === 0 ? "b2b" : `${v}s`}
+                  </button>
+                ))}
+                <div className="flex rounded-lg overflow-hidden border border-white/[0.08]">
+                  {(["mp4", "gif"] as const).map(f => (
+                    <button key={f} onClick={() => setClipFormat(f)} disabled={extracting}
+                      className={`px-2.5 py-1 text-[11px] font-mono uppercase transition-colors ${
+                        clipFormat === f ? "bg-white/15 text-white" : "text-slate-500 hover:text-white"}`}>
+                      {f}
+                    </button>
+                  ))}
+                </div>
+                <span className="px-2.5 py-1 rounded-lg border border-white/10 bg-white/[0.04] text-[11px] font-mono text-slate-300">
+                  ≈ {duration > 0 ? Math.min(40, Math.max(1, Math.ceil((duration - 0.9) / (clipEvery > 0 ? clipEvery : clipLen)))) : 0} clips
+                </span>
+              </div>
+              )}
+              <div className="flex items-center gap-2 flex-wrap">
                 <button onClick={extract} disabled={extracting}
                   className="px-4 py-1.5 rounded-lg bg-white/10 border border-white/25 text-[12px] font-bold text-white hover:bg-white/15 transition-all disabled:opacity-50 flex items-center gap-1.5">
                   {extracting ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
-                  {extracting ? `Extracting… ${Math.round(progress * 100)}%` : frames.length > 0 ? "Re-extract" : "Extract Frames"}
+                  {extracting
+                    ? (clipPhase ?? `Extracting… ${Math.round(progress * 100)}%`)
+                    : (frames.length > 0 || clips.length > 0) ? "Re-extract"
+                    : extractMode === "frames" ? "Extract Frames" : extractMode === "clips" ? "Extract Clips" : "Extract Both"}
                 </button>
                 <button onClick={() => { reset(); }} disabled={extracting}
                   className="px-2.5 py-1.5 rounded-lg border border-white/10 text-[11px] text-slate-500 hover:text-white transition-colors disabled:opacity-40">
-                  Change video
+                  Clear all
                 </button>
               </div>
             </div>
@@ -4412,11 +4756,12 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
           )}
 
           {/* Results */}
-          {frames.length > 0 && (
+          {(frames.length > 0 || clips.length > 0) && (
             <>
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500">{frames.length} frames · sort</span>
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500">
+                    {clips.length > 0 ? `${clips.length} clips` : ""}{clips.length > 0 && frames.length > 0 ? " · " : ""}{frames.length > 0 ? `${frames.length} frames` : ""} · sort</span>
                   {(["quality", "time"] as const).map(s => (
                     <button key={s} onClick={() => setSortBy(s)}
                       className={`px-2.5 py-1 rounded-lg border text-[11px] transition-colors ${
@@ -4436,7 +4781,13 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
                       </button>
                     ))}
                   </div>
-                  <button onClick={() => { setTileMode("select"); setSelected(new Set(shown.slice(0, 10).map(f => f.url))) }}
+                  <button onClick={() => {
+                    setTileMode("select")
+                    // Top 10 of the MIXED quality ranking — clips and frames together
+                    const ranked = [...clips.map(c => ({ url: c.url, norm: c.norm })), ...frames.map(f => ({ url: f.url, norm: f.norm }))]
+                      .sort((x, y) => y.norm - x.norm)
+                    setSelected(new Set(ranked.slice(0, 10).map(r => r.url)))
+                  }}
                     className="px-2.5 py-1 rounded-lg border border-white/10 text-[11px] text-slate-400 hover:text-white transition-colors">
                     Select top 10
                   </button>
@@ -4464,7 +4815,45 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
               </div>
 
               <div className="columns-2 sm:columns-3 lg:columns-4 gap-2">
-                {shown.map(f => {
+                {([
+                  ...clips.map(c => ({ kind: "clip" as const, t: c.t, norm: c.norm, c, f: null as ExtractedFrame | null })),
+                  ...shown.map(f => ({ kind: "frame" as const, t: f.t, norm: f.norm, c: null as ExtractedClip | null, f })),
+                ].sort((a, b) => sortBy === "quality" ? b.norm - a.norm : a.t - b.t)).map(item => {
+                  if (item.kind === "clip" && item.c) {
+                    const c = item.c
+                    const isSel = selected.has(c.url)
+                    return (
+                      <div key={c.url} className="relative group mb-2 break-inside-avoid">
+                        <button onClick={() => { if (tileMode === "select") toggleSel(c.url); else setViewingClip(c) }}
+                          title={tileMode === "select" ? "Toggle selection" : "Open large view"}
+                          className={`w-full rounded-lg overflow-hidden border-2 transition-all ${
+                            isSel ? "border-white ring-1 ring-white/40" : "border-transparent hover:border-white/30"}`}>
+                          {c.kind === "gif" ? (
+                            /* eslint-disable-next-line @next/next/no-img-element */
+                            <img src={c.url} alt="" className="w-full h-auto block" loading="lazy" decoding="async" />
+                          ) : (
+                            <video src={c.url} muted loop autoPlay playsInline preload="metadata" className="w-full h-auto block pointer-events-none" />
+                          )}
+                        </button>
+                        <span className={`absolute top-1 left-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold leading-none pointer-events-none ${scoreColor(c.norm)}`}>
+                          {c.norm}
+                        </span>
+                        <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-black/70 text-cyan-300 text-[9px] font-mono leading-none pointer-events-none uppercase">
+                          {c.kind} · {c.dur.toFixed(1)}s · {c.t.toFixed(1)}s
+                        </span>
+                        {isSel && (
+                          <span className="absolute top-1 right-1 w-4 h-4 rounded-full bg-white flex items-center justify-center pointer-events-none">
+                            <Check size={9} className="text-black" />
+                          </span>
+                        )}
+                        <a href={c.url} download={c.name}
+                          className="absolute bottom-1 right-1 p-1 rounded bg-black/70 text-slate-300 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity">
+                          <Download size={10} />
+                        </a>
+                      </div>
+                    )
+                  }
+                  const f = item.f!
                   const isSel = selected.has(f.url)
                   return (
                     <div key={f.url} className="relative group mb-2 break-inside-avoid">
@@ -4487,7 +4876,7 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
                         </span>
                       )}
                       {/* Download single frame */}
-                      <a href={f.url} download={`frame-${f.t.toFixed(2)}s.jpg`}
+                      <a href={f.url} download={`frame-${f.t.toFixed(2)}s.${f.blob.type === "image/png" ? "png" : "jpg"}`}
                         className="absolute bottom-1 right-1 p-1 rounded bg-black/70 text-slate-300 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity">
                         <Download size={10} />
                       </a>
@@ -4503,6 +4892,63 @@ function FrameExtractorModal({ onClose, onAddRefs, canUseLayers = false }: {
           )}
         </div>
       </div>
+      {/* Large clip viewer (View mode): the editor is image-only, so clips
+          get a playback popup with the same chrome — download / add-to-refs
+          actions included. stopPropagation keeps clicks off the frames
+          overlay's close-on-backdrop handler. */}
+      {viewingClip && (
+        <div className="fixed inset-0 z-[250] bg-black/90 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={e => { e.stopPropagation(); setViewingClip(null) }}>
+          <div className="relative isolate max-w-4xl w-full rounded-2xl border border-white/10 bg-[#070b14]/98 p-4 space-y-3"
+            onClick={e => e.stopPropagation()}>
+            <span
+              aria-hidden
+              className="absolute inset-0 pointer-events-none z-20"
+              style={{
+                borderRadius: 16,
+                padding: 1.5,
+                opacity: 0.55,
+                WebkitMask: "linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)",
+                WebkitMaskComposite: "xor",
+                mask: "linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)",
+                maskComposite: "exclude",
+              } as React.CSSProperties}
+            >
+              <span className="absolute -inset-[75%] animate-spin" style={{ background: SILVER_RIM_CONIC_PV2, animationDuration: "6s" }} />
+            </span>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] font-mono text-slate-400 truncate">
+                {viewingClip.name} · {viewingClip.kind.toUpperCase()} · {viewingClip.dur.toFixed(1)}s @ {viewingClip.t.toFixed(1)}s · quality {viewingClip.norm}
+              </p>
+              <button onClick={() => setViewingClip(null)} className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-white/[0.06] transition-colors shrink-0"><X size={15} /></button>
+            </div>
+            {viewingClip.kind === "gif" ? (
+              /* eslint-disable-next-line @next/next/no-img-element */
+              <img src={viewingClip.url} alt="" className="block mx-auto max-w-full rounded-xl" style={{ maxHeight: "min(68vh, 900px)" }} />
+            ) : (
+              <video src={viewingClip.url} controls autoPlay loop muted playsInline
+                className="block mx-auto max-w-full rounded-xl bg-black" style={{ maxHeight: "min(68vh, 900px)" }} />
+            )}
+            <div className="flex items-center justify-end gap-2">
+              <a href={viewingClip.url} download={viewingClip.name}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 text-[11px] text-slate-300 hover:text-white hover:bg-white/[0.06] transition-all">
+                <Download size={11} /> Download
+              </a>
+              <button
+                onClick={async () => {
+                  const c = viewingClip
+                  setViewingClip(null)
+                  await onAddRefs([new File([c.blob], c.name, { type: c.kind === "gif" ? "image/gif" : "video/mp4" })])
+                  setAddState("done")
+                  setTimeout(() => setAddState("idle"), 3000)
+                }}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-white/10 border border-white/25 text-[11px] font-bold text-white hover:bg-white/15 transition-all">
+                <Plus size={11} /> Add to Refs
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Full Edit Reference canvas on the tapped frame — Apply saves the
           flattened result into the refs library. The editor PORTALS to body,
           but React events still bubble through the REACT tree — without this

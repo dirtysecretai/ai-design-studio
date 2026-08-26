@@ -33,7 +33,25 @@ export async function POST(req: Request) {
 
   let dir: string | null = null
   try {
-    const buf = Buffer.from(await req.arrayBuffer())
+    // Two input modes:
+    //   application/json { url }  → server fetches from our own R2 (preferred:
+    //                               the client never downloads the GIF at all)
+    //   raw body                  → legacy direct upload from the file picker
+    let buf: Buffer
+    if ((req.headers.get('content-type') || '').includes('application/json')) {
+      const { url } = await req.json().catch(() => ({ url: '' }))
+      const publicBase = (process.env.R2_PUBLIC_URL || '').replace(/\/$/, '')
+      if (typeof url !== 'string' || !publicBase || !url.startsWith(`${publicBase}/`)) {
+        return NextResponse.json({ error: 'url must point at our own storage' }, { status: 400 })
+      }
+      const src = await fetch(url)
+      if (!src.ok) return NextResponse.json({ error: `Source fetch failed (${src.status})` }, { status: 502 })
+      const len = Number(src.headers.get('content-length') || 0)
+      if (len > MAX_GIF_BYTES) return NextResponse.json({ error: 'GIF too large (max 80MB)' }, { status: 413 })
+      buf = Buffer.from(await src.arrayBuffer())
+    } else {
+      buf = Buffer.from(await req.arrayBuffer())
+    }
     if (buf.length < 100) return NextResponse.json({ error: 'Empty upload' }, { status: 400 })
     if (buf.length > MAX_GIF_BYTES) return NextResponse.json({ error: 'GIF too large (max 80MB)' }, { status: 413 })
     // GIF magic: GIF87a / GIF89a

@@ -1,0 +1,10 @@
+{
+  "base_model_name": "fal-ai/wan-22-trainer",
+  "model_type": "WAN_2_2_FAL",
+  "training_method": "LORA",
+  "learning_rate": 0.0002,
+  "steps": 400,
+  "variant": "t2v-a14b",
+  "trigger_phrase": "",
+  "auto_scale_input": true
+}

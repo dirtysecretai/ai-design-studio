@@ -18,6 +18,10 @@ const nextConfig: NextConfig = {
   },
   outputFileTracingIncludes: {
     '/api/user/references/trim-video': ['./node_modules/ffmpeg-static/**'],
+    '/api/admin/frames-gif': ['./node_modules/ffmpeg-static/**'],
+    '/api/admin/frames-clips': ['./node_modules/ffmpeg-static/**'],
+    '/api/admin/dataset/thumb/[id]': ['./node_modules/ffmpeg-static/**'],
+    '/api/admin/dataset/preview/[id]': ['./node_modules/ffmpeg-static/**'],
   },
   // Routes importing lib/video-clip get their trace exploded to the ENTIRE
   // project dir (AI/ training junk, .git, uploads — 14GB locally, 401MB of

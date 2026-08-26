@@ -26,6 +26,41 @@ export async function GET(req: Request) {
     return NextResponse.json({ images: rows })
   }
 
+  // ?slim=1&bucketId=&mediaType=motion → the whole bucket, minimal fields.
+  // Powers the Slicing Studio library: client-side filter/sort/paginate with
+  // no per-page round trip.
+  if (searchParams.get('slim') === '1') {
+    const bid = parseInt(searchParams.get('bucketId') || '')
+    const EXTS = ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.m4v', '.gif']
+    const w: Prisma.GeneratedImageWhereInput = { isDeleted: false }
+    if (!isNaN(bid)) w.bucketImages = { some: { bucketId: bid } }
+    if (searchParams.get('mediaType') === 'motion') {
+      w.OR = EXTS.map(e => ({ imageUrl: { endsWith: e } }))
+    }
+    const rows = await prisma.generatedImage.findMany({
+      where: w,
+      select: { id: true, imageUrl: true, aspectRatio: true, createdAt: true, videoMetadata: true },
+      orderBy: { createdAt: 'desc' },
+      take: 5000,
+    })
+    return NextResponse.json({
+      items: rows.map(r => {
+        const m = (r.videoMetadata as Record<string, unknown> | null) ?? {}
+        const segs = [1, 2].filter(n => typeof m[`previewAnimUrl${n}`] === 'string').length + 1
+        return {
+          id: r.id,
+          url: r.imageUrl,
+          aspectRatio: r.aspectRatio,
+          createdAt: r.createdAt,
+          name: typeof m.originalFilename === 'string' ? m.originalFilename : null,
+          mime: typeof m.mimeType === 'string' ? m.mimeType : null,
+          dur: typeof m.durationSec === 'number' ? m.durationSec : null,
+          segs,
+        }
+      }),
+    })
+  }
+
   const isExport    = searchParams.get('export') === 'true'
   const page        = Math.max(1, parseInt(searchParams.get('page') || '1'))
   const isAll       = searchParams.get('all') === 'true'
@@ -75,6 +110,8 @@ export async function GET(req: Request) {
   const VIDEO_EXTS = ['.mp4', '.webm', '.mov', '.avi', '.mkv']
   if (mediaType === 'video') where.OR  = VIDEO_EXTS.map(e => ({ imageUrl: { endsWith: e } }))
   if (mediaType === 'image') where.AND = VIDEO_EXTS.map(e => ({ NOT: { imageUrl: { endsWith: e } } }))
+  // 'motion' = videos AND gifs — the Slicing Studio's sliceable set
+  if (mediaType === 'motion') where.OR = [...VIDEO_EXTS, '.gif'].map(e => ({ imageUrl: { endsWith: e } }))
 
   if (hasRefs === 'true')        where.referenceImageUrls = { isEmpty: false }
   else if (hasRefs === 'false') where.referenceImageUrls = { isEmpty: true }

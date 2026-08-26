@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input"
 import {
   MessageSquare, Wrench, Image as ImageIcon, Sparkles, Tag,
   Users, CreditCard, ListOrdered, FlaskConical, Home, LayoutDashboard,
-  LogOut, ChevronRight, ShieldOff, Loader2, Shield, FileText, HardDrive, Database, Brain, ClipboardCheck, PackageOpen, Telescope, ShieldAlert, ShieldCheck } from "lucide-react"
+  LogOut, ChevronRight, ShieldOff, Loader2, Shield, FileText, HardDrive, Database, Brain, ClipboardCheck, PackageOpen, Telescope, ShieldAlert, ShieldCheck, Film } from "lucide-react"
 import { SiteBrandHero, SiteLogoBox } from "@/components/SitePageHeader"
 
 const TOOL_PAGES = [
@@ -33,6 +33,7 @@ const TOOL_PAGES = [
       { name: "OneTrainer",         description: "Fine-tune models with OneTrainer",      href: "/admin/onetrainer",     icon: Brain },
       { name: "LoRA Training",      description: "FAL trainers - Flux, Wan 2.2, LTX-2",   href: "/admin/lora-training",  icon: Sparkles, badge: "training" },
       { name: "Upscaler Training",  description: "Train ESRGAN / DRCT upscalers",         href: "/admin/upscaler",       icon: Telescope },
+      { name: "Slicing Studio",     description: "Cut stored videos into frames & clips", href: "/admin/slicing-studio", icon: Film },
     ]
   },
   {

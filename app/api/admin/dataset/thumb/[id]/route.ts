@@ -3,6 +3,16 @@ import { after } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { uploadToR2 } from '@/lib/r2'
 import sharp from 'sharp'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import ffmpegPath from 'ffmpeg-static'
+import { probeDuration } from '@/lib/video-clip'
+import { mkdtemp, readFile, rm } from 'fs/promises'
+import { tmpdir } from 'os'
+import path from 'path'
+
+export const maxDuration = 60
+const execP = promisify(execFile)
 
 // GET /api/admin/dataset/thumb/[id]
 // Serves a 400px webp thumbnail for a dataset image.
@@ -32,13 +42,55 @@ export async function GET(
     })
   }
 
-  // Videos: serve the recorded poster thumbnail when one exists (video items
-  // otherwise render as broken "?" tiles in the composer grids)
+  // Videos: serve the recorded poster thumbnail when one exists; when none
+  // does (Slicing Studio uploads arrive posterless), GENERATE one — ffmpeg
+  // reads the R2 URL directly with a fast seek, so no full download. The
+  // write-behind below persists it, so this cost is paid once per video.
   let srcUrl = image.imageUrl
   if (/\.(mp4|webm|mov|avi|mkv)$/i.test(srcUrl)) {
     const poster = (image.videoMetadata as Record<string, unknown> | null)?.thumbnailUrl
-    if (typeof poster === 'string' && /^https?:\/\//.test(poster)) srcUrl = poster
-    else return new NextResponse('Not an image', { status: 404 })
+    if (typeof poster === 'string' && /^https?:\/\//.test(poster)) {
+      srcUrl = poster
+    } else {
+      let dir: string | null = null
+      try {
+        const dur = await probeDuration(srcUrl)
+        const at = dur && dur > 0.4 ? dur / 2 : 0
+        dir = await mkdtemp(path.join(tmpdir(), 'ds-thumb-'))
+        const outJpg = path.join(dir, 'poster.jpg')
+        await execP(ffmpegPath as string, [
+          '-hide_banner', '-y',
+          '-ss', at.toFixed(3),
+          '-i', srcUrl,
+          '-frames:v', '1',
+          '-q:v', '3',
+          outJpg,
+        ], { timeout: 45_000 })
+        const jpg = await readFile(outJpg)
+        const thumb = await sharp(jpg)
+          .resize({ width: 400, withoutEnlargement: true })
+          .webp({ quality: 78 })
+          .toBuffer()
+        after(async () => {
+          try {
+            const url = await uploadToR2(`thumbnails/dataset/${imageId}.webp`, thumb, 'image/webp')
+            await prisma.generatedImage.update({ where: { id: imageId }, data: { thumbnailUrl: url } })
+          } catch { /* best effort — next request regenerates */ }
+        })
+        return new NextResponse(new Uint8Array(thumb), {
+          status: 200,
+          headers: {
+            'Content-Type': 'image/webp',
+            'Cache-Control': 'public, max-age=604800, s-maxage=604800, immutable',
+          },
+        })
+      } catch (err) {
+        console.error('Dataset video-thumb error:', err instanceof Error ? err.message : err)
+        return new NextResponse('Poster generation failed', { status: 502 })
+      } finally {
+        if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {})
+      }
+    }
   }
 
   try {
