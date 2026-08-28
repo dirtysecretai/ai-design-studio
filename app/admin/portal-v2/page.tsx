@@ -549,7 +549,8 @@ interface VideoModelConfig {
   supportsSD20Modes?: boolean      // SeeDance 2.0 — shows T2V/I2V/Ref mode switcher inside panel
   supportsLipsync?: boolean        // Lipsync v3 — takes video + audio, no prompt
   startFrameLocksAspect?: boolean  // when a start frame is provided, aspect ratio is ignored by the model
-  videoModes?: ("t2v" | "i2v" | "r2v" | "edit")[] // renders the per-model mode switcher (Gemini Omni Flash)
+  videoModes?: ("t2v" | "i2v" | "r2v" | "edit")[] // legacy per-model mode switcher (no longer used)
+  supportsVideoExtend?: boolean // a video in the refs panel continues/edits it (Flux 3 extend, Omni edit)
 }
 
 interface VideoItem {
@@ -701,7 +702,9 @@ const VIDEO_MODEL_CONFIGS: VideoModelConfig[] = [
     supportsEndFrame: false,
     audioType: "none", // audio is native — the model has no generate_audio knob
     textToVideo: true,
-    videoModes: ["t2v", "i2v", "r2v", "edit"],
+    // Unified refs panel: images → i2v / r2v, a video → edit. No mode buttons.
+    supportsReferenceVideo: true,
+    supportsVideoExtend: true,
   },
   {
     // ADMIN ONLY — Wan 2.2 A14B with custom trained LoRAs (the video-loras
@@ -715,6 +718,40 @@ const VIDEO_MODEL_CONFIGS: VideoModelConfig[] = [
     supportsEndFrame: false,
     audioType: "none",
     textToVideo: true,
+  },
+  {
+    // ADMIN ONLY (testing) — minimax/h3-max/{image,text}-to-video.
+    // Schema: prompt required; duration 5-15s; resolution 480P/768P; optional
+    // end frame; aspect_ratio only applies to text-to-video, since a start
+    // image already fixes the framing. No audio track and no reference images.
+    id: "minimax-h3-max",
+    name: "MiniMax H3 Max",
+    durations: ["5","6","7","8","9","10","11","12","13","14","15"],
+    resolutions: ["480p", "768p"],
+    aspectRatios: ["21:9","16:9","4:3","1:1","3:4","9:16"],
+    supportsEndFrame: true,
+    audioType: "none",
+    textToVideo: true,
+  },
+  {
+    // ADMIN ONLY (testing) — blackforestlabs/flux-3/*. One entry covers five
+    // endpoints, chosen by which inputs are filled:
+    //   text        → text-to-video
+    //   image       → image-to-video   (+ end frame → first-last-frame)
+    //   references  → keyframes-to-video, images pinned across the timeline
+    //   edit        → extend-video, continues an existing clip
+    // Native audio via generate_audio, so the audio toggle applies.
+    id: "flux-3",
+    name: "Flux 3",
+    durations: ["auto","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20"],
+    resolutions: ["720p", "1080p"],
+    aspectRatios: ["auto","21:9","2:1","16:9","4:3","1:1","3:4","9:16"],
+    supportsEndFrame: true,
+    audioType: "toggle",
+    textToVideo: true,
+    // Unified refs panel: images → image/first-last/keyframes, a video → extend
+    supportsReferenceVideo: true,
+    supportsVideoExtend: true,
   },
   {
     id: "lipsync-v3",
@@ -734,6 +771,22 @@ const VIDEO_MODEL_CONFIGS: VideoModelConfig[] = [
   },
 ]
 const VIDEO_MODELS = VIDEO_MODEL_CONFIGS.map(m => m.name)
+
+// GIFs as video references: providers only accept real video, and a GIF will
+// not even load in a <video> element for the client-side duration checks.
+// Convert to MP4 first, then the normal upload path applies unchanged.
+async function asVideoFile(file: File): Promise<File | null> {
+  if (!/\.gif$/i.test(file.name) && file.type !== "image/gif") return file
+  try {
+    const res = await fetch("/api/admin/gif-to-video", { method: "POST", body: file })
+    const data = await res.json()
+    if (!res.ok || !data.url) throw new Error(data.error || "GIF conversion failed")
+    const mp4 = await (await fetch(data.url)).blob()
+    return new File([mp4], file.name.replace(/\.gif$/i, "") + ".mp4", { type: "video/mp4" })
+  } catch {
+    return null
+  }
+}
 
 // Cost tier indicators — $ cheap · $$ mid · $$$ expensive
 const IMAGE_MODEL_COST: Record<string, "$" | "$$" | "$$$" | "$$$+"> = {
@@ -773,6 +826,8 @@ const VIDEO_MODEL_COST: Record<string, "$" | "$$" | "$$$" | "$$$+"> = {
   "seedance-2.0":       "$$$+",
   "kling-v3":           "$$$",
   "happy-horse":        "$$",
+  "minimax-h3-max":     "$$",
+  "flux-3":             "$$$",
   "flux-1-dev":         "$$",
   "z-image-base":       "$$",
   "z-image-turbo":      "$",
@@ -829,9 +884,11 @@ const VIDEO_MODEL_GROUPS = [
 const ADMIN_VIDEO_MODEL_GROUPS = [
   { label: "Google", type: "text · image · ref · edit to video · pricing TBD", accent: "text-blue-400", dot: "bg-blue-400", items: ["Gemini Omni Flash"] },
   { label: "Wan",    type: "image & text to video · pricing TBD",             accent: "text-violet-400", dot: "bg-violet-400", items: ["Wan 2.7", "Wan 2.2 LoRA"] },
+  { label: "MiniMax", type: "image & text to video · pricing TBD",            accent: "text-rose-400",   dot: "bg-rose-400",   items: ["MiniMax H3 Max"] },
+  { label: "Black Forest Labs", type: "text · image · keyframes · extend · with audio · pricing TBD", accent: "text-amber-400", dot: "bg-amber-400", items: ["Flux 3"] },
 ]
 // Model ids only admins may see/select in the video UI (also gated server-side)
-const ADMIN_VIDEO_MODEL_IDS = new Set(["gemini-omni-flash", "wan-2.7", "wan-2.2-lora"])
+const ADMIN_VIDEO_MODEL_IDS = new Set(["gemini-omni-flash", "wan-2.7", "wan-2.2-lora", "minimax-h3-max", "flux-3"])
 
 // ── Wan 2.2 custom-LoRA picker (admin) ─────────────────────────────────────
 // Runs come from /api/admin/video-loras (training/video-loras/<run>/run.json).
@@ -909,7 +966,7 @@ function WanLoraPicker({ runs, sel, onSelect }: {
 // Flagship models — their rows in the model dropdowns get the animated silver rim
 const SILVER_RIM_MODELS = new Set([
   "NanoBanana Pro 2", "ChatGPT Images 2.0", "Recraft v4.1",          // image
-  "SeeDance 2.0", "Kling 3.0", "Wan 2.7", "Gemini Omni Flash",       // video
+  "SeeDance 2.0", "Kling 3.0", "Wan 2.7", "Gemini Omni Flash", "Flux 3",  // video
 ])
 const SILVER_RIM_CONIC =
   "conic-gradient(from 0deg, rgba(226,232,240,0.1), #f8fafc, #94a3b8, rgba(226,232,240,0.15), #cbd5e1, #64748b, rgba(226,232,240,0.1))"
@@ -20458,7 +20515,12 @@ function SD20RefPanel({
   const totalFiles = videoRefImagePreviews.length + videoRefVideoFilenames.length + videoRefAudioFilenames.length
   const filesLeft = (9 + maxVideos + maxAudios) - totalFiles
 
-  function handleVideoFile(file: File) {
+  async function handleVideoFile(rawFile: File) {
+    const isGif = /\.gif$/i.test(rawFile.name) || rawFile.type === "image/gif"
+    if (isGif) setRefError("Converting GIF…")
+    const file = await asVideoFile(rawFile)
+    if (!file) { setRefError(`"${rawFile.name}" could not be converted to video — try re-exporting the GIF.`); return }
+    if (isGif) setRefError(null)
     const objUrl = URL.createObjectURL(file)
     const vid = document.createElement("video")
     vid.preload = "metadata"
@@ -20565,7 +20627,7 @@ function SD20RefPanel({
             </button>
           )}
         </div>
-        <input ref={vidInputRef} type="file" accept="video/*" className="hidden"
+        <input ref={vidInputRef} type="file" accept="video/*,image/gif" className="hidden"
           onChange={e => { const f = e.target.files?.[0]; if (f) { e.target.value = ""; handleVideoFile(f) } }} />
         {videoRefVideoFilenames.length > 0 ? (
           <div className="space-y-1">
@@ -20798,7 +20860,9 @@ function VideoCustomizationPanel({
     vid.src = objectUrl
   }
 
-  function handleEditSourceFile(file: File) {
+  async function handleEditSourceFile(rawFile: File) {
+    const file = await asVideoFile(rawFile)
+    if (!file) return
     const objectUrl = URL.createObjectURL(file)
     const vid = document.createElement("video")
     vid.preload = "metadata"
@@ -21135,7 +21199,7 @@ function VideoCustomizationPanel({
                 Source Video <span className="text-orange-400/70">*</span>
               </p>
               <p className="text-[10px] text-slate-600 leading-snug">The video to edit/restyle — output duration follows the source</p>
-              <input ref={editSrcRef} type="file" accept="video/*" className="hidden"
+              <input ref={editSrcRef} type="file" accept="video/*,image/gif" className="hidden"
                 onChange={e => { const f = e.target.files?.[0]; if (f) { e.target.value = ""; handleEditSourceFile(f) } }} />
               {editSourceFilename ? (
                 <div className={`relative rounded-lg overflow-hidden flex items-center gap-3 px-3 py-3 border ${editSourceUploading ? "bg-slate-900/80 border-white/10" : "bg-white/5 border-white/10"}`}>
@@ -21408,6 +21472,19 @@ function VideoCustomizationPanel({
 // metadata loads. Stored aspectRatio is unreliable (the save path hardcoded 16:9
 // for every video, and i2v "auto" is unknowable before generation), so Full Size
 // tiles measure the actual file instead of trusting the DB.
+const FEED_PLAY_CAP = 8
+const feedPlaying: { el: HTMLVideoElement; stop: () => void }[] = []
+function claimPlayback(el: HTMLVideoElement, stop: () => void) {
+  const dup = feedPlaying.findIndex(x => x.el === el)
+  if (dup >= 0) feedPlaying.splice(dup, 1)
+  feedPlaying.push({ el, stop })
+  while (feedPlaying.length > FEED_PLAY_CAP) feedPlaying.shift()?.stop()
+}
+function releasePlayback(el: HTMLVideoElement) {
+  const i = feedPlaying.findIndex(x => x.el === el)
+  if (i >= 0) feedPlaying.splice(i, 1)
+}
+
 function VideoTile({ natural, initialAspect, className, onClick, videoSrc, videoClassName, preload, autoplay = false, silverRim = false, children }: {
   natural: boolean
   initialAspect: string
@@ -21438,11 +21515,16 @@ function VideoTile({ natural, initialAspect, className, onClick, videoSrc, video
     if (!autoplay) { v.pause(); return }
     v.muted = true
     const obs = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) v.play().catch(() => {})
-      else v.pause()
+      if (entry.isIntersecting) {
+        claimPlayback(v, () => v.pause())
+        v.play().catch(() => {})
+      } else {
+        releasePlayback(v)
+        v.pause()
+      }
     }, { rootMargin: "100px" })
     obs.observe(v)
-    return () => { obs.disconnect(); v.pause() }
+    return () => { obs.disconnect(); releasePlayback(v); v.pause() }
   }, [autoplay])
 
   const tile = (
@@ -22064,9 +22146,11 @@ function VideoPromptBar({
   isAdminAccount = false,
   cardMedia,
   promptScale = 1,
+  onPromptChange,
 }: {
   model: VideoModelConfig
   onGenerate: (prompt: string) => void
+  onPromptChange?: (text: string) => void
   generating: boolean
   canGenerate: boolean
   queueFull: boolean
@@ -22096,7 +22180,15 @@ function VideoPromptBar({
   // Feed -> Prompt Box Size (zoom on the inner layout containers)
   promptScale?: number
 }) {
-  const [prompt, setPrompt] = useState("")
+  const [prompt, setPromptRaw] = useState("")
+  // Mirror every keystroke up to the page so the saved draft stays current
+  const setPrompt = (v: string | ((p: string) => string)) => {
+    setPromptRaw(prev => {
+      const next = typeof v === "function" ? (v as (p: string) => string)(prev) : v
+      onPromptChange?.(next)
+      return next
+    })
+  }
   const [modelOpen, setModelOpen] = useState(false)
   const startFrameInputRef = useRef<HTMLInputElement>(null)
   const motionVideoInputRef = useRef<HTMLInputElement>(null)
@@ -22182,7 +22274,7 @@ function VideoPromptBar({
             />
             <input
               ref={motionVideoInputRef}
-              type="file" accept="video/*" className="hidden"
+              type="file" accept="video/*,image/gif" className="hidden"
               onChange={e => {
                 const f = e.target.files?.[0]
                 if (!f) return
@@ -23576,7 +23668,7 @@ export default function PortalV2Page() {
   // heavier, may reload the tab on very long scrolls)
   const [feedTileRes, setFeedTileRes] = useState<"thumb" | "full">("thumb")
   // Video feed: autoplay tiles while visible (muted + looping)
-  const [feedVideoAutoplay, setFeedVideoAutoplay] = useState(false)
+  const [feedVideoAutoplay, setFeedVideoAutoplay] = useState(true)
   // Taskbar size — CSS zoom on the whole top taskbar (1x default)
   const [feedTaskbarScale, setFeedTaskbarScale] = useState<1 | 1.5>(1)
   // Prompt box size — CSS zoom on the composer bars (image + video)
@@ -23644,7 +23736,9 @@ export default function PortalV2Page() {
       // from before the options were removed are ignored (not restored)
       const tr = localStorage.getItem("pv2-feed-tile-res")
       if (tr === "thumb" || tr === "full") setFeedTileRes(tr)
-      if (localStorage.getItem("pv2-feed-video-autoplay") === "true") setFeedVideoAutoplay(true)
+      // Absent = use the default (on); an explicit choice always wins
+      const ap = localStorage.getItem("pv2-feed-video-autoplay")
+      if (ap !== null) setFeedVideoAutoplay(ap === "true")
       if (localStorage.getItem("pv2-feed-borders") === "true") setFeedTileBorders(true)
       const ts = parseFloat(localStorage.getItem("pv2-taskbar-scale") || "")
       if (ts === 1.5) setFeedTaskbarScale(ts)
@@ -23951,6 +24045,17 @@ export default function PortalV2Page() {
   const [wan25VideoSafetyChecker, setWan25VideoSafetyChecker] = useState(false)
   const [seedance15VideoSafetyChecker, setSeedance15VideoSafetyChecker] = useState(false)
   const [wan27VideoSafetyChecker, setWan27VideoSafetyChecker] = useState(false)
+  // New models default to the checker ON; admins can switch it off per run
+  const [h3MaxVideoSafetyChecker, setH3MaxVideoSafetyChecker] = useState(true)
+  // ── Video composer draft: everything you have set up, saved against the
+  // ACCOUNT (User.portalPreferences) rather than the browser, so a refresh —
+  // or a different device signed into the same account — picks up where you
+  // left off. Uploads are already on R2, so only their URLs travel.
+  const [videoPromptText, setVideoPromptText] = useState("")
+  const videoDraftReady = useRef(false)          // never save before the first load
+  const videoDraftSavedAt = useRef(0)            // newest draft this tab knows about
+  const videoDraftTouched = useRef(0)            // when the user last changed something
+  const [flux3VideoSafetyChecker, setFlux3VideoSafetyChecker] = useState(true)
   // Wan 2.2 custom-LoRA serving (admin): trained runs + current selection
   const [videoLoraRuns, setVideoLoraRuns] = useState<VideoLoraRun[] | null>(null)
   const [videoLoraSel, setVideoLoraSel] = useState<VideoLoraSel | null>(null)
@@ -24470,15 +24575,19 @@ export default function PortalV2Page() {
     const isLipsync = !!selectedVideoModel.supportsLipsync
     const isOmni = !!selectedVideoModel.videoModes
     const isSD20 = !!selectedVideoModel.supportsSD20Modes
-    const sd20NeedsImage = (isSD20 || isOmni) && videoSD20Mode === "i2v"
+    const sd20NeedsImage = (isSD20 || isOmni) && videoSD20Mode === "i2v" && !selectedVideoModel.supportsReferenceVideo
     const isTextToVideo = !!selectedVideoModel.textToVideo && !sd20NeedsImage
     if (!videoStartFrameUrl && !isTextToVideo && !isLipsync) return
     if (isMotion && !videoMotionVideoUrl) return
     if (isLipsync && (!videoLipsyncVideoUrl || !videoLipsyncAudioUrl)) return
     // Wan 2.7 i2v: prompt is optional when a start image is present (fal schema)
-    if (!isMotion && !isLipsync && !promptText.trim() && !(selectedVideoModel.id === "wan-2.7" && videoStartFrameUrl)) return
-    if (isOmni && videoSD20Mode === "edit" && !videoEditSourceUrl) { alert("Upload the video to edit first"); return }
-    if (isOmni && videoSD20Mode === "r2v" && videoRefImageUrls.filter(Boolean).length === 0) { alert("Add at least one reference image"); return }
+    // Say why nothing happened instead of returning silently — a dead Generate
+    // button is indistinguishable from a broken one
+    if (!isMotion && !isLipsync && !promptText.trim() && !(selectedVideoModel.id === "wan-2.7" && videoStartFrameUrl)) {
+      alert("Add a prompt before generating.")
+      return
+    }
+
     if (isMotion && videoCharacterOrientation === "image" && videoMotionVideoDuration !== null && videoMotionVideoDuration > 10) {
       alert(`Reference video is ${Math.round(videoMotionVideoDuration)}s. For "Image" character orientation, FAL requires the video to be 10 seconds or shorter. Please upload a shorter clip or switch orientation to "Video".`)
       return
@@ -24488,26 +24597,34 @@ export default function PortalV2Page() {
     // 1 image (or a tagged start+end pair, images only) fits fal's i2v endpoint
     // (image_url / end_image_url); anything more goes to r2v, where frame roles are
     // bound in the prompt via @ImageN tags (the r2v schema has no frame params).
-    const isSD20Ref = !!selectedVideoModel.supportsReferenceVideo && !isOmni
+    const isSD20Ref = !!selectedVideoModel.supportsReferenceVideo
     let sdMode: "t2v" | "i2v" | "r2v" | "edit" | undefined = (isSD20 || isOmni) ? videoSD20Mode : undefined
     let sdImageUrl: string | null = videoStartFrameUrl
     let sdEndImageUrl: string | undefined = videoEndFrameUrl || undefined
     let sdPrompt = promptText
     let sdRefImageUrls: string[] = videoRefImageUrls.filter(Boolean) as string[]
+    let sdEditVideoUrl: string | null = videoEditSourceUrl
     if (isSD20Ref) {
       const imgs = videoRefImageUrls
         .map((u, i) => ({ u, i }))
         .filter((e): e is { u: string; i: number } => !!e.u)
       const vids = videoRefVideoUrls.filter(Boolean) as string[]
       const auds = videoRefAudioUrls.filter(Boolean) as string[]
-      if (imgs.length === 0 && vids.length === 0 && auds.length > 0) {
+      // Models that continue a clip treat a single video reference as the
+      // source to extend rather than as a style reference
+      if (selectedVideoModel.supportsVideoExtend && vids.length > 0) {
+        sdMode = "edit"; sdImageUrl = null; sdEndImageUrl = undefined
+        sdEditVideoUrl = vids[0]
+      } else if (imgs.length === 0 && vids.length === 0 && auds.length > 0) {
         alert("Audio references need at least one image or video reference too")
         return
       }
       const startPos = videoRefStartIdx === null ? -1 : imgs.findIndex(e => e.i === videoRefStartIdx)
       const endPos = videoRefEndIdx === null ? -1 : imgs.findIndex(e => e.i === videoRefEndIdx)
       const imagesOnly = vids.length === 0 && auds.length === 0
-      if (imagesOnly && imgs.length === 0) {
+      if (sdMode === "edit") {
+        /* already resolved above */
+      } else if (imagesOnly && imgs.length === 0) {
         sdMode = "t2v"; sdImageUrl = null; sdEndImageUrl = undefined
       } else if (imagesOnly && imgs.length === 1 && endPos === -1) {
         // A single image is the start frame → classic i2v
@@ -24560,9 +24677,9 @@ export default function PortalV2Page() {
             referenceAudioUrls:    videoRefAudioUrls.filter(Boolean) as string[],
             referenceVideoDurationSec: videoRefVideoDuration,
           }),
-          // Gemini Omni Flash edit (video-to-video)
-          ...(isOmni && videoSD20Mode === "edit" && {
-            editVideoUrl:          videoEditSourceUrl,
+          // Extend / edit source video (inferred from the refs panel)
+          ...(sdMode === "edit" && {
+            editVideoUrl:          sdEditVideoUrl,
             editVideoDurationSec:  videoEditSourceDuration,
           }),
           // Lipsync v3
@@ -24575,6 +24692,8 @@ export default function PortalV2Page() {
           ...(selectedVideoModel.id === "wan-2.5" ? { wan25SafetyChecker: wan25VideoSafetyChecker } : {}),
           ...(selectedVideoModel.id === "seedance-1.5" ? { seedance15SafetyChecker: seedance15VideoSafetyChecker } : {}),
           ...(selectedVideoModel.id === "wan-2.7" ? { wan27SafetyChecker: wan27VideoSafetyChecker } : {}),
+          ...(selectedVideoModel.id === "minimax-h3-max" ? { h3MaxSafetyChecker: h3MaxVideoSafetyChecker } : {}),
+          ...(selectedVideoModel.id === "flux-3" ? { flux3SafetyChecker: flux3VideoSafetyChecker } : {}),
           ...(selectedVideoModel.id === "wan-2.2-lora"
             ? { loras: videoLoraSel ? [{ path: videoLoraSel.path, scale: videoLoraSel.scale, transformer: videoLoraSel.transformer }] : [] }
             : {}),
@@ -24636,7 +24755,7 @@ export default function PortalV2Page() {
     } finally {
       setVideoGenerating(false)
     }
-  }, [videoStartFrameUrl, videoEndFrameUrl, videoDuration, videoResolution, videoAspectRatio, videoAudioEnabled, videoAudioUrl, selectedVideoModel, videoMotionVideoUrl, videoCharacterOrientation, videoKeepOriginalSound, videoMotionVideoDuration, videoSD20Mode, videoRefImageUrls, videoRefVideoUrls, videoRefAudioUrls, videoRefVideoDuration, videoRefStartIdx, videoRefEndIdx, videoLipsyncVideoUrl, videoLipsyncAudioUrl, videoLipsyncSyncMode, videoLipsyncVideoDuration, wan25VideoSafetyChecker, seedance15VideoSafetyChecker, wan27VideoSafetyChecker, videoEditSourceUrl, videoEditSourceDuration])
+  }, [videoStartFrameUrl, videoEndFrameUrl, videoDuration, videoResolution, videoAspectRatio, videoAudioEnabled, videoAudioUrl, selectedVideoModel, videoMotionVideoUrl, videoCharacterOrientation, videoKeepOriginalSound, videoMotionVideoDuration, videoSD20Mode, videoRefImageUrls, videoRefVideoUrls, videoRefAudioUrls, videoRefVideoDuration, videoRefStartIdx, videoRefEndIdx, videoLipsyncVideoUrl, videoLipsyncAudioUrl, videoLipsyncSyncMode, videoLipsyncVideoDuration, wan25VideoSafetyChecker, seedance15VideoSafetyChecker, wan27VideoSafetyChecker, h3MaxVideoSafetyChecker, flux3VideoSafetyChecker, videoEditSourceUrl, videoEditSourceDuration])
 
   const applyVideoModel = useCallback((model: VideoModelConfig) => {
     setSelectedVideoModel(model)
@@ -24688,6 +24807,158 @@ export default function PortalV2Page() {
     setVideoEditSourceUrl(null)
     setVideoEditSourceDuration(0)
   }, [videoStartFramePreview])
+
+  // Collect the draft. Kept explicit rather than clever so it is obvious what
+  // does and does not survive a refresh.
+  const buildVideoDraft = useCallback(() => ({
+    v: 1,
+    savedAt: Date.now(),
+    modelId: selectedVideoModel.id,
+    prompt: videoPromptText,
+    duration: videoDuration,
+    resolution: videoResolution,
+    aspectRatio: videoAspectRatio,
+    audioEnabled: videoAudioEnabled,
+    audioUrl: videoAudioUrl,
+    startFrameUrl: videoStartFrameUrl,
+    endFrameUrl: videoEndFrameUrl,
+    refImageUrls: videoRefImageUrls,
+    refVideoUrls: videoRefVideoUrls,
+    refVideoFilenames: videoRefVideoFilenames,
+    refAudioUrls: videoRefAudioUrls,
+    refAudioFilenames: videoRefAudioFilenames,
+    refVideoDuration: videoRefVideoDuration,
+    refStartIdx: videoRefStartIdx,
+    refEndIdx: videoRefEndIdx,
+    motionVideoUrl: videoMotionVideoUrl,
+    motionVideoDuration: videoMotionVideoDuration,
+    characterOrientation: videoCharacterOrientation,
+    keepOriginalSound: videoKeepOriginalSound,
+    lipsyncVideoUrl: videoLipsyncVideoUrl,
+    lipsyncAudioUrl: videoLipsyncAudioUrl,
+    lipsyncSyncMode: videoLipsyncSyncMode,
+    lipsyncVideoDuration: videoLipsyncVideoDuration,
+    editSourceUrl: videoEditSourceUrl,
+    editSourceDuration: videoEditSourceDuration,
+    safety: {
+      wan25: wan25VideoSafetyChecker,
+      seedance15: seedance15VideoSafetyChecker,
+      wan27: wan27VideoSafetyChecker,
+      h3Max: h3MaxVideoSafetyChecker,
+      flux3: flux3VideoSafetyChecker,
+    },
+  }), [selectedVideoModel, videoPromptText, videoDuration, videoResolution, videoAspectRatio,
+      videoAudioEnabled, videoAudioUrl, videoStartFrameUrl, videoEndFrameUrl, videoRefImageUrls,
+      videoRefVideoUrls, videoRefVideoFilenames, videoRefAudioUrls, videoRefAudioFilenames,
+      videoRefVideoDuration, videoRefStartIdx, videoRefEndIdx, videoMotionVideoUrl,
+      videoMotionVideoDuration, videoCharacterOrientation, videoKeepOriginalSound,
+      videoLipsyncVideoUrl, videoLipsyncAudioUrl, videoLipsyncSyncMode, videoLipsyncVideoDuration,
+      videoEditSourceUrl, videoEditSourceDuration, wan25VideoSafetyChecker,
+      seedance15VideoSafetyChecker, wan27VideoSafetyChecker, h3MaxVideoSafetyChecker,
+      flux3VideoSafetyChecker])
+
+  // Apply a draft from the server. Sets the model directly rather than through
+  // applyVideoModel, which deliberately clears uploads on a model switch.
+  const applyVideoDraft = useCallback((d: Record<string, unknown>) => {
+    if (!d || typeof d !== "object") return
+    const model = VIDEO_MODEL_CONFIGS.find(m => m.id === d.modelId)
+    if (model) setSelectedVideoModel(model)
+    const str = (k: string, fb = "") => typeof d[k] === "string" ? d[k] as string : fb
+    const arr = (k: string) => Array.isArray(d[k]) ? d[k] as string[] : []
+    const num = (k: string) => typeof d[k] === "number" ? d[k] as number : 0
+    if (typeof d.prompt === "string") {
+      setVideoPromptText(d.prompt)
+      setVideoPromptOverride({ text: d.prompt, version: Date.now() })
+    }
+    if (d.duration) setVideoDuration(str("duration", "5"))
+    if (d.resolution) setVideoResolution(str("resolution", "720p"))
+    if (d.aspectRatio) setVideoAspectRatio(str("aspectRatio", "16:9"))
+    setVideoAudioEnabled(d.audioEnabled === true)
+    setVideoAudioUrl(typeof d.audioUrl === "string" ? d.audioUrl : null)
+    // Uploads live on R2, so the stored URL doubles as the preview
+    setVideoStartFrameUrl(typeof d.startFrameUrl === "string" ? d.startFrameUrl : null)
+    setVideoStartFramePreview(typeof d.startFrameUrl === "string" ? d.startFrameUrl : null)
+    setVideoEndFrameUrl(typeof d.endFrameUrl === "string" ? d.endFrameUrl : null)
+    setVideoEndFramePreview(typeof d.endFrameUrl === "string" ? d.endFrameUrl : null)
+    setVideoRefImageUrls(arr("refImageUrls"))
+    setVideoRefImagePreviews(arr("refImageUrls"))
+    setVideoRefVideoUrls(arr("refVideoUrls"))
+    setVideoRefVideoFilenames(arr("refVideoFilenames"))
+    setVideoRefAudioUrls(arr("refAudioUrls"))
+    setVideoRefAudioFilenames(arr("refAudioFilenames"))
+    setVideoRefVideoDuration(num("refVideoDuration"))
+    setVideoRefStartIdx(typeof d.refStartIdx === "number" ? d.refStartIdx : null)
+    setVideoRefEndIdx(typeof d.refEndIdx === "number" ? d.refEndIdx : null)
+    setVideoMotionVideoUrl(typeof d.motionVideoUrl === "string" ? d.motionVideoUrl : null)
+    setVideoMotionVideoPreview(typeof d.motionVideoUrl === "string" ? d.motionVideoUrl : null)
+    setVideoMotionVideoDuration(typeof d.motionVideoDuration === "number" ? d.motionVideoDuration : null)
+    if (d.characterOrientation === "image" || d.characterOrientation === "video") setVideoCharacterOrientation(d.characterOrientation)
+    setVideoKeepOriginalSound(d.keepOriginalSound !== false)
+    setVideoLipsyncVideoUrl(typeof d.lipsyncVideoUrl === "string" ? d.lipsyncVideoUrl : null)
+    setVideoLipsyncAudioUrl(typeof d.lipsyncAudioUrl === "string" ? d.lipsyncAudioUrl : null)
+    setVideoLipsyncVideoDuration(num("lipsyncVideoDuration"))
+    setVideoEditSourceUrl(typeof d.editSourceUrl === "string" ? d.editSourceUrl : null)
+    setVideoEditSourceDuration(num("editSourceDuration"))
+    const safety = (d.safety ?? {}) as Record<string, unknown>
+    if (typeof safety.wan25 === "boolean") setWan25VideoSafetyChecker(safety.wan25)
+    if (typeof safety.seedance15 === "boolean") setSeedance15VideoSafetyChecker(safety.seedance15)
+    if (typeof safety.wan27 === "boolean") setWan27VideoSafetyChecker(safety.wan27)
+    if (typeof safety.h3Max === "boolean") setH3MaxVideoSafetyChecker(safety.h3Max)
+    if (typeof safety.flux3 === "boolean") setFlux3VideoSafetyChecker(safety.flux3)
+    videoDraftSavedAt.current = typeof d.savedAt === "number" ? d.savedAt : Date.now()
+  }, [])
+
+  // Load once the account is known
+  useEffect(() => {
+    if (!user || videoDraftReady.current) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch("/api/user/preferences")
+        const data = await res.json()
+        const draft = data?.preferences?.videoDraft
+        if (!cancelled && draft) applyVideoDraft(draft)
+      } catch { /* a missing draft is not an error */ } finally {
+        if (!cancelled) videoDraftReady.current = true
+      }
+    })()
+    return () => { cancelled = true }
+  }, [user, applyVideoDraft])
+
+  // Save, debounced, whenever anything in the composer changes
+  useEffect(() => {
+    if (!user || !videoDraftReady.current) return
+    videoDraftTouched.current = Date.now()
+    const draft = buildVideoDraft()
+    const id = setTimeout(() => {
+      videoDraftSavedAt.current = draft.savedAt
+      fetch("/api/user/preferences", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ videoDraft: draft }),
+      }).catch(() => { /* offline — the next change retries */ })
+    }, 1200)
+    return () => clearTimeout(id)
+  }, [user, buildVideoDraft])
+
+  // Pick up edits made on another device when this tab regains focus, unless
+  // this tab is the one being typed in
+  useEffect(() => {
+    if (!user) return
+    const onFocus = async () => {
+      if (Date.now() - videoDraftTouched.current < 8000) return
+      try {
+        const res = await fetch("/api/user/preferences")
+        const data = await res.json()
+        const draft = data?.preferences?.videoDraft
+        if (draft && typeof draft.savedAt === "number" && draft.savedAt > videoDraftSavedAt.current + 1000) {
+          applyVideoDraft(draft)
+        }
+      } catch { /* keep whatever is on screen */ }
+    }
+    window.addEventListener("focus", onFocus)
+    return () => window.removeEventListener("focus", onFocus)
+  }, [user, applyVideoDraft])
 
   const handleSelectVideoModel = useCallback((name: string) => {
     const model = VIDEO_MODEL_CONFIGS.find(m => m.name === name)
@@ -27046,8 +27317,8 @@ export default function PortalV2Page() {
             )}
             <VideoCustomizationPanel
               model={selectedVideoModel}
-              safetyChecker={selectedVideoModel.id === "wan-2.5" ? wan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? seedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? wan27VideoSafetyChecker : undefined}
-              setSafetyChecker={selectedVideoModel.id === "wan-2.5" ? setWan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? setSeedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? setWan27VideoSafetyChecker : undefined}
+              safetyChecker={selectedVideoModel.id === "wan-2.5" ? wan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? seedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? wan27VideoSafetyChecker : selectedVideoModel.id === "minimax-h3-max" ? h3MaxVideoSafetyChecker : selectedVideoModel.id === "flux-3" ? flux3VideoSafetyChecker : undefined}
+              setSafetyChecker={selectedVideoModel.id === "wan-2.5" ? setWan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? setSeedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? setWan27VideoSafetyChecker : selectedVideoModel.id === "minimax-h3-max" ? setH3MaxVideoSafetyChecker : selectedVideoModel.id === "flux-3" ? setFlux3VideoSafetyChecker : undefined}
               isAdminAccount={isAdminAccount}
               duration={videoDuration}
               onDurationChange={setVideoDuration}
@@ -27147,6 +27418,7 @@ export default function PortalV2Page() {
             promptScale={feedPromptScale}
             model={selectedVideoModel}
             onGenerate={handleVideoGenerate}
+            onPromptChange={setVideoPromptText}
             generating={videoGenerating}
             canGenerate={!videoGenerating && (selectedVideoModel.supportsLipsync ? (!!videoLipsyncVideoUrl && !!videoLipsyncAudioUrl) : (selectedVideoModel.textToVideo || !!videoStartFrameUrl)) && (selectedVideoModel.id !== "kling-v3-motion" || !!videoMotionVideoUrl) && videoActiveJobCount < videoMaxConcurrent}
             queueFull={videoActiveJobCount >= videoMaxConcurrent && videoMaxConcurrent !== Infinity}
@@ -27213,8 +27485,8 @@ export default function PortalV2Page() {
                 )}
                 <VideoCustomizationPanel
                   model={selectedVideoModel}
-                  safetyChecker={selectedVideoModel.id === "wan-2.5" ? wan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? seedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? wan27VideoSafetyChecker : undefined}
-                  setSafetyChecker={selectedVideoModel.id === "wan-2.5" ? setWan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? setSeedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? setWan27VideoSafetyChecker : undefined}
+                  safetyChecker={selectedVideoModel.id === "wan-2.5" ? wan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? seedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? wan27VideoSafetyChecker : selectedVideoModel.id === "minimax-h3-max" ? h3MaxVideoSafetyChecker : selectedVideoModel.id === "flux-3" ? flux3VideoSafetyChecker : undefined}
+                  setSafetyChecker={selectedVideoModel.id === "wan-2.5" ? setWan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? setSeedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? setWan27VideoSafetyChecker : selectedVideoModel.id === "minimax-h3-max" ? setH3MaxVideoSafetyChecker : selectedVideoModel.id === "flux-3" ? setFlux3VideoSafetyChecker : undefined}
                   isAdminAccount={isAdminAccount}
                   duration={videoDuration}
                   onDurationChange={setVideoDuration}

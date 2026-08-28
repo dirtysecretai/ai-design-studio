@@ -38,6 +38,22 @@ const FAL_ENDPOINTS: Record<string, string> = {
   'wan-2.2-lora-t2v':           'fal-ai/wan/v2.2-a14b/text-to-video/lora',
   'wan-2.2-lora-i2v':           'fal-ai/wan/v2.2-a14b/image-to-video/lora',
   'happy-horse':                'alibaba/happy-horse/image-to-video',
+  // MiniMax H3 Max (ADMIN ONLY while testing) — `minimax/` owner, no fal-ai/
+  // prefix. 480P/768P, duration 5-15s, optional end frame.
+  'minimax-h3-max':             'minimax/h3-max/image-to-video',
+  'minimax-h3-max-text':        'minimax/h3-max/text-to-video',
+  // Flux 3 video (ADMIN ONLY while testing) — five sibling endpoints under the
+  // `blackforestlabs/` owner. Which one runs is decided by the inputs given:
+  //   prompt only .................. text-to-video
+  //   + start image ................ image-to-video
+  //   + start AND end image ........ first-last-frame-to-video
+  //   several reference images ..... keyframes-to-video (frame-pinned)
+  //   a source video ............... extend-video
+  'flux-3-t2v':                 'blackforestlabs/flux-3/text-to-video',
+  'flux-3-i2v':                 'blackforestlabs/flux-3/image-to-video',
+  'flux-3-flf':                 'blackforestlabs/flux-3/first-last-frame-to-video',
+  'flux-3-keyframes':           'blackforestlabs/flux-3/keyframes-to-video',
+  'flux-3-extend':              'blackforestlabs/flux-3/extend-video',
   // Gemini Omni Flash lives under the `google` owner — NO `fal-ai/` prefix
   // (same pattern as bytedance/seedance-2.0 above). ADMIN-ONLY model.
   'gemini-omni-flash-t2v':      'google/gemini-omni-flash',
@@ -48,7 +64,7 @@ const FAL_ENDPOINTS: Record<string, string> = {
 
 // Models only admin accounts may use (pricing TBD) — enforced server-side,
 // independent of the client-supplied adminMode flag
-const ADMIN_ONLY_VIDEO_MODELS = new Set(['gemini-omni-flash', 'wan-2.7', 'wan-2.2-lora']);
+const ADMIN_ONLY_VIDEO_MODELS = new Set(['gemini-omni-flash', 'wan-2.7', 'wan-2.2-lora', 'minimax-h3-max', 'flux-3']);
 
 export async function POST(request: NextRequest) {
   try {
@@ -100,6 +116,8 @@ export async function POST(request: NextRequest) {
       seedance15SafetyChecker = true,
       // WAN 2.7 safety
       wan27SafetyChecker = true,
+      h3MaxSafetyChecker = true,
+      flux3SafetyChecker = true,
       // Wan 2.2 LoRA serving: [{ path, scale, transformer }] — validated below
       loras = [],
     } = await request.json();
@@ -132,9 +150,20 @@ export async function POST(request: NextRequest) {
     // For SD20 family: auto-detect mode from imageUrl; explicit r2v overrides
     const effectiveSd20Mode = isSD20Family
       ? (sd20Mode === 'r2v' ? 'r2v' : imageUrl ? 'i2v' : 't2v')
-      : isOmni
+      : (isOmni || model === 'flux-3')
+        // Same resolution rule: honour an explicit references/extend choice,
+        // otherwise let the presence of a start image decide
         ? (sd20Mode === 'r2v' || sd20Mode === 'edit' ? sd20Mode : imageUrl ? 'i2v' : 't2v')
         : sd20Mode
+    // One line per video submit — model, resolved mode and which inputs arrived.
+    // Without it a rejected submit is a guessing game.
+    console.log('Video submit:', JSON.stringify({
+      model, sd20Mode, mode: effectiveSd20Mode,
+      promptLen: (prompt || '').length,
+      hasImage: !!imageUrl, hasEndImage: !!endImageUrl, hasEditVideo: !!editVideoUrl,
+      refImages: Array.isArray(referenceImageUrls) ? referenceImageUrls.length : 0,
+      refVideos: Array.isArray(referenceVideoUrls) ? referenceVideoUrls.length : 0,
+    }))
     const isWanLora = model === 'wan-2.2-lora'
     const isTextToVideo = model === 'seedance-1.5'
       ? !imageUrl
@@ -165,8 +194,19 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ success: false, error: 'Select a trained LoRA first' }, { status: 400 });
       }
     }
-    if (!imageUrl && !isTextToVideo && !isLipsync) {
-      return NextResponse.json({ success: false, error: 'Missing required fields' }, { status: 400 });
+    // A start image is only mandatory for models that CANNOT start any other
+    // way. This used to be hard-coded to SeeDance 1.5, so every other
+    // text-capable model (H3 Max text-to-video, Flux 3 extend/keyframes, Omni)
+    // was rejected here before it ever reached its endpoint.
+    const TEXT_CAPABLE_MODELS = new Set([
+      'seedance-1.5', 'seedance-2.0', 'seedance-2.0-fast', 'wan-2.7',
+      'wan-2.2-lora', 'gemini-omni-flash', 'minimax-h3-max', 'flux-3',
+    ])
+    const hasNonImageInput = !!editVideoUrl || !!motionVideoUrl
+      || (Array.isArray(referenceImageUrls) && referenceImageUrls.length > 0)
+      || (Array.isArray(referenceVideoUrls) && referenceVideoUrls.length > 0)
+    if (!imageUrl && !isLipsync && !hasNonImageInput && !TEXT_CAPABLE_MODELS.has(model)) {
+      return NextResponse.json({ success: false, error: 'This model needs a starting image.' }, { status: 400 });
     }
     if (isOmni && effectiveSd20Mode === 'edit' && !editVideoUrl) {
       return NextResponse.json({ success: false, error: 'Edit mode requires a source video' }, { status: 400 });
@@ -180,7 +220,15 @@ export async function POST(request: NextRequest) {
     }
     // Wan 2.7 i2v: prompt is optional when a start image is provided (fal schema)
     if (model !== 'kling-v3-motion' && !isLipsync && !prompt && !(model === 'wan-2.7' && imageUrl)) {
-      return NextResponse.json({ success: false, error: 'Missing required fields' }, { status: 400 });
+      // Name the field — a bare "missing required fields" tells nobody anything
+      console.warn('Video submit rejected: no prompt', { model, mode: effectiveSd20Mode, hasImage: !!imageUrl, hasEditVideo: !!editVideoUrl })
+      return NextResponse.json({ success: false, error: 'A prompt is required for this model.' }, { status: 400 });
+    }
+    if (model === 'flux-3' && effectiveSd20Mode === 'edit' && !editVideoUrl) {
+      return NextResponse.json({ success: false, error: 'Flux 3 extend needs the source video — add it as a video reference.' }, { status: 400 });
+    }
+    if (model === 'flux-3' && effectiveSd20Mode === 'r2v' && (!Array.isArray(referenceImageUrls) || referenceImageUrls.length === 0)) {
+      return NextResponse.json({ success: false, error: 'Flux 3 keyframes need at least one reference image.' }, { status: 400 });
     }
     if (model === 'kling-v3-motion' && !motionVideoUrl) {
       return NextResponse.json({ success: false, error: 'Missing motion reference video URL' }, { status: 400 });
@@ -246,6 +294,15 @@ export async function POST(request: NextRequest) {
       // PLACEHOLDER — ADMIN ONLY until priced. A14B renders ~81 frames @16fps ≈ 5s
       const sec = Math.ceil((parseInt(duration) || 5));
       ticketCost = Math.ceil(sec * (resolution === '720p' ? 4 : 2.6));
+    } else if (model === 'minimax-h3-max') {
+      // PLACEHOLDER — ADMIN ONLY. fal lists $0.025/s at 480P and $0.04/s at
+      // 768P (promotional), so this mirrors the shape of Wan 2.7's rates.
+      const sec = Math.min(15, Math.max(5, parseInt(duration) || 5));
+      ticketCost = Math.ceil(sec * (resolution === '480p' ? 2 : 3.2));
+    } else if (model === 'flux-3') {
+      // PLACEHOLDER — ADMIN ONLY. Priced above Wan 2.7 since it renders audio.
+      const sec = duration === 'auto' ? 5 : Math.min(20, Math.max(5, parseInt(duration) || 5));
+      ticketCost = Math.ceil(sec * (resolution === '1080p' ? 6 : 4));
     } else if (model === 'happy-horse') {
       ticketCost = parseInt(duration) * (resolution === '1080p' ? 12 : 7);
     } else {
@@ -303,6 +360,17 @@ export async function POST(request: NextRequest) {
       ? FAL_ENDPOINTS['wan-2.7-text']
       : isWanLora
       ? FAL_ENDPOINTS[imageUrl ? 'wan-2.2-lora-i2v' : 'wan-2.2-lora-t2v']
+      : model === 'minimax-h3-max'
+      ? FAL_ENDPOINTS[imageUrl ? 'minimax-h3-max' : 'minimax-h3-max-text']
+      : model === 'flux-3'
+      // One family, five endpoints — the inputs decide which one runs
+      ? FAL_ENDPOINTS[
+          effectiveSd20Mode === 'edit' ? 'flux-3-extend'
+          : effectiveSd20Mode === 'r2v' ? 'flux-3-keyframes'
+          : (imageUrl && endImageUrl) ? 'flux-3-flf'
+          : imageUrl ? 'flux-3-i2v'
+          : 'flux-3-t2v'
+        ]
       : FAL_ENDPOINTS[model] || FAL_ENDPOINTS['wan-2.5'];
     let falInput: Record<string, any>;
 
@@ -406,6 +474,65 @@ export async function POST(request: NextRequest) {
       else if (klingAspectRatio && klingAspectRatio !== 'auto') falInput.aspect_ratio = klingAspectRatio;
       if (endImageUrl) falInput.end_image_url = endImageUrl;
       if (audioUrl) falInput.audio_url = audioUrl;
+    } else if (model === 'minimax-h3-max') {
+      // fal schema: prompt + prompt_expansion_mode required; duration 5-15;
+      // resolution 480P/768P (capitalised); aspect_ratio is t2v-only, since an
+      // input image already fixes the framing.
+      falInput = {
+        prompt,
+        duration: Math.min(15, Math.max(5, parseInt(duration) || 5)),
+        resolution: resolution === '480p' ? '480P' : '768P',
+        prompt_expansion_mode: 'balanced',
+        // Admins may flip fal's own checker; everyone else is forced ON
+        enable_safety_checker: isAdminUser ? h3MaxSafetyChecker !== false : true,
+      };
+      if (imageUrl) falInput.image_url = imageUrl;
+      // t2v only, and only values this schema accepts — a ratio carried over
+      // from another model would otherwise be rejected by fal
+      else if (['21:9', '16:9', '4:3', '1:1', '3:4', '9:16'].includes(klingAspectRatio)) {
+        falInput.aspect_ratio = klingAspectRatio;
+      }
+      if (endImageUrl) falInput.end_image_url = endImageUrl;
+    } else if (model === 'flux-3') {
+      // Shared across all five Flux 3 endpoints. safety_tolerance stays at
+      // fal's default of 2 — the provider filter is deliberately left on.
+      const secs = duration === 'auto' ? 0 : Math.min(20, Math.max(5, parseInt(duration) || 5));
+      falInput = {
+        prompt,
+        resolution: resolution === '1080p' ? '1080p' : '720p',
+        // 0 strictest … 4 most permissive (fal default 2). Admins who switch
+        // the checker off get the most permissive setting the schema allows.
+        safety_tolerance: isAdminUser && flux3SafetyChecker === false ? 4 : 2,
+        generate_audio: generateAudio,
+      };
+      if (['auto', '21:9', '2:1', '16:9', '4:3', '1:1', '3:4', '9:16'].includes(klingAspectRatio)) {
+        falInput.aspect_ratio = klingAspectRatio;
+      }
+      if (effectiveSd20Mode === 'edit') {
+        falInput.video_url = editVideoUrl;
+        if (secs) falInput.duration = secs;
+      } else if (effectiveSd20Mode === 'r2v') {
+        // Keyframes are pinned to FRAME positions in a 24fps render, must be
+        // unique, and must not exceed duration * 24 — so spread them evenly
+        // across a duration that is always concrete here.
+        const imgs = (referenceImageUrls as string[]).slice(0, 10);
+        const dur = secs || 5;
+        const last = Math.max(1, dur * 24 - 1);
+        falInput.duration = dur;
+        falInput.keyframes = imgs.map((url, i) => ({
+          image_url: url,
+          frame_index: imgs.length === 1 ? 0 : Math.round((i * last) / (imgs.length - 1)),
+        }));
+      } else if (imageUrl && endImageUrl) {
+        falInput.start_image_url = imageUrl;
+        falInput.end_image_url = endImageUrl;
+        falInput.duration = secs || 5;      // this endpoint has no 'auto'
+      } else if (imageUrl) {
+        falInput.image_url = imageUrl;
+        if (secs) falInput.duration = secs;
+      } else if (secs) {
+        falInput.duration = secs;
+      }
     } else if (isWanLora) {
       // Wan 2.2 A14B */lora schema (verified via fal OpenAPI): resolution
       // 480p/580p/720p, num_frames 17-161 (default 81 ≈ 5s @16fps), loras[]
