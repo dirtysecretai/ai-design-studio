@@ -247,6 +247,384 @@ export const AI_MODELS: AIModel[] = [
     provider: 'fal'
   },
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 2026-08 FAL IMAGE BATCH — ADMIN ONLY while under test.
+  // Gate lives in app/api/generate/route.ts (ADMIN_ONLY_IMAGE_MODELS).
+  // Input shapes: lib/fal-image-models.ts (verified against live fal OpenAPI).
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Qwen Image 3 (Alibaba)
+  {
+    id: 'qwen-image-3',
+    name: 'alibaba/qwen-image-3/text-to-image',
+    displayName: 'Qwen Image 3',
+    description: 'Alibaba Qwen Image 3 text-to-image — strong text rendering',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'qwen-image-3-edit',
+    name: 'alibaba/qwen-image-3/edit',
+    displayName: 'Qwen Image 3 Edit',
+    description: 'Qwen Image 3 multi-reference image editing',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+
+  // Reve 2.1
+  {
+    id: 'reve-2.1',
+    name: 'reve/2.1/text-to-image',
+    displayName: 'Reve 2.1',
+    description: 'Reve 2.1 text-to-image — wide aspect-ratio range (4:1 to 1:4)',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'reve-2.1-edit',
+    name: 'reve/2.1/edit',
+    displayName: 'Reve 2.1 Edit',
+    description: 'Reve 2.1 single-image editing',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+
+  // Microsoft MAI Image 2.5 Pro
+  {
+    id: 'mai-image-2.5-pro',
+    name: 'microsoft/mai-image-2.5-pro',
+    displayName: 'MAI Image 2.5 Pro',
+    description: 'Microsoft MAI Image 2.5 Pro text-to-image',
+    ticketCost: 4,
+    category: 'premium',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'mai-image-2.5-pro-edit',
+    name: 'microsoft/mai-image-2.5-pro/edit',
+    displayName: 'MAI Image 2.5 Pro Edit',
+    description: 'Microsoft MAI Image 2.5 Pro single-image editing',
+    ticketCost: 4,
+    category: 'premium',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+
+  // xAI Grok Imagine 2
+  {
+    id: 'grok-imagine-2',
+    name: 'xai/grok-imagine-image/v2.0/text-to-image',
+    displayName: 'Grok Imagine 2',
+    description: 'xAI Grok Imagine 2 text-to-image — 1k/2k resolution',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'grok-imagine-2-edit',
+    name: 'xai/grok-imagine-image/v2.0/edit',
+    displayName: 'Grok Imagine 2 Edit',
+    description: 'xAI Grok Imagine 2 multi-reference editing',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+
+  // Meta Muse
+  {
+    id: 'meta-muse',
+    name: 'meta/muse-image/text-to-image',
+    displayName: 'Meta Muse',
+    description: 'Meta Muse Image text-to-image',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'meta-muse-edit',
+    name: 'meta/muse-image/edit',
+    displayName: 'Meta Muse Edit',
+    description: 'Meta Muse Image editing — up to 10 reference images',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+
+  // Bria FIBO 1.5
+  {
+    id: 'bria-fibo',
+    name: 'bria/fibo-gen-1.5/text-to-image',
+    displayName: 'Bria FIBO 1.5',
+    description: 'Bria FIBO 1.5 text-to-image — licensed-data model, 1MP/4MP',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'bria-fibo-edit',
+    name: 'bria/fibo-edit-1.5/edit',
+    displayName: 'Bria FIBO 1.5 Edit',
+    description: 'Bria FIBO 1.5 instruction editing (optional mask)',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+
+  // Ideogram v4
+  {
+    id: 'ideogram-v4-instant',
+    name: 'ideogram/v4/instant',
+    displayName: 'Ideogram v4 Instant',
+    description: 'Ideogram v4 Instant — fastest tier, great typography',
+    ticketCost: 1,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'fast',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'ideogram-v4-fast',
+    name: 'ideogram/v4/fast',
+    displayName: 'Ideogram v4 Fast',
+    description: 'Ideogram v4 Fast — TURBO/BALANCED/QUALITY rendering speeds',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'balanced',
+    isAvailable: true,
+    provider: 'fal'
+  },
+
+  // Google NanoBanana 2 Lite
+  {
+    id: 'nano-banana-2-lite',
+    name: 'google/nano-banana-2-lite',
+    displayName: 'NanoBanana 2 Lite',
+    description: 'Gemini NanoBanana 2 Lite — extreme aspect ratios up to 8:1',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'balanced',
+    isAvailable: true,
+    provider: 'fal'
+  },
+
+  // Recraft v4 — style + vector
+  {
+    id: 'recraft-v4-style',
+    name: 'recraft/v4/style/text-to-image',
+    displayName: 'Recraft v4 Style',
+    description: 'Recraft v4 styled text-to-image (style_id + style refs)',
+    ticketCost: 3,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'recraft-v4-style-pro',
+    name: 'recraft/v4/style/pro/text-to-image',
+    displayName: 'Recraft v4 Style Pro',
+    description: 'Recraft v4 Pro styled text-to-image',
+    ticketCost: 6,
+    category: 'premium',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'ultra',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'recraft-v4-vector',
+    name: 'recraft/v4/style/text-to-vector',
+    displayName: 'Recraft v4 Vector',
+    description: 'Recraft v4 text-to-vector (SVG output)',
+    ticketCost: 4,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'recraft-v4-vector-pro',
+    name: 'recraft/v4/style/pro/text-to-vector',
+    displayName: 'Recraft v4 Vector Pro',
+    description: 'Recraft v4 Pro text-to-vector (SVG output)',
+    ticketCost: 8,
+    category: 'premium',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'ultra',
+    isAvailable: true,
+    provider: 'fal'
+  },
+
+  // Pixelcut product photo
+  {
+    id: 'pixelcut-product-photo',
+    name: 'pixelcut/product-photo',
+    displayName: 'Pixelcut Product Photo',
+    description: 'Product cutout + studio background — no prompt needed',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'balanced',
+    isAvailable: true,
+    provider: 'fal'
+  },
+
+  // Google Virtual Try-On
+  {
+    id: 'google-virtual-try-on',
+    name: 'google/virtual-try-on',
+    displayName: 'Virtual Try-On',
+    description: 'Dress a person photo in a garment photo — needs 2 images',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'balanced',
+    isAvailable: true,
+    provider: 'fal'
+  },
+
+  // Topaz image suite
+  {
+    id: 'topaz-img-upscale-precision',
+    name: 'topaz/upscale/image/precision',
+    displayName: 'Topaz Precision Upscale',
+    description: 'Topaz precision upscale 1-4x — faithful detail recovery',
+    ticketCost: 4,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'ultra',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'topaz-img-upscale-creative',
+    name: 'topaz/upscale/image/creative',
+    displayName: 'Topaz Creative Upscale',
+    description: 'Topaz Bloom creative upscale 1-4x',
+    ticketCost: 4,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'ultra',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'topaz-img-upscale-generative',
+    name: 'topaz/upscale/image/generative',
+    displayName: 'Topaz Generative Upscale',
+    description: 'Topaz Wonder/Recover generative upscale 1-4x (optional prompt)',
+    ticketCost: 5,
+    category: 'premium',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'ultra',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'topaz-img-upscale-transparent',
+    name: 'topaz/upscale/image/transparent',
+    displayName: 'Topaz Transparent Upscale',
+    description: 'Topaz alpha-preserving upscale — always PNG',
+    ticketCost: 4,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'ultra',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'topaz-adjust',
+    name: 'topaz/adjust/image',
+    displayName: 'Topaz Adjust',
+    description: 'Topaz Adjust V2 / White Balance / Colorize',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'fast',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'topaz-sharpen',
+    name: 'topaz/sharpen/image',
+    displayName: 'Topaz Sharpen',
+    description: 'Topaz sharpen — 11 model variants (lens blur, motion, portrait…)',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'fast',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'topaz-denoise',
+    name: 'topaz/denoise/image',
+    displayName: 'Topaz Denoise',
+    description: 'Topaz denoise — Normal / Strong / Extreme / Denoise Max',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'fast',
+    isAvailable: true,
+    provider: 'fal'
+  },
+  {
+    id: 'topaz-restore',
+    name: 'topaz/restore/image',
+    displayName: 'Topaz Restore',
+    description: 'Topaz restore — Recover 3 / Dust-Scratch V2',
+    ticketCost: 2,
+    category: 'standard',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'fast',
+    isAvailable: true,
+    provider: 'fal'
+  },
+
   // IMAGEN MODELS - Require Vertex AI (different setup)
   // Uncomment these when you set up Vertex AI
   /*

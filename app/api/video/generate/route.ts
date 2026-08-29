@@ -7,6 +7,8 @@ import { cookies } from 'next/headers';
 import { getUserFromSession } from '@/lib/auth';
 import { authenticateApiKey, invalidKeyResponse, requireScopes, canUseModel, modelNotPermittedResponse } from '@/lib/api-key-auth';
 import { enforceContentFilter } from '@/lib/content-filter'
+import { FAL_ENDPOINTS } from '@/lib/fal-video-endpoints'
+import { videoTicketCost, VIDEO_TOOL_MODELS, INPUT_ROUTED_MODELS } from '@/lib/ticket-pricing'
 
 
 fal.config({
@@ -14,57 +16,50 @@ fal.config({
 });
 
 // FAL endpoint IDs by model
-const FAL_ENDPOINTS: Record<string, string> = {
-  'wan-2.5':               'fal-ai/wan-25-preview/image-to-video',
-  // Wan 2.7 (ADMIN ONLY while testing) — endpoint ids verified via fal's model API
-  'wan-2.7':               'fal-ai/wan/v2.7/image-to-video',
-  'wan-2.7-text':          'fal-ai/wan/v2.7/text-to-video',
-  'kling-v3':              'fal-ai/kling-video/v3/pro/image-to-video',
-  'kling-o3':              'fal-ai/kling-video/o3/standard/image-to-video',
-  'kling-v3-motion':       'fal-ai/kling-video/v3/pro/motion-control',
-  'seedance-1.5':          'fal-ai/bytedance/seedance/v1.5/pro/image-to-video',
-  'seedance-1.5-text':     'fal-ai/bytedance/seedance/v1.5/pro/text-to-video',
-  // SD 2.0 lives under the `bytedance` owner — a `fal-ai/` prefix 404s with
-  // "Path /seedance-2.0/... not found" (verified against the live queue API)
-  'seedance-2.0-t2v':           'bytedance/seedance-2.0/text-to-video',
-  'seedance-2.0-i2v':           'bytedance/seedance-2.0/image-to-video',
-  'seedance-2.0-r2v':           'bytedance/seedance-2.0/reference-to-video',
-  'seedance-2.0-fast-t2v':      'bytedance/seedance-2.0/fast/text-to-video',
-  'seedance-2.0-fast-i2v':      'bytedance/seedance-2.0/fast/image-to-video',
-  'seedance-2.0-fast-r2v':      'bytedance/seedance-2.0/fast/reference-to-video',
-  'lipsync-v3':                 'fal-ai/sync-lipsync/v3',
-  // Wan 2.2 A14B with custom LoRAs (ADMIN ONLY) — serves LoRAs trained by the
-  // wan-22-trainer pipeline; loras[].path takes our R2 URLs
-  'wan-2.2-lora-t2v':           'fal-ai/wan/v2.2-a14b/text-to-video/lora',
-  'wan-2.2-lora-i2v':           'fal-ai/wan/v2.2-a14b/image-to-video/lora',
-  'happy-horse':                'alibaba/happy-horse/image-to-video',
-  // MiniMax H3 Max (ADMIN ONLY while testing) — `minimax/` owner, no fal-ai/
-  // prefix. 480P/768P, duration 5-15s, optional end frame.
-  'minimax-h3-max':             'minimax/h3-max/image-to-video',
-  'minimax-h3-max-text':        'minimax/h3-max/text-to-video',
-  // Flux 3 video (ADMIN ONLY while testing) — five sibling endpoints under the
-  // `blackforestlabs/` owner. Which one runs is decided by the inputs given:
-  //   prompt only .................. text-to-video
-  //   + start image ................ image-to-video
-  //   + start AND end image ........ first-last-frame-to-video
-  //   several reference images ..... keyframes-to-video (frame-pinned)
-  //   a source video ............... extend-video
-  'flux-3-t2v':                 'blackforestlabs/flux-3/text-to-video',
-  'flux-3-i2v':                 'blackforestlabs/flux-3/image-to-video',
-  'flux-3-flf':                 'blackforestlabs/flux-3/first-last-frame-to-video',
-  'flux-3-keyframes':           'blackforestlabs/flux-3/keyframes-to-video',
-  'flux-3-extend':              'blackforestlabs/flux-3/extend-video',
-  // Gemini Omni Flash lives under the `google` owner — NO `fal-ai/` prefix
-  // (same pattern as bytedance/seedance-2.0 above). ADMIN-ONLY model.
-  'gemini-omni-flash-t2v':      'google/gemini-omni-flash',
-  'gemini-omni-flash-i2v':      'google/gemini-omni-flash/image-to-video',
-  'gemini-omni-flash-r2v':      'google/gemini-omni-flash/reference-to-video',
-  'gemini-omni-flash-edit':     'google/gemini-omni-flash/edit',
-};
+// FAL endpoint ids live in lib/fal-video-endpoints.ts so the Model Watch page
+// can read them without scanning source files at runtime.
+
 
 // Models only admin accounts may use (pricing TBD) — enforced server-side,
 // independent of the client-supplied adminMode flag
-const ADMIN_ONLY_VIDEO_MODELS = new Set(['gemini-omni-flash', 'wan-2.7', 'wan-2.2-lora', 'minimax-h3-max', 'flux-3']);
+const ADMIN_ONLY_VIDEO_MODELS = new Set([
+  'gemini-omni-flash', 'wan-2.7', 'wan-2.2-lora', 'minimax-h3-max', 'flux-3',
+  'wan-3.0', 'wan-3.0-prime', 'seedance-2.5', 'gemini-omni-1.1', 'ltx-2.5-pro', 'ltx-2.5-fast',
+  'flux-video-upscale', 'topaz-upscale-precision', 'topaz-upscale-creative',
+  'topaz-upscale-generative', 'seedvr2-video', 'flashvsr-video',
+  'bytedance-video-upscale', 'topaz-colorize', 'topaz-deblur',
+  'topaz-interpolate', 'topaz-sdr-to-hdr',
+]);
+
+// VIDEO_TOOL_MODELS (source-clip tools) and INPUT_ROUTED_MODELS (endpoint
+// chosen by the inputs given) are imported from lib/ticket-pricing.ts — the
+// ticket cost branches on both, so they live beside the pricing function.
+const VIDEO_TOOLS_WITH_PROMPT = new Set(['flux-video-upscale', 'topaz-upscale-creative'])
+
+/**
+ * What a HEAD request can tell us about a Flux 3 extend source. Returns a
+ * user-facing reason to refuse, or null to let fal decide. Deliberately
+ * permissive: an unreachable URL or a host that hides these headers is not
+ * grounds to block a job that might well succeed.
+ */
+async function flux3SourceProblem(url: string): Promise<string | null> {
+  const FLUX3_MAX_BYTES = 50 * 1024 * 1024;
+  try {
+    const head = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(8000) });
+    if (!head.ok) return null;
+    const type = (head.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    const bytes = Number(head.headers.get('content-length') || 0);
+    if (type && type.startsWith('video/') && type !== 'video/mp4') {
+      return `Flux 3 extend only takes MP4 — this clip is ${type}. Re-encode it as MP4 and upload again.`;
+    }
+    if (bytes > FLUX3_MAX_BYTES) {
+      return `Flux 3 extend needs the clip under 50 MB — this one is ${(bytes / 1048576).toFixed(1)} MB. Trim it or re-encode it smaller.`;
+    }
+  } catch {
+    // Network hiccup or a host that refuses HEAD — not a reason to refuse
+  }
+  return null;
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -118,6 +113,11 @@ export async function POST(request: NextRequest) {
       wan27SafetyChecker = true,
       h3MaxSafetyChecker = true,
       flux3SafetyChecker = true,
+      wan30SafetyChecker = true,
+      ltxFps = '25',
+      videoUpscaleFactor = '2',
+      videoToolCreativity = '0.35',
+      videoTargetFps = '60',
       // Wan 2.2 LoRA serving: [{ path, scale, transformer }] — validated below
       loras = [],
     } = await request.json();
@@ -150,7 +150,7 @@ export async function POST(request: NextRequest) {
     // For SD20 family: auto-detect mode from imageUrl; explicit r2v overrides
     const effectiveSd20Mode = isSD20Family
       ? (sd20Mode === 'r2v' ? 'r2v' : imageUrl ? 'i2v' : 't2v')
-      : (isOmni || model === 'flux-3')
+      : (isOmni || model === 'flux-3' || INPUT_ROUTED_MODELS.has(model))
         // Same resolution rule: honour an explicit references/extend choice,
         // otherwise let the presence of a start image decide
         ? (sd20Mode === 'r2v' || sd20Mode === 'edit' ? sd20Mode : imageUrl ? 'i2v' : 't2v')
@@ -219,13 +219,27 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Reference videos must total at least 2 seconds' }, { status: 400 });
     }
     // Wan 2.7 i2v: prompt is optional when a start image is provided (fal schema)
-    if (model !== 'kling-v3-motion' && !isLipsync && !prompt && !(model === 'wan-2.7' && imageUrl)) {
+    if (VIDEO_TOOL_MODELS.has(model)) {
+      if (!editVideoUrl) {
+        return NextResponse.json({ success: false, error: 'Add the source video to upscale or process.' }, { status: 400 });
+      }
+    } else if (model !== 'kling-v3-motion' && !isLipsync && !prompt && !(model === 'wan-2.7' && imageUrl)) {
       // Name the field — a bare "missing required fields" tells nobody anything
       console.warn('Video submit rejected: no prompt', { model, mode: effectiveSd20Mode, hasImage: !!imageUrl, hasEditVideo: !!editVideoUrl })
       return NextResponse.json({ success: false, error: 'A prompt is required for this model.' }, { status: 400 });
     }
-    if (model === 'flux-3' && effectiveSd20Mode === 'edit' && !editVideoUrl) {
-      return NextResponse.json({ success: false, error: 'Flux 3 extend needs the source video — add it as a video reference.' }, { status: 400 });
+    if (model === 'flux-3' && effectiveSd20Mode === 'edit') {
+      if (!editVideoUrl) {
+        return NextResponse.json({ success: false, error: 'Flux 3 extend needs the source video — add it as a video reference.' }, { status: 400 });
+      }
+      // fal's extend-video schema documents "MP4, under 50 MB and under 15
+      // seconds". It ACCEPTS the submit and then fails the queued job with a
+      // bare "Invalid request parameters", which tells the user nothing and
+      // costs them the run — so check what a HEAD can see beforehand.
+      const problem = await flux3SourceProblem(editVideoUrl);
+      if (problem) {
+        return NextResponse.json({ success: false, error: problem }, { status: 400 });
+      }
     }
     if (model === 'flux-3' && effectiveSd20Mode === 'r2v' && (!Array.isArray(referenceImageUrls) || referenceImageUrls.length === 0)) {
       return NextResponse.json({ success: false, error: 'Flux 3 keyframes need at least one reference image.' }, { status: 400 });
@@ -241,78 +255,24 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Missing userId' }, { status: 400 });
     }
 
-    // Calculate ticket cost based on model
-    let ticketCost: number;
-    if (isLipsync) {
-      ticketCost = Math.max(10, Math.ceil((lipsyncVideoDurationSec || 0) * 6));
-    } else if (model === 'kling-v3-motion') {
-      // 6 tickets/sec × actual video duration (or max if unknown)
-      const fallbackSec = characterOrientation === 'video' ? 30 : 10;
-      const sec = motionVideoDurationSec ? Math.ceil(motionVideoDurationSec) : fallbackSec;
-      ticketCost = sec * 6;
-    } else if (model === 'kling-o3') {
-      const pricing: Record<string, number> = {
-        '3': 15, '4': 18, '5': 20, '6': 24, '7': 28,
-        '8': 32, '9': 36, '10': 40, '11': 44, '12': 48,
-        '13': 52, '14': 56, '15': 60,
-      };
-      ticketCost = pricing[duration] || 20;
-    } else if (model === 'kling-v3') {
-      ticketCost = parseInt(duration) * (generateAudio ? 8 : 6);
-    } else if (model === 'seedance-1.5') {
-      const resMultiplier = resolution === '1080p' ? 2.25 : resolution === '480p' ? 0.5 : 1.0
-      const audioMultiplier = generateAudio ? 1.0 : 0.5
-      ticketCost = Math.ceil(parseInt(duration) * 2.0 * resMultiplier * audioMultiplier) + 1
-    } else if (model === 'seedance-2.0') {
-      // fal's SeeDance 2.0 has no 1080p (480p/720p only) — 720p is the 1.0x base
-      const resMultiplier = resolution === '480p' ? 0.5 : 1.0
-      const hasVideoRefs = sd20Mode === 'r2v' && Array.isArray(referenceVideoUrls) && referenceVideoUrls.length > 0
-      const videoInputMultiplier = hasVideoRefs ? 0.6 : 1.0
-      const outputDurSec = duration === 'auto' ? 5 : parseInt(duration)
-      const effectiveDur = outputDurSec + (hasVideoRefs ? (referenceVideoDurationSec || 0) : 0)
-      ticketCost = Math.ceil(effectiveDur * 15 * resMultiplier * videoInputMultiplier)
-    } else if (model === 'seedance-2.0-fast') {
-      // 12 tickets/sec at 720p; 480p = 0.5x
-      const resMultiplier = resolution === '480p' ? 0.5 : 1.0
-      const hasVideoRefs = sd20Mode === 'r2v' && Array.isArray(referenceVideoUrls) && referenceVideoUrls.length > 0
-      const videoInputMultiplier = hasVideoRefs ? 0.6 : 1.0
-      const outputDurSec = duration === 'auto' ? 5 : parseInt(duration)
-      const effectiveDur = outputDurSec + (hasVideoRefs ? (referenceVideoDurationSec || 0) : 0)
-      ticketCost = Math.ceil(effectiveDur * 12 * resMultiplier * videoInputMultiplier)
-    } else if (model === 'gemini-omni-flash') {
-      // PLACEHOLDER ≈ SeeDance 2.0 (15 tickets/sec); no resolution knob on this model
-      const sec = effectiveSd20Mode === 'edit'
-        ? Math.max(3, Math.ceil(editVideoDurationSec || 8))
-        : (parseInt(duration) || 8);
-      ticketCost = sec * 15;
-    } else if (model === 'wan-2.7') {
-      // PLACEHOLDER — modeled on Wan 2.5's per-second rates (1080p 20/5s = 4/s,
-      // 720p 13/5s = 2.6/s). ADMIN ONLY until priced manually.
-      const sec = parseInt(duration) || 5;
-      ticketCost = Math.ceil(sec * (resolution === '1080p' ? 4 : 2.6));
-    } else if (isWanLora) {
-      // PLACEHOLDER — ADMIN ONLY until priced. A14B renders ~81 frames @16fps ≈ 5s
-      const sec = Math.ceil((parseInt(duration) || 5));
-      ticketCost = Math.ceil(sec * (resolution === '720p' ? 4 : 2.6));
-    } else if (model === 'minimax-h3-max') {
-      // PLACEHOLDER — ADMIN ONLY. fal lists $0.025/s at 480P and $0.04/s at
-      // 768P (promotional), so this mirrors the shape of Wan 2.7's rates.
-      const sec = Math.min(15, Math.max(5, parseInt(duration) || 5));
-      ticketCost = Math.ceil(sec * (resolution === '480p' ? 2 : 3.2));
-    } else if (model === 'flux-3') {
-      // PLACEHOLDER — ADMIN ONLY. Priced above Wan 2.7 since it renders audio.
-      const sec = duration === 'auto' ? 5 : Math.min(20, Math.max(5, parseInt(duration) || 5));
-      ticketCost = Math.ceil(sec * (resolution === '1080p' ? 6 : 4));
-    } else if (model === 'happy-horse') {
-      ticketCost = parseInt(duration) * (resolution === '1080p' ? 12 : 7);
-    } else {
-      const pricing: Record<string, Record<string, number>> = {
-        '480p':  { '5': 7,  '10': 14 },
-        '720p':  { '5': 13, '10': 26 },
-        '1080p': { '5': 20, '10': 40 },
-      };
-      ticketCost = pricing[resolution]?.[duration] || 20;
-    }
+    // Calculate ticket cost based on model. The formula lives in
+    // lib/ticket-pricing.ts so the admin Ticket Economics page and this billing
+    // path can never drift apart.
+    const ticketCost: number = videoTicketCost({
+      model,
+      duration,
+      resolution,
+      generateAudio,
+      sd20Mode,
+      effectiveSd20Mode,
+      referenceVideoCount: Array.isArray(referenceVideoUrls) ? referenceVideoUrls.length : 0,
+      referenceVideoDurationSec,
+      editVideoDurationSec,
+      lipsyncVideoDurationSec,
+      motionVideoDurationSec,
+      characterOrientation,
+      videoUpscaleFactor,
+    });
 
     // CCBill content filter — must pass BEFORE any charge or provider submit
     {
@@ -360,8 +320,19 @@ export async function POST(request: NextRequest) {
       ? FAL_ENDPOINTS['wan-2.7-text']
       : isWanLora
       ? FAL_ENDPOINTS[imageUrl ? 'wan-2.2-lora-i2v' : 'wan-2.2-lora-t2v']
+      : VIDEO_TOOL_MODELS.has(model)
+      ? FAL_ENDPOINTS[model]
       : model === 'minimax-h3-max'
       ? FAL_ENDPOINTS[imageUrl ? 'minimax-h3-max' : 'minimax-h3-max-text']
+      : (model === 'ltx-2.5-pro' || model === 'ltx-2.5-fast')
+      ? FAL_ENDPOINTS[`${model}-${imageUrl ? 'i2v' : 't2v'}`]
+      : INPUT_ROUTED_MODELS.has(model)
+      // Every one of these ships t2v/i2v (+ r2v where the family has it), so
+      // the suffix follows the resolved mode. SeeDance 2.5 has no text-only
+      // endpoint and Prime has no reference one — fall back to what exists.
+      ? (FAL_ENDPOINTS[`${model}-${effectiveSd20Mode}`]
+         || FAL_ENDPOINTS[`${model}-i2v`]
+         || FAL_ENDPOINTS[`${model}-t2v`])
       : model === 'flux-3'
       // One family, five endpoints — the inputs decide which one runs
       ? FAL_ENDPOINTS[
@@ -474,6 +445,121 @@ export async function POST(request: NextRequest) {
       else if (klingAspectRatio && klingAspectRatio !== 'auto') falInput.aspect_ratio = klingAspectRatio;
       if (endImageUrl) falInput.end_image_url = endImageUrl;
       if (audioUrl) falInput.audio_url = audioUrl;
+    } else if (VIDEO_TOOL_MODELS.has(model)) {
+      const factor = Math.max(1, Math.min(4, parseFloat(videoUpscaleFactor) || 2));
+      falInput = { video_url: editVideoUrl };
+      if (model === 'flux-video-upscale') {
+        // This schema is stricter than the others: factor 1.5-3, and creativity
+        // is an enum — 0 = faithful upscale, 1 = creative detail
+        falInput.upscale_factor = Math.max(1.5, Math.min(3, factor));
+        falInput.creativity = (parseFloat(videoToolCreativity) || 0) >= 0.5 ? 1 : 0;
+        falInput.safety_tolerance = 2;
+        if (prompt?.trim()) falInput.prompt = prompt.trim();   // optional guidance
+      } else if (model.startsWith('topaz-upscale')) {
+        falInput.upscale_factor = factor;
+        falInput.H264_output = true;   // browser-playable output, not ProRes
+        if (model === 'topaz-upscale-creative') {
+          falInput.creativity = Math.max(0, Math.min(1, parseFloat(videoToolCreativity) || 0.35));
+          if (prompt?.trim()) falInput.prompt = prompt.trim();
+        }
+        if (model === 'topaz-upscale-generative') falInput.model = 'Starlight Precise 2.6';
+      } else if (model === 'seedvr2-video' || model === 'flashvsr-video') {
+        falInput.upscale_factor = factor;
+      } else if (model === 'bytedance-video-upscale') {
+        falInput.scale_ratio = factor;
+      } else if (model === 'topaz-interpolate') {
+        falInput.target_fps = Math.max(16, Math.min(120, parseInt(videoTargetFps) || 60));
+        falInput.H264_output = true;
+      } else if (model === 'topaz-colorize' || model === 'topaz-deblur') {
+        falInput.H264_output = true;
+      }
+      // topaz-sdr-to-hdr takes only video_url (+ output_format, left at mp4)
+    } else if (model === 'wan-3.0' || model === 'wan-3.0-prime') {
+      // Wan 3.0: prompt optional on i2v, native audio, adaptive aspect.
+      // Prime has no reference endpoint, so references route to i2v/t2v.
+      falInput = {
+        resolution: ['480p', '720p', '1080p'].includes(resolution) ? resolution : '1080p',
+        duration: duration === 'auto' ? 5 : Math.max(2, parseInt(duration) || 5),
+        audio: generateAudio,
+        enable_prompt_expansion: true,
+        enable_safety_checker: isAdminUser ? wan30SafetyChecker !== false : true,
+      };
+      if (prompt?.trim()) falInput.prompt = prompt.trim();
+      if (['adaptive', '16:9', '4:3', '1:1', '3:4', '9:16'].includes(klingAspectRatio)) {
+        falInput.aspect_ratio = klingAspectRatio;
+      }
+      if (effectiveSd20Mode === 'r2v' && model === 'wan-3.0') {
+        falInput.reference_image_urls = (referenceImageUrls as string[] || []).slice(0, 9);
+        if (Array.isArray(referenceVideoUrls) && referenceVideoUrls.length) falInput.reference_video_urls = referenceVideoUrls;
+        if (Array.isArray(referenceAudioUrls) && referenceAudioUrls.length) falInput.reference_audio_urls = referenceAudioUrls;
+      } else if (imageUrl) {
+        falInput.start_image_url = imageUrl;
+        if (endImageUrl) falInput.end_image_url = endImageUrl;
+      }
+    } else if (model === 'seedance-2.5') {
+      // No text-only endpoint: an image or references are required
+      falInput = {
+        prompt,
+        resolution: ['480p', '720p', '1080p'].includes(resolution) ? resolution : '720p',
+        duration: duration === 'auto' ? 'auto' : String(Math.min(12, Math.max(4, parseInt(duration) || 5))),
+        generate_audio: generateAudio,
+        bitrate_mode: 'standard',
+      };
+      if (['auto', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'].includes(klingAspectRatio)) {
+        falInput.aspect_ratio = klingAspectRatio;
+      }
+      if (effectiveSd20Mode === 'r2v') {
+        falInput.image_urls = (referenceImageUrls as string[] || []).slice(0, 9);
+        if (Array.isArray(referenceVideoUrls) && referenceVideoUrls.length) falInput.video_urls = referenceVideoUrls;
+        if (Array.isArray(referenceAudioUrls) && referenceAudioUrls.length) falInput.audio_urls = referenceAudioUrls;
+      } else {
+        falInput.image_url = imageUrl;
+        if (endImageUrl) falInput.end_image_url = endImageUrl;
+      }
+    } else if (model === 'gemini-omni-1.1') {
+      const omniRes = ['360p', '720p', '1080p', '4k'].includes(resolution) ? resolution : '720p';
+      if (effectiveSd20Mode === 'edit') {
+        // The 1.1 edit endpoint is VIDEO-to-video and takes nothing else —
+        // no duration, no aspect ratio.
+        falInput = { prompt, video_url: editVideoUrl, resolution: omniRes };
+      } else {
+        falInput = {
+          prompt,
+          resolution: omniRes,
+          duration: Math.max(1, parseInt(duration) || 8),
+          aspect_ratio: klingAspectRatio === '9:16' ? '9:16' : '16:9',
+        };
+        if (effectiveSd20Mode === 'r2v') {
+          falInput.image_urls = (referenceImageUrls as string[] || []).slice(0, 9);
+          if (Array.isArray(referenceVideoUrls) && referenceVideoUrls.length) falInput.reference_video_urls = referenceVideoUrls;
+        } else if (imageUrl) {
+          falInput.image_url = imageUrl;
+          if (endImageUrl) falInput.end_image_url = endImageUrl;
+        }
+      }
+    } else if (model === 'ltx-2.5-pro' || model === 'ltx-2.5-fast') {
+      const fastTier = model === 'ltx-2.5-fast';
+      const allowedRes = fastTier ? ['720p', '1080p', '1440p', '2160p'] : ['720p', '1080p'];
+      const allowedDur = fastTier ? [6, 8, 10, 12, 14, 16, 18, 20] : [6, 8, 10];
+      const wanted = parseInt(duration) || 0;
+      falInput = {
+        prompt,
+        resolution: allowedRes.includes(resolution) ? resolution : '1080p',
+        // Enum durations only — snap to the nearest the tier supports
+        duration: duration === 'auto' || !wanted
+          ? 'auto'
+          : allowedDur.reduce((best, d) => Math.abs(d - wanted) < Math.abs(best - wanted) ? d : best, allowedDur[0]),
+        fps: [24, 25, 50].includes(parseInt(ltxFps)) ? parseInt(ltxFps) : 25,
+        generate_audio: generateAudio,
+        aspect_ratio: ['auto', '16:9', '9:16'].includes(klingAspectRatio) ? klingAspectRatio : 'auto',
+      };
+      if (imageUrl) {
+        falInput.image_url = imageUrl;
+        if (endImageUrl) falInput.end_image_url = endImageUrl;
+      } else {
+        // The text endpoint has no 'auto' aspect
+        if (falInput.aspect_ratio === 'auto') falInput.aspect_ratio = '16:9';
+      }
     } else if (model === 'minimax-h3-max') {
       // fal schema: prompt + prompt_expansion_mode required; duration 5-15;
       // resolution 480P/768P (capitalised); aspect_ratio is t2v-only, since an

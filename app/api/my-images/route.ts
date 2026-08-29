@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { VIDEO_MODEL_IDS, VIDEO_FILE_EXTS } from '@/lib/fal-video-endpoints'
 import prisma from '@/lib/prisma'
 import { deleteFromR2 } from '@/lib/r2'
 import { resolveRequestUser, requireScopes } from '@/lib/api-key-auth'
@@ -49,15 +50,21 @@ export async function GET(request: Request) {
     // Keep in sync with the model ids in app/api/video/generate/route.ts — a video
     // model missing here leaks its videos into the image feed (the image side can
     // only exclude by model name, see note below)
-    const VIDEO_MODELS = ['wan-2.5', 'wan-2.7', 'kling-v3', 'kling-o3', 'kling-v3-motion', 'seedance-1.5', 'seedance-2.0', 'seedance-2.0-fast', 'lipsync-v3', 'happy-horse', 'gemini-omni-flash']
+    // Single source of truth — see lib/fal-video-endpoints.ts. Hand-maintaining
+    // a second copy here is what let new video models leak into the image feed.
+    const VIDEO_MODELS = VIDEO_MODEL_IDS
     // NOTE: the image side must stay a plain notIn — `NOT (json = true)` is
     // NULL (not true) for rows without videoMetadata in SQL's 3-valued logic,
     // which silently empties the whole image feed.
     const isVideoJson = { videoMetadata: { path: ['isVideo'], equals: true } }
+    // Belt and braces: exclude by model AND by file extension, so a video model
+    // that nobody remembered to list still cannot appear among the images.
+    const notVideoFile = VIDEO_FILE_EXTS.map(e => ({ NOT: { imageUrl: { endsWith: e } } }))
+    const isVideoFile = VIDEO_FILE_EXTS.map(e => ({ imageUrl: { endsWith: e } }))
     const typeFilter = type === 'image'
-      ? { model: { notIn: VIDEO_MODELS } }
+      ? { AND: [{ model: { notIn: VIDEO_MODELS } }, ...notVideoFile] }
       : type === 'video'
-      ? { OR: [{ model: { in: VIDEO_MODELS } }, isVideoJson] }
+      ? { OR: [{ model: { in: VIDEO_MODELS } }, isVideoJson, ...isVideoFile] }
       : {}
 
     // Fast path: fetch by specific FAL request IDs (used by iOS restore to detect completed-while-closed jobs)

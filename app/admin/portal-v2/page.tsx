@@ -10,6 +10,7 @@ import { AddToBucketModal, type Bucket, type BucketFolder } from "@/components/A
 import { NewsManager } from "@/components/NewsManager"
 import { HomeView } from "@/components/home/HomeView"
 import { SiteBrandHero, SiteLogoBox } from "@/components/SitePageHeader"
+import { SilverRimOverlay } from "@/components/home/SilverRimOverlay"
 
 // Signed-out state for the session feeds (image + video) — same brand treatment
 // as the login/signup pages: silver-rimmed synced logo hero + sheen sign-in button.
@@ -83,7 +84,9 @@ interface ImageItem {
   r2Key?: string
 }
 
+// Reve, Grok and Meta Muse accept ratios the earlier models never offered
 type AspectRatio = "auto" | "1:1" | "2:3" | "3:2" | "4:5" | "5:4" | "3:4" | "4:3" | "9:16" | "16:9" | "21:9"
+  | "2:1" | "1:2" | "9:21"
   | "1024x768" | "1024x1024" | "1024x1536" | "1920x1080" | "2560x1440" | "3840x2160"
 type Quality = "1k" | "2k" | "3k" | "4k" | "low" | "medium" | "high"
 
@@ -101,12 +104,49 @@ interface ImageModelConfig {
   isFal: boolean   // true = async FAL queue; false = sync Gemini
   maxImages?: number               // if > 1, shows image count picker
   isUpscaler?: boolean             // special upscaler UI — takes image URL + params instead of prompt
+  isTryOn?: boolean                // Virtual Try-On: two named images (person + garment), no prompt
   isLocalModel?: boolean           // admin-only: runs on local GPU via upscaler-server.py
   isCustomFlux?: boolean           // admin-only: custom Flux checkpoint + LoRA inference
   supportsSafetyChecker?: boolean  // fal content-safety toggle: admins can flip it (default off), non-admins are forced ON (CCBill)
 }
 
 const IMAGE_MODEL_CONFIGS: ImageModelConfig[] = [
+  // ── Frontier additions (ADMIN ONLY while under test) ──
+  { id: "qwen-image-3",         apiId: "qwen-image-3",             name: "Qwen Image 3",        aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"], supportsQuality: true, qualityOptions: ["1k", "2k", "4k"], maxReferenceImages: 0, isFal: true, maxImages: 4 },
+  { id: "qwen-image-3-edit",    apiId: "qwen-image-3-edit",        name: "Qwen Image 3 Edit",   aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"], supportsQuality: true, qualityOptions: ["1k", "2k", "4k"], maxReferenceImages: 6, isFal: true, maxImages: 4 },
+  { id: "reve-2.1",             apiId: "reve-2.1",                 name: "Reve 2.1",            aspectRatios: ["auto", "21:9", "2:1", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "1:2"], supportsQuality: false, maxReferenceImages: 0, isFal: true, maxImages: 4 },
+  { id: "reve-2.1-edit",        apiId: "reve-2.1-edit",            name: "Reve 2.1 Edit",       aspectRatios: ["auto", "21:9", "2:1", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "1:2"], supportsQuality: false, maxReferenceImages: 1, isFal: true, maxImages: 4 },
+  { id: "mai-image-2.5-pro",    apiId: "mai-image-2.5-pro",        name: "MAI Image 2.5 Pro",   aspectRatios: ["auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3"], supportsQuality: false, maxReferenceImages: 0, isFal: true, maxImages: 4 },
+  { id: "mai-image-2.5-pro-edit", apiId: "mai-image-2.5-pro-edit", name: "MAI Image 2.5 Pro Edit", aspectRatios: ["auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3"], supportsQuality: false, maxReferenceImages: 1, isFal: true, maxImages: 4 },
+  { id: "grok-imagine-2",       apiId: "grok-imagine-2",           name: "Grok Imagine 2.0",    aspectRatios: ["2:1", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "1:2"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 0, isFal: true, maxImages: 4 },
+  { id: "grok-imagine-2-edit",  apiId: "grok-imagine-2-edit",      name: "Grok Imagine 2.0 Edit", aspectRatios: ["auto", "2:1", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "1:2"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 4, isFal: true, maxImages: 4 },
+  { id: "meta-muse",            apiId: "meta-muse",                name: "Meta Muse",           aspectRatios: ["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "9:21"], supportsQuality: false, maxReferenceImages: 0, isFal: true, maxImages: 4 },
+  { id: "meta-muse-edit",       apiId: "meta-muse-edit",           name: "Meta Muse Edit",      aspectRatios: ["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "9:21"], supportsQuality: false, maxReferenceImages: 10, isFal: true, maxImages: 4 },
+  { id: "bria-fibo",            apiId: "bria-fibo",                name: "Bria Fibo 1.5",       aspectRatios: ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9"], supportsQuality: true, qualityOptions: ["1k", "4k"], maxReferenceImages: 0, isFal: true, maxImages: 4 },
+  { id: "bria-fibo-edit",       apiId: "bria-fibo-edit",           name: "Bria Fibo Edit",      aspectRatios: ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9"], supportsQuality: false, maxReferenceImages: 10, isFal: true, maxImages: 4 },
+  { id: "ideogram-v4-instant",  apiId: "ideogram-v4-instant",      name: "Ideogram v4 Instant", aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 0, isFal: true, maxImages: 4 },
+  { id: "ideogram-v4-fast",     apiId: "ideogram-v4-fast",         name: "Ideogram v4 Fast",    aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 0, isFal: true, maxImages: 4 },
+  { id: "nano-banana-2-lite",   apiId: "nano-banana-2-lite",       name: "NanoBanana 2 Lite",   aspectRatios: ["auto", "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16"], supportsQuality: false, maxReferenceImages: 0, isFal: true, maxImages: 4 },
+  // Recraft V4 Styles — the vector pair outputs true SVG
+  { id: "recraft-v4-style",     apiId: "recraft-v4-style",         name: "Recraft V4 Style",    aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 10, isFal: true, maxImages: 4 },
+  { id: "recraft-v4-style-pro", apiId: "recraft-v4-style-pro",     name: "Recraft V4 Style Pro", aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 10, isFal: true, maxImages: 4 },
+  { id: "recraft-v4-vector",    apiId: "recraft-v4-vector",        name: "Recraft V4 Vector",   aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 10, isFal: true, maxImages: 4 },
+  { id: "recraft-v4-vector-pro", apiId: "recraft-v4-vector-pro",   name: "Recraft V4 Vector Pro", aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 10, isFal: true, maxImages: 4 },
+  // Edit-only / tool models — these take a source image, not a prompt
+  { id: "pixelcut-product-photo", apiId: "pixelcut-product-photo", name: "Pixelcut Product Photo", aspectRatios: ["1:1"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 1, isFal: true, maxImages: 1, isUpscaler: true },
+  // Two images with FIXED roles, so it gets its own picker rather than the
+  // single-source upscaler one; the generic Refs chip is off (maxReferenceImages 0)
+  // so there is exactly one place to attach them.
+  { id: "google-virtual-try-on", apiId: "google-virtual-try-on",   name: "Virtual Try-On",      aspectRatios: ["1:1"], supportsQuality: false, maxReferenceImages: 0, isFal: true, maxImages: 4, isUpscaler: true, isTryOn: true },
+  // Topaz image suite — all take one source image
+  { id: "topaz-img-upscale-precision",  apiId: "topaz-img-upscale-precision",  name: "Topaz Upscale · Precision",  aspectRatios: ["1:1"], supportsQuality: false, maxReferenceImages: 1, isFal: true, maxImages: 1, isUpscaler: true },
+  { id: "topaz-img-upscale-creative",   apiId: "topaz-img-upscale-creative",   name: "Topaz Upscale · Creative",   aspectRatios: ["1:1"], supportsQuality: false, maxReferenceImages: 1, isFal: true, maxImages: 1, isUpscaler: true },
+  { id: "topaz-img-upscale-generative", apiId: "topaz-img-upscale-generative", name: "Topaz Upscale · Generative", aspectRatios: ["1:1"], supportsQuality: false, maxReferenceImages: 1, isFal: true, maxImages: 1, isUpscaler: true },
+  { id: "topaz-img-upscale-transparent", apiId: "topaz-img-upscale-transparent", name: "Topaz Upscale · Transparent", aspectRatios: ["1:1"], supportsQuality: false, maxReferenceImages: 1, isFal: true, maxImages: 1, isUpscaler: true },
+  { id: "topaz-adjust",         apiId: "topaz-adjust",             name: "Topaz Adjust",        aspectRatios: ["1:1"], supportsQuality: false, maxReferenceImages: 1, isFal: true, maxImages: 1, isUpscaler: true },
+  { id: "topaz-sharpen",        apiId: "topaz-sharpen",            name: "Topaz Sharpen",       aspectRatios: ["1:1"], supportsQuality: false, maxReferenceImages: 1, isFal: true, maxImages: 1, isUpscaler: true },
+  { id: "topaz-denoise",        apiId: "topaz-denoise",            name: "Topaz Denoise",       aspectRatios: ["1:1"], supportsQuality: false, maxReferenceImages: 1, isFal: true, maxImages: 1, isUpscaler: true },
+  { id: "topaz-restore",        apiId: "topaz-restore",            name: "Topaz Restore",       aspectRatios: ["1:1"], supportsQuality: false, maxReferenceImages: 1, isFal: true, maxImages: 1, isUpscaler: true },
   { id: "nano-banana-pro",      apiId: "nano-banana-pro",          name: "NanoBanana Pro",      aspectRatios: ["1:1", "2:3", "3:2", "4:5", "3:4", "4:3", "9:16", "16:9"], supportsQuality: true,  maxReferenceImages: 8,  isFal: true,  maxImages: 4 },
   { id: "nano-banana-pro-2",    apiId: "nano-banana-pro-2",        name: "NanoBanana Pro 2",    aspectRatios: ["auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "4:5", "5:4", "21:9"], supportsQuality: true, supportsOutputFormat: true, maxReferenceImages: 14, isFal: false, maxImages: 4 },
   { id: "kling-v3-image",       apiId: "kling-v3-image",           name: "Kling V3",            aspectRatios: ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 1, isFal: false, maxImages: 4 },
@@ -159,6 +199,7 @@ function calcTicketCost(modelId: string, quality: Quality, aspectRatio?: AspectR
   if (modelId === "esrgan")              return 1
   if (modelId === "drct")               return 1 // minimum; actual cost computed server-side from output MP
   if (modelId === "supir")              return 8
+  if (modelId === "google-virtual-try-on") return 2   // matches ai-models.config.ts
   if (modelId === "kling-v3-image")     return 2
   if (modelId === "kling-o3-image")     return quality === "4k" ? 4 : 2
   if (modelId === "wan-2.7-pro")        return 4
@@ -221,6 +262,13 @@ function getModelDisplayName(apiId: string): string {
 // --- PROMPT TABS ---
 // A tab captures the prompt-box configuration only. Reference images, LoRA
 // selection, and upscaler params stay global (not per-tab) by design.
+/**
+ * Per-model batch caps are a product decision for paying tiers; the owner is
+ * spending their own fal credit, so admin accounts get a much higher ceiling
+ * on every model rather than the model's advertised 4.
+ */
+const ADMIN_MAX_IMAGES = 20
+
 interface PromptTab {
   id: string
   name?: string          // user-set label; falls back to the model display name
@@ -286,7 +334,7 @@ function sanitizePromptTabsState(raw: unknown): PromptTabsState | null {
       aspectRatio: typeof o.aspectRatio === "string" ? o.aspectRatio : "1:1",
       quality: typeof o.quality === "string" ? o.quality : "2k",
       outputFormat: o.outputFormat === "jpeg" || o.outputFormat === "webp" ? o.outputFormat : "png",
-      imageCount: Math.min(Math.max(1, Number(o.imageCount) || 1), 4),
+      imageCount: Math.min(Math.max(1, Number(o.imageCount) || 1), ADMIN_MAX_IMAGES),
       seedreamSafetyChecker: o.seedreamSafetyChecker === true || undefined,
       wanSafetyChecker: o.wanSafetyChecker === true || undefined,
       fluxDevSafetyChecker: o.fluxDevSafetyChecker === true || undefined,
@@ -551,6 +599,11 @@ interface VideoModelConfig {
   startFrameLocksAspect?: boolean  // when a start frame is provided, aspect ratio is ignored by the model
   videoModes?: ("t2v" | "i2v" | "r2v" | "edit")[] // legacy per-model mode switcher (no longer used)
   supportsVideoExtend?: boolean // a video in the refs panel continues/edits it (Flux 3 extend, Omni edit)
+  fpsOptions?: string[]         // LTX 2.5 exposes a frame-rate choice
+  isVideoTool?: boolean         // transforms an uploaded clip (upscale/restore) — no prompt needed
+  toolPrompt?: boolean          // this tool accepts an optional guidance prompt
+  upscaleFactors?: string[]     // 1-4x, per the tool's own schema
+  targetFpsOptions?: string[]   // frame interpolation targets
 }
 
 interface VideoItem {
@@ -754,6 +807,162 @@ const VIDEO_MODEL_CONFIGS: VideoModelConfig[] = [
     supportsVideoExtend: true,
   },
   {
+    // ADMIN ONLY — alibaba/wan-3.0/{text,image,reference}-to-video.
+    // Native audio, 480p–1080p, "adaptive" aspect, optional end frame, and a
+    // reference endpoint that takes images + videos + audio.
+    id: "wan-3.0",
+    name: "Wan 3.0",
+    durations: ["2","3","4","5","6","7","8","9","10"],
+    resolutions: ["480p", "720p", "1080p"],
+    aspectRatios: ["adaptive","16:9","4:3","1:1","3:4","9:16"],
+    supportsEndFrame: true,
+    audioType: "toggle",
+    textToVideo: true,
+    supportsReferenceVideo: true,
+  },
+  {
+    // ADMIN ONLY — the higher tier. Same knobs, but no reference endpoint,
+    // so references fall back to image/text.
+    id: "wan-3.0-prime",
+    name: "Wan 3.0 Prime",
+    durations: ["2","3","4","5","6","7","8","9","10"],
+    resolutions: ["480p", "720p", "1080p"],
+    aspectRatios: ["adaptive","16:9","4:3","1:1","3:4","9:16"],
+    supportsEndFrame: true,
+    audioType: "toggle",
+    textToVideo: true,
+  },
+  {
+    // ADMIN ONLY — bytedance/seedance-2.5. NOTE: no text-only endpoint, so an
+    // image or references are required (textToVideo intentionally omitted).
+    id: "seedance-2.5",
+    name: "SeeDance 2.5",
+    durations: ["auto","4","5","6","7","8","9","10","11","12"],
+    resolutions: ["480p","720p","1080p"],
+    aspectRatios: ["auto","21:9","16:9","4:3","1:1","3:4","9:16"],
+    supportsEndFrame: true,
+    audioType: "toggle",
+    supportsReferenceVideo: true,
+  },
+  {
+    // ADMIN ONLY — Omni Flash 1.1. Adds 4K, keeps 16:9/9:16 only, and has no
+    // edit endpoint (unlike the base model).
+    id: "gemini-omni-1.1",
+    name: "Gemini Omni Flash 1.1",
+    // a video reference routes to the v1.1 edit endpoint
+    supportsVideoExtend: true,
+    durations: ["4","5","6","7","8","9","10","12"],
+    resolutions: ["360p","720p","1080p","4k"],
+    aspectRatios: ["16:9","9:16"],
+    supportsEndFrame: true,
+    audioType: "none",   // audio is native, no toggle in the schema
+    textToVideo: true,
+    supportsReferenceVideo: true,
+  },
+  {
+    // ADMIN ONLY — LTX 2.5 Pro. Duration is an ENUM (6/8/10/auto) and fps is
+    // selectable; the route snaps anything else to the nearest allowed value.
+    id: "ltx-2.5-pro",
+    name: "LTX 2.5 Pro",
+    durations: ["auto","6","8","10"],
+    resolutions: ["720p","1080p"],
+    aspectRatios: ["auto","16:9","9:16"],
+    supportsEndFrame: true,
+    audioType: "toggle",
+    textToVideo: true,
+    fpsOptions: ["24","25","50"],
+  },
+  {
+    // ADMIN ONLY — LTX 2.5 Fast: reaches 2160p and 20s, and adds 48fps.
+    id: "ltx-2.5-fast",
+    name: "LTX 2.5 Fast",
+    durations: ["auto","6","8","10","12","14","16","18","20"],
+    resolutions: ["720p","1080p","1440p","2160p"],
+    aspectRatios: ["auto","16:9","9:16"],
+    supportsEndFrame: true,
+    audioType: "toggle",
+    textToVideo: true,
+    fpsOptions: ["24","25","48","50"],
+  },
+  {
+    // ── Video tools (ADMIN ONLY): these take an existing clip. Upload it as a
+    // video reference; no prompt is required, and most take none at all.
+    id: "flux-video-upscale",
+    name: "Flux Video Upscale",
+    durations: [], supportsEndFrame: false, audioType: "none",
+    isVideoTool: true, toolPrompt: true,
+    // its schema allows 1.5-3 only
+    upscaleFactors: ["1.5","2","2.5","3"],
+    supportsReferenceVideo: true,
+  },
+  {
+    id: "topaz-upscale-precision",
+    name: "Topaz Upscale · Precision",
+    durations: [], supportsEndFrame: false, audioType: "none",
+    isVideoTool: true, upscaleFactors: ["1","2","3","4"],
+    supportsReferenceVideo: true,
+  },
+  {
+    id: "topaz-upscale-creative",
+    name: "Topaz Upscale · Creative",
+    durations: [], supportsEndFrame: false, audioType: "none",
+    isVideoTool: true, toolPrompt: true, upscaleFactors: ["1","2","3","4"],
+    supportsReferenceVideo: true,
+  },
+  {
+    id: "topaz-upscale-generative",
+    name: "Topaz Upscale · Starlight",
+    durations: [], supportsEndFrame: false, audioType: "none",
+    isVideoTool: true, upscaleFactors: ["1","2","3","4"],
+    supportsReferenceVideo: true,
+  },
+  {
+    id: "seedvr2-video",
+    name: "SeedVR2 Video",
+    durations: [], supportsEndFrame: false, audioType: "none",
+    isVideoTool: true, upscaleFactors: ["1","2","3","4"],
+    supportsReferenceVideo: true,
+  },
+  {
+    id: "flashvsr-video",
+    name: "FlashVSR",
+    durations: [], supportsEndFrame: false, audioType: "none",
+    isVideoTool: true, upscaleFactors: ["1","2","3","4"],
+    supportsReferenceVideo: true,
+  },
+  {
+    id: "bytedance-video-upscale",
+    name: "ByteDance Video Upscale",
+    durations: [], supportsEndFrame: false, audioType: "none",
+    isVideoTool: true, upscaleFactors: ["1","2","3","4"],
+    supportsReferenceVideo: true,
+  },
+  {
+    id: "topaz-interpolate",
+    name: "Topaz Frame Interpolate",
+    durations: [], supportsEndFrame: false, audioType: "none",
+    isVideoTool: true, targetFpsOptions: ["30","48","60","90","120"],
+    supportsReferenceVideo: true,
+  },
+  {
+    id: "topaz-colorize",
+    name: "Topaz Colorize",
+    durations: [], supportsEndFrame: false, audioType: "none",
+    isVideoTool: true, supportsReferenceVideo: true,
+  },
+  {
+    id: "topaz-deblur",
+    name: "Topaz Deblur",
+    durations: [], supportsEndFrame: false, audioType: "none",
+    isVideoTool: true, supportsReferenceVideo: true,
+  },
+  {
+    id: "topaz-sdr-to-hdr",
+    name: "Topaz SDR → HDR",
+    durations: [], supportsEndFrame: false, audioType: "none",
+    isVideoTool: true, supportsReferenceVideo: true,
+  },
+  {
     id: "lipsync-v3",
     name: "Lipsync v3",
     durations: [],
@@ -827,6 +1036,23 @@ const VIDEO_MODEL_COST: Record<string, "$" | "$$" | "$$$" | "$$$+"> = {
   "kling-v3":           "$$$",
   "happy-horse":        "$$",
   "minimax-h3-max":     "$$",
+  "wan-3.0":            "$$$",
+  "wan-3.0-prime":      "$$$+",
+  "seedance-2.5":       "$$$",
+  "gemini-omni-1.1":    "$$$+",
+  "ltx-2.5-pro":        "$$$",
+  "ltx-2.5-fast":       "$$",
+  "flux-video-upscale": "$$$",
+  "topaz-upscale-precision": "$$",
+  "topaz-upscale-creative":  "$$$",
+  "topaz-upscale-generative":"$$$+",
+  "seedvr2-video":      "$$",
+  "flashvsr-video":     "$$",
+  "bytedance-video-upscale": "$$",
+  "topaz-interpolate":  "$$",
+  "topaz-colorize":     "$$",
+  "topaz-deblur":       "$$",
+  "topaz-sdr-to-hdr":   "$$",
   "flux-3":             "$$$",
   "flux-1-dev":         "$$",
   "z-image-base":       "$$",
@@ -865,11 +1091,22 @@ const IMAGE_MODEL_GROUPS = [
   { label: "Z-Image",           type: "text to image",             accent: "text-cyan-400",    dot: "bg-cyan-400",    items: ["Z-Image Base", "Z-Image Turbo"] },
 ]
 const ADMIN_IMAGE_MODEL_GROUPS = [
+  { label: "Alibaba",   type: "text to image · edit",       accent: "text-orange-400", dot: "bg-orange-400", items: ["Qwen Image 3", "Qwen Image 3 Edit"] },
+  { label: "Reve",      type: "text to image · edit",       accent: "text-pink-400",  dot: "bg-pink-400",  items: ["Reve 2.1", "Reve 2.1 Edit"] },
+  { label: "Microsoft", type: "text to image · edit",       accent: "text-sky-400",   dot: "bg-sky-400",   items: ["MAI Image 2.5 Pro", "MAI Image 2.5 Pro Edit"] },
+  { label: "xAI",       type: "text to image · edit",       accent: "text-slate-300", dot: "bg-slate-300", items: ["Grok Imagine 2.0", "Grok Imagine 2.0 Edit"] },
+  { label: "Google",    type: "text to image · try-on",     accent: "text-emerald-400", dot: "bg-emerald-400", items: ["NanoBanana 2 Lite", "Virtual Try-On"] },
+  { label: "Meta",      type: "text to image · edit",       accent: "text-blue-400",  dot: "bg-blue-400",  items: ["Meta Muse", "Meta Muse Edit"] },
+  { label: "Bria",      type: "text to image · edit",       accent: "text-teal-400",  dot: "bg-teal-400",  items: ["Bria Fibo 1.5", "Bria Fibo Edit"] },
+  { label: "Ideogram",  type: "text in images",             accent: "text-amber-400", dot: "bg-amber-400", items: ["Ideogram v4 Instant", "Ideogram v4 Fast"] },
+  { label: "Recraft V4", type: "styles · SVG vector output", accent: "text-violet-400", dot: "bg-violet-400", items: ["Recraft V4 Style", "Recraft V4 Style Pro", "Recraft V4 Vector", "Recraft V4 Vector Pro"] },
   // Gemini scanners retired from the public offering 2026-07-29 — admin only now
   { label: "Gemini",    type: "text to image",              accent: "text-blue-400",  dot: "bg-blue-400",  items: ["Flash Scanner v2.5", "Pro Scanner v3"] },
   { label: "Wan",       type: "text to image · custom LoRA", accent: "text-violet-400", dot: "bg-violet-400", items: ["Wan 2.2 T2I LoRA"] },
-  { label: "RunPod",    type: "local · PC must be running", accent: "text-cyan-400",  dot: "bg-cyan-500",  items: ["Real-ESRGAN (Local)", "DAT-2 (Local)", "Custom Flux LoRA"] },
+  { label: "Pixelcut",  type: "product photography",        accent: "text-rose-400",  dot: "bg-rose-400",  items: ["Pixelcut Product Photo"] },
+  { label: "Topaz",     type: "upscale · restore · adjust", accent: "text-lime-400",  dot: "bg-lime-400",  items: ["Topaz Upscale · Precision", "Topaz Upscale · Creative", "Topaz Upscale · Generative", "Topaz Upscale · Transparent", "Topaz Adjust", "Topaz Sharpen", "Topaz Denoise", "Topaz Restore"] },
   { label: "Upscalers", type: "enhance & enlarge images",   accent: "text-slate-400", dot: "bg-slate-500", items: ["Clarity Upscaler", "AuraSR", "ESRGAN", "DRCT", "SUPIR"] },
+  { label: "RunPod",    type: "local · PC must be running", accent: "text-cyan-400",  dot: "bg-cyan-500",  items: ["Real-ESRGAN (Local)", "DAT-2 (Local)", "Custom Flux LoRA"] },
 ]
 const VIDEO_MODEL_COST_BY_NAME: Record<string, "$" | "$$" | "$$$" | "$$$+"> = Object.fromEntries(
   VIDEO_MODEL_CONFIGS.map(m => [m.name, VIDEO_MODEL_COST[m.id] ?? "$$"])
@@ -882,13 +1119,26 @@ const VIDEO_MODEL_GROUPS = [
   { label: "Alibaba",     type: "image to video",        accent: "text-yellow-400",  dot: "bg-yellow-400",  items: ["Happy Horse"] },
 ]
 const ADMIN_VIDEO_MODEL_GROUPS = [
-  { label: "Google", type: "text · image · ref · edit to video · pricing TBD", accent: "text-blue-400", dot: "bg-blue-400", items: ["Gemini Omni Flash"] },
-  { label: "Wan",    type: "image & text to video · pricing TBD",             accent: "text-violet-400", dot: "bg-violet-400", items: ["Wan 2.7", "Wan 2.2 LoRA"] },
+  { label: "Alibaba", type: "text · image · refs · with audio · pricing TBD",  accent: "text-orange-400", dot: "bg-orange-400", items: ["Wan 3.0", "Wan 3.0 Prime"] },
+  { label: "ByteDance", type: "image & refs to video · pricing TBD",           accent: "text-sky-400",    dot: "bg-sky-400",    items: ["SeeDance 2.5"] },
+  { label: "Google", type: "text · image · ref · edit to video · pricing TBD", accent: "text-blue-400", dot: "bg-blue-400", items: ["Gemini Omni Flash 1.1", "Gemini Omni Flash"] },
+  { label: "Lightricks", type: "text & image to video · up to 4K · pricing TBD", accent: "text-lime-400", dot: "bg-lime-400",   items: ["LTX 2.5 Pro", "LTX 2.5 Fast"] },
   { label: "MiniMax", type: "image & text to video · pricing TBD",            accent: "text-rose-400",   dot: "bg-rose-400",   items: ["MiniMax H3 Max"] },
   { label: "Black Forest Labs", type: "text · image · keyframes · extend · with audio · pricing TBD", accent: "text-amber-400", dot: "bg-amber-400", items: ["Flux 3"] },
+  { label: "Wan",    type: "image & text to video · pricing TBD",             accent: "text-violet-400", dot: "bg-violet-400", items: ["Wan 2.7", "Wan 2.2 LoRA"] },
+  { label: "Video Tools", type: "upload a clip · upscale · restore · pricing TBD", accent: "text-teal-400", dot: "bg-teal-400",
+    items: ["Flux Video Upscale", "Topaz Upscale · Precision", "Topaz Upscale · Creative", "Topaz Upscale · Starlight",
+            "SeedVR2 Video", "FlashVSR", "ByteDance Video Upscale", "Topaz Frame Interpolate",
+            "Topaz Colorize", "Topaz Deblur", "Topaz SDR → HDR"] },
 ]
 // Model ids only admins may see/select in the video UI (also gated server-side)
-const ADMIN_VIDEO_MODEL_IDS = new Set(["gemini-omni-flash", "wan-2.7", "wan-2.2-lora", "minimax-h3-max", "flux-3"])
+const ADMIN_VIDEO_MODEL_IDS = new Set([
+  "gemini-omni-flash", "wan-2.7", "wan-2.2-lora", "minimax-h3-max", "flux-3",
+  "wan-3.0", "wan-3.0-prime", "seedance-2.5", "gemini-omni-1.1", "ltx-2.5-pro", "ltx-2.5-fast",
+  "flux-video-upscale", "topaz-upscale-precision", "topaz-upscale-creative", "topaz-upscale-generative",
+  "seedvr2-video", "flashvsr-video", "bytedance-video-upscale",
+  "topaz-interpolate", "topaz-colorize", "topaz-deblur", "topaz-sdr-to-hdr",
+])
 
 // ── Wan 2.2 custom-LoRA picker (admin) ─────────────────────────────────────
 // Runs come from /api/admin/video-loras (training/video-loras/<run>/run.json).
@@ -967,6 +1217,7 @@ function WanLoraPicker({ runs, sel, onSelect }: {
 const SILVER_RIM_MODELS = new Set([
   "NanoBanana Pro 2", "ChatGPT Images 2.0", "Recraft v4.1",          // image
   "SeeDance 2.0", "Kling 3.0", "Wan 2.7", "Gemini Omni Flash", "Flux 3",  // video
+  "Wan 3.0 Prime", "SeeDance 2.5", "LTX 2.5 Fast",
 ])
 const SILVER_RIM_CONIC =
   "conic-gradient(from 0deg, rgba(226,232,240,0.1), #f8fafc, #94a3b8, rgba(226,232,240,0.15), #cbd5e1, #64748b, rgba(226,232,240,0.1))"
@@ -1377,6 +1628,99 @@ function TaskbarDropdown({
 // in both display modes, cost legend). Used by BOTH the taskbar Image/Video
 // dropdowns and the prompt box's inline model picker so the two surfaces always
 // look and behave identically — including the persisted List/Cards preference.
+
+// A short line per model so the menus can be skimmed for a JOB rather than
+// read as a list of names. Keyed by display name — the same key the dropdown
+// groups use. Anything missing simply renders without a subtitle.
+const MODEL_BLURBS: Record<string, string> = {
+  // ── Image ──
+  "NanoBanana Pro":            "Photoreal edits, holds likeness",
+  "NanoBanana Pro 2":          "Flagship all-rounder, best quality",
+  "NanoBanana 2 Lite":         "Cheaper, faster NanoBanana",
+  "Kling V3":                  "Stylised art and illustration",
+  "Kling O3":                  "Higher-fidelity Kling images",
+  "SeeDream 4.5":              "Fast, dependable general images",
+  "SeeDream 5.0 Lite":         "Quick drafts, lowest cost",
+  "SeeDream 5.0 Pro":          "Sharp 2K photoreal detail",
+  "Recraft v4.1":              "Design work, logos and layout",
+  "Wan 2.7 Pro":               "Detailed scenes, strong composition",
+  "FLUX 1 Dev":                "Open model, LoRA friendly",
+  "FLUX 2":                    "Fast with strong prompt adherence",
+  "ChatGPT Images 2.0":        "Best for text and diagrams",
+  "Z-Image Base":              "Balanced quality for the price",
+  "Z-Image Turbo":             "Fastest, cheapest drafts",
+  "Qwen Image 3":              "Alibaba flagship, strong realism",
+  "Qwen Image 3 Edit":         "Edit using up to 6 references",
+  "Reve 2.1":                  "Follows complex prompts closely",
+  "Reve 2.1 Edit":             "Precise edits from one image",
+  "MAI Image 2.5 Pro":         "Microsoft flagship, clean detail",
+  "MAI Image 2.5 Pro Edit":    "Instruction-driven photo editing",
+  "Grok Imagine 2.0":          "Expressive results, quick turnaround",
+  "Grok Imagine 2.0 Edit":     "Edit using up to 4 references",
+  "Virtual Try-On":            "Dress a person in a garment",
+  "Meta Muse":                 "Meta's text-to-image model",
+  "Meta Muse Edit":            "Edit using up to 10 references",
+  "Bria Fibo 1.5":             "Licensed data, commercially safe",
+  "Bria Fibo Edit":            "Masked edits on licensed data",
+  "Ideogram v4 Instant":       "Best at text inside images",
+  "Ideogram v4 Fast":          "Text rendering with speed presets",
+  "Recraft V4 Style":          "Brand styles and colour control",
+  "Recraft V4 Style Pro":      "Higher-fidelity branded styles",
+  "Recraft V4 Vector":         "True SVG vector output",
+  "Recraft V4 Vector Pro":     "Higher-fidelity SVG vectors",
+  "Flash Scanner v2.5":        "Fast Gemini scanner (legacy)",
+  "Pro Scanner v3":            "Detailed Gemini scanner (legacy)",
+  "Wan 2.2 T2I LoRA":          "Runs your trained Wan LoRAs",
+  "Pixelcut Product Photo":    "Product shots on clean backgrounds",
+  "Custom Flux LoRA":          "Runs your own Flux LoRAs",
+  // ── Image tools ──
+  "Topaz Adjust":              "Colour, white balance, colourise",
+  "Topaz Sharpen":             "Fixes blur and soft focus",
+  "Topaz Denoise":             "Cleans grain and sensor noise",
+  "Topaz Restore":             "Repairs old, damaged photos",
+  "Topaz Upscale · Transparent": "Upscales and keeps transparency",
+  "Clarity Upscaler":          "Creative upscale, adds detail",
+  "AuraSR":                    "Fast 4x upscale",
+  "ESRGAN":                    "Classic dependable upscaler",
+  "DRCT":                      "Detail-preserving upscale",
+  "SUPIR":                     "Photoreal restoration upscale",
+  "Real-ESRGAN (Local)":       "Runs on your PC, free",
+  "DAT-2 (Local)":             "Local high-quality upscale",
+  // ── Video ──
+  "Kling 3.0":                 "Smooth motion, strong realism",
+  "Kling V3 Motion":           "Copies motion from a video",
+  "SeeDance 1.5":              "Reliable image-to-video",
+  "SeeDance 2.0":              "Multi-reference with native audio",
+  "SeeDance 2.0 Fast":         "Cheaper, quicker SeeDance 2.0",
+  "SeeDance 2.5":              "Newest SeeDance, refs and audio",
+  "Wan 2.5":                   "Solid image-to-video at 1080p",
+  "Wan 2.7":                   "Start and end frame control",
+  "Wan 3.0":                   "Latest Wan, native audio",
+  "Wan 3.0 Prime":             "Highest-tier Wan quality",
+  "Wan 2.2 LoRA":              "Runs your trained video LoRAs",
+  "Gemini Omni Flash":         "Text, image, refs and edit",
+  "Gemini Omni Flash 1.1":     "Adds 4K and video editing",
+  "LTX 2.5 Pro":               "Fast 1080p with audio",
+  "LTX 2.5 Fast":              "Up to 4K and longer clips",
+  "MiniMax H3 Max":            "Strong prompt following, 768p",
+  "Flux 3":                    "Text, keyframes, extend, audio",
+  "Lipsync v3":                "Syncs lips to any audio",
+  "Happy Horse":               "Stylised character animation",
+  // ── Video tools ──
+  "Flux Video Upscale":        "Upscale, optional prompt guidance",
+  "Topaz Upscale · Precision": "Faithful upscale, invents nothing",
+  "Topaz Upscale · Creative":  "Upscale that adds new detail",
+  "Topaz Upscale · Generative": "Heavy restoration, invents detail",
+  "Topaz Upscale · Starlight": "Heaviest video restoration",
+  "SeedVR2 Video":             "Fast video super-resolution",
+  "FlashVSR":                  "Quick, light video upscale",
+  "ByteDance Video Upscale":   "Enhances and upscales footage",
+  "Topaz Frame Interpolate":   "Higher fps and slow motion",
+  "Topaz Colorize":            "Colourises black-and-white video",
+  "Topaz Deblur":              "Removes motion blur",
+  "Topaz SDR → HDR":           "Converts SDR footage to HDR",
+}
+
 function ModelMenuPanel({
   label,
   groups,
@@ -1419,20 +1763,74 @@ function ModelMenuPanel({
 
   // One model row; flagship models (SILVER_RIM_MODELS) render as a chip wrapped
   // in the animated silver rim — same conic sweep as the site logo.
+  // The emblem is the same media the home page shows for this model, so the
+  // two stay in sync automatically — upload it once on /admin and it appears
+  // here. Video media renders its first frame rather than autoplaying: a list
+  // can hold fifty rows, and fifty decoders is not a menu.
+  const [modelQuery, setModelQuery] = useState("")
+  // Split groups across two columns by running item count, so both sides end
+  // up a similar height and neither leaves a gap waiting for the other.
+  const splitColumns = <T extends { items: string[] }>(gs: T[]): [T[], T[]] => {
+    const cols: [T[], T[]] = [[], []]
+    const weight = [0, 0]
+    for (const g of gs) {
+      const i = weight[0] <= weight[1] ? 0 : 1
+      cols[i].push(g)
+      weight[i] += g.items.length + 1.6   // +1.6 ≈ the header's own height
+    }
+    return cols
+  }
+  const q = modelQuery.trim().toLowerCase()
+  const matches = (item: string) => !q || item.toLowerCase().includes(q)
+  const filterGroups = <T extends { label: string; items: string[] }>(gs: T[] | undefined) =>
+    (gs ?? [])
+      .map(g => ({ ...g, items: g.items.filter(matches) }))
+      .filter(g => g.items.length > 0)
+
+  const renderEmblem = (item: string) => {
+    const media = cardMedia?.[`${cardPrefix}:${item}`]
+    if (!media) {
+      return (
+        <span className="w-12 h-9 shrink-0 rounded-md bg-white/[0.05] border border-white/10 flex items-center justify-center">
+          <span className="text-[10px] font-bold text-slate-500">{item.slice(0, 1)}</span>
+        </span>
+      )
+    }
+    return (
+      <span className="w-12 h-9 shrink-0 rounded-md overflow-hidden bg-black border border-white/10">
+        {media.mediaType === "video" ? (
+          <video src={`${media.mediaUrl}${media.mediaUrl.includes("#") ? "" : "#t=0.001"}`}
+            className="w-full h-full object-cover" muted playsInline preload="metadata" />
+        ) : (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={media.mediaUrl} alt="" className="w-full h-full object-cover" loading="lazy" decoding="async" />
+        )}
+      </span>
+    )
+  }
+
   const renderItem = (item: string) => {
     const row = (
       <button
         key={item}
         onClick={() => onSelect(item)}
-        className={`w-full text-left px-2.5 py-1.5 text-[11px] transition-colors flex items-center justify-between gap-1 border-b border-white/[0.04] last:border-0 ${
+        className={`w-full text-left px-2 py-1.5 transition-colors flex items-center gap-2 border-b border-white/[0.04] last:border-0 ${
           activeItem === item
-            ? "bg-white/8 text-white font-medium"
-            : "text-slate-400 hover:text-white hover:bg-white/[0.05]"
+            ? "bg-white/[0.10] text-white"
+            : "text-slate-300 hover:text-white hover:bg-white/[0.05]"
         }`}
       >
-        <span className="truncate leading-tight">{item}</span>
-        <span className="shrink-0 flex items-center gap-1">
-          {activeItem === item && <span className="w-1 h-1 rounded-full bg-white" />}
+        {renderEmblem(item)}
+        <span className="flex-1 min-w-0">
+          <span className={`block truncate text-[12.5px] leading-tight ${activeItem === item ? "font-semibold" : "font-medium"}`}>
+            {item}
+          </span>
+          {MODEL_BLURBS[item] && (
+            <span className="block truncate text-[10px] leading-tight text-slate-500 mt-0.5">{MODEL_BLURBS[item]}</span>
+          )}
+        </span>
+        <span className="shrink-0 flex items-center gap-1.5">
+          {activeItem === item && <span className="w-1.5 h-1.5 rounded-full bg-white" />}
           {itemCosts?.[item] && <CostBadge tier={itemCosts[item]} />}
         </span>
       </button>
@@ -1461,6 +1859,17 @@ function ModelMenuPanel({
                 <span className="text-slate-600">Active: <span className="text-slate-400">{activeItem ?? "none"}</span></span>
               </p>
             </div>
+            {/* Filter — the lists are long enough now that scanning them by
+                eye is the slow part */}
+            <div className="relative flex-1 min-w-[90px] max-w-[220px]">
+              <input
+                value={modelQuery}
+                onChange={e => setModelQuery(e.target.value)}
+                placeholder="Filter models…"
+                className="w-full pl-6 pr-2 py-1 rounded-lg bg-black/40 border border-white/12 text-[11px] text-white placeholder:text-slate-600 focus:outline-none focus:border-white/35"
+              />
+              <Search size={11} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+            </div>
             {/* List / Cards display toggle */}
             <div className="flex items-center rounded-lg border border-white/10 overflow-hidden bg-black/20 shrink-0">
               <button
@@ -1485,14 +1894,16 @@ function ModelMenuPanel({
               list (works landscape/portrait, down to small phones) with compact
               16:9 tiles so the whole menu fits one screen. */}
           {viewMode === "cards" ? (() => {
-            const renderCard = (item: string) => {
+            const renderCard = (item: string, groupLabel?: string) => {
+
               const media = cardMedia?.[`${cardPrefix}:${item}`]
               const active = activeItem === item
               const card = (
                 <button
                   key={item}
                   onClick={() => onSelect(item)}
-                  className={`relative w-full aspect-video rounded-md overflow-hidden text-left transition-all ${
+                  title={MODEL_BLURBS[item] ? `${item} — ${MODEL_BLURBS[item]}` : item}
+                  className={`relative w-full aspect-[4/3] rounded-lg overflow-hidden text-left transition-all ${
                     active ? "ring-2 ring-white ring-inset" : "hover:ring-1 hover:ring-white/40 hover:ring-inset"
                   } ${SILVER_RIM_MODELS.has(item) ? "" : "border border-white/10"}`}
                 >
@@ -1514,17 +1925,20 @@ function ModelMenuPanel({
                     <div className="absolute inset-0 bg-white/[0.04]" />
                   )}
                   {/* Bottom scrim: name + cost */}
-                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/45 to-transparent px-1.5 pt-3 pb-1 pointer-events-none">
-                    <div className="flex items-center gap-1">
+                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent px-2 pt-4 pb-1.5 pointer-events-none">
+                    {groupLabel && (
+                      <span className="block text-[8px] font-mono uppercase tracking-wider text-slate-400 leading-none truncate">{groupLabel}</span>
+                    )}
+                    <div className="flex items-center gap-1 mt-0.5">
                       {active && <span className="w-1 h-1 rounded-full bg-white shrink-0" />}
-                      <span className="text-[9px] font-bold text-white leading-tight truncate flex-1">{item}</span>
+                      <span className="text-[10px] font-bold text-white leading-tight truncate flex-1">{item}</span>
                       {itemCosts?.[item] && <CostBadge tier={itemCosts[item]} />}
                     </div>
                   </div>
                 </button>
               )
               return SILVER_RIM_MODELS.has(item) ? (
-                <div key={item} className="relative isolate rounded-md overflow-hidden p-[1.5px]">
+                <div key={item} className="relative isolate rounded-lg overflow-hidden p-[1.5px]">
                   <span
                     className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 aspect-square w-[300%] animate-spin pointer-events-none -z-10"
                     style={{ background: SILVER_RIM_CONIC, animationDuration: "5s" }}
@@ -1535,41 +1949,24 @@ function ModelMenuPanel({
             }
             return (
               <div
-                className="p-2.5 grid grid-cols-2 gap-x-2 gap-y-2 overflow-y-auto"
+                className="p-2.5 overflow-y-auto space-y-2.5"
                 style={{ maxHeight: bodyMaxHeight }}
               >
-                {groups.map((group) => (
-                  <div key={group.label}>
-                    <div className="flex items-center gap-1.5 px-1.5 pb-1">
-                      <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${group.dot}`} />
-                      <span className="text-[9px] font-bold tracking-widest uppercase leading-none text-slate-300">{group.label}</span>
-                      <span className="text-[8px] text-slate-600 leading-none truncate">· {group.type}</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-1">
-                      {group.items.map(renderCard)}
-                    </div>
-                  </div>
-                ))}
-                {adminGroups && adminGroups.length > 0 && (
-                  <div className="col-span-2 mt-0.5 rounded-lg border border-violet-500/25 bg-violet-500/[0.04] overflow-hidden">
+                {/* Every model, one continuous grid — no per-company rows to
+                    leave half empty. The company reads off each tile. */}
+                <div className="grid grid-cols-3 gap-1.5">
+                  {filterGroups(groups).flatMap(g => g.items.map(it => renderCard(it, g.label)))}
+                </div>
+
+                {filterGroups(adminGroups).length > 0 && (
+                  <div className="rounded-lg border border-violet-500/25 bg-violet-500/[0.04] overflow-hidden">
                     <div className="flex items-center gap-1.5 px-2.5 py-1.5 border-b border-violet-500/15">
                       <div className="w-1.5 h-1.5 rounded-full bg-violet-400 shrink-0" />
                       <span className="text-[9px] font-bold tracking-widest uppercase text-violet-300">Admin Models</span>
                       <span className="text-[8px] text-slate-600">· admin only</span>
                     </div>
-                    <div className="p-2 grid grid-cols-2 gap-x-2">
-                      {adminGroups.map((sub) => (
-                        <div key={sub.label}>
-                          <div className="flex items-center gap-1.5 px-1.5 pb-1">
-                            <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${sub.dot}`} />
-                            <span className="text-[9px] font-bold tracking-widest uppercase leading-none text-slate-300">{sub.label}</span>
-                            <span className="text-[8px] text-slate-600 leading-none truncate">· {sub.type}</span>
-                          </div>
-                          <div className="grid grid-cols-2 gap-1">
-                            {sub.items.map(renderCard)}
-                          </div>
-                        </div>
-                      ))}
+                    <div className="p-2 grid grid-cols-3 gap-1.5">
+                      {filterGroups(adminGroups).flatMap(g => g.items.map(it => renderCard(it, g.label)))}
                     </div>
                   </div>
                 )}
@@ -1577,10 +1974,13 @@ function ModelMenuPanel({
             )
           })() : (
           <div
-            className="p-2.5 grid grid-cols-2 gap-x-2 gap-y-2 overflow-y-auto"
+            className="p-2.5 overflow-y-auto"
             style={{ maxHeight: bodyMaxHeight }}
           >
-            {groups.map((group) => (
+           <div className="flex gap-2 items-start">
+            {splitColumns(filterGroups(groups)).map((col, ci) => (
+             <div key={ci} className="flex-1 min-w-0 space-y-2">
+              {col.map((group) => (
               <div key={group.label}>
                 {/* Company label — monochrome text; the small colored dot alone
                     carries the per-company wayfinding */}
@@ -1594,18 +1994,24 @@ function ModelMenuPanel({
                   {group.items.map(renderItem)}
                 </div>
               </div>
+              ))}
+             </div>
             ))}
+           </div>
 
             {/* Admin Models — full-width block containing subsections */}
-            {adminGroups && adminGroups.length > 0 && (
+            {filterGroups(adminGroups).length > 0 && (
               <div className="col-span-2 mt-0.5 rounded-lg border border-violet-500/25 bg-violet-500/[0.04] overflow-hidden">
                 <div className="flex items-center gap-1.5 px-2.5 py-1.5 border-b border-violet-500/15">
                   <div className="w-1.5 h-1.5 rounded-full bg-violet-400 shrink-0" />
                   <span className="text-[9px] font-bold tracking-widest uppercase text-violet-300">Admin Models</span>
                   <span className="text-[8px] text-slate-600">· admin only</span>
                 </div>
-                <div className="p-2 grid grid-cols-2 gap-x-2">
-                  {adminGroups.map((sub) => (
+                <div className="p-2">
+                 <div className="flex gap-2 items-start">
+                  {splitColumns(filterGroups(adminGroups)).map((col, ci) => (
+                   <div key={ci} className="flex-1 min-w-0 space-y-2">
+                    {col.map((sub) => (
                     <div key={sub.label}>
                       <div className="flex items-center gap-1.5 px-1.5 pb-1">
                         <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${sub.dot}`} />
@@ -1616,7 +2022,10 @@ function ModelMenuPanel({
                         {sub.items.map(renderItem)}
                       </div>
                     </div>
+                    ))}
+                   </div>
                   ))}
+                 </div>
                 </div>
               </div>
             )}
@@ -1724,7 +2133,7 @@ function GroupedTaskbarDropdown({
       {open && (
         <div
           className="fixed rounded-2xl border border-white/[0.08] bg-[#070b14]/95 backdrop-blur-md shadow-2xl z-[9999] overflow-hidden"
-          style={{ top: menuPos.top, left: menuPos.left, width: Math.min(428, (window.innerWidth - 16) / menuPos.z) }}
+          style={{ top: menuPos.top, left: menuPos.left, width: Math.min(720, (window.innerWidth - 16) / menuPos.z) }}
         >
           <ModelMenuPanel
             label={label}
@@ -1793,6 +2202,9 @@ function SelectModeOverlay({
   downloadError,
   isAdmin = false,
   onAddToBucket,
+  onAddToRefs,
+  addingToRefs,
+  addToRefsNote,
 }: {
   selectedCount: number
   onDownloadAll: () => void
@@ -1807,6 +2219,9 @@ function SelectModeOverlay({
   downloadError?: string | null
   isAdmin?: boolean
   onAddToBucket?: () => void
+  onAddToRefs?: () => void
+  addingToRefs?: boolean
+  addToRefsNote?: string | null
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false)
 
@@ -1877,6 +2292,23 @@ function SelectModeOverlay({
           </span>
         </button>
       )}
+      {/* Save the selection into the account's reference library */}
+      {onAddToRefs && (
+        <button
+          onClick={() => { if (selectedCount > 0 && !addingToRefs) onAddToRefs() }}
+          disabled={selectedCount === 0 || !!addingToRefs}
+          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm bg-cyan-500/10 border border-cyan-500/25 text-cyan-300 hover:bg-cyan-500/20 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          {addingToRefs
+            ? <div className="w-3 h-3 rounded-full border-2 border-cyan-500/30 border-t-cyan-300 animate-spin shrink-0" />
+            : <ImagePlus size={13} className="shrink-0" />}
+          <span className="flex-1 text-left">{addingToRefs ? "Adding to Refs…" : "Add to Refs"}</span>
+        </button>
+      )}
+      {addToRefsNote && (
+        <p className="text-[11px] text-slate-400 leading-snug px-1 -mt-1">{addToRefsNote}</p>
+      )}
+
       {/* Admin only: add selection to a dataset bucket */}
       {isAdmin && onAddToBucket && (
         <button
@@ -9208,6 +9640,9 @@ function ImageGrid({
       if (adminFilters) {
         // Admin feed filters — same API + params as /admin/dataset (page-based)
         const params = buildAdminFeedParams(adminFilters, pageRef.current, pageLimitRef.current)
+        // The dataset API returns every media type unless asked; this is the
+        // IMAGE feed, so exclude video rows there too
+        params.set("mediaType", "image")
         res = await fetch(`/api/admin/dataset?${params}`, { headers: adminPasswordHeaders() })
       } else {
         // Cursor pagination: send the last item we have so the server reads straight
@@ -17408,6 +17843,12 @@ function PromptBox({
   const [quality, setQuality] = useState<Quality>("2k")
   const [outputFormat, setOutputFormat] = useState<"png" | "jpeg" | "webp">("png")
   const [imageCount, setImageCount] = useState<number>(1)
+  // What this account may queue at once for this model. The raise applies only
+  // to models that already batch: an upscaler produces one output per source,
+  // so a stepper there would promise a batch its submit path never makes.
+  const maxImagesForUser = isAdminAccount && (model.maxImages ?? 1) > 1
+    ? Math.max(model.maxImages ?? 1, ADMIN_MAX_IMAGES)
+    : (model.maxImages ?? 1)
   // Batch submission progress (admin batch mode)
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null)
   const [seedreamSafetyChecker, setSeedreamSafetyChecker] = useState(false)
@@ -17571,6 +18012,36 @@ function PromptBox({
   const loraPickerRef = useRef<HTMLDivElement>(null)
   // Upscaler state
   const [upscaleSourceUrl, setUpscaleSourceUrl] = useState("")
+  // Virtual Try-On keeps its two images apart: fal takes person_image_url and
+  // product_image_url as distinct fields, so a single ordered list would make
+  // the roles guesswork.
+  const [tryOnPerson, setTryOnPerson] = useState<{ url: string; refId: string | null }>({ url: "", refId: null })
+  const [tryOnGarment, setTryOnGarment] = useState<{ url: string; refId: string | null }>({ url: "", refId: null })
+  const [tryOnSlot, setTryOnSlot] = useState<"person" | "garment">("person")
+  const [tryOnUploading, setTryOnUploading] = useState<"person" | "garment" | null>(null)
+  const [tryOnError, setTryOnError] = useState<string | null>(null)
+  // Natural aspect of each loaded photo, so the column can pick its own layout
+  const [tryOnAspect, setTryOnAspect] = useState<{ person: number | null; garment: number | null }>({ person: null, garment: null })
+  // Which slot sent the user into the reference editor, so its result comes back here
+  const tryOnEditSlot = useRef<"person" | "garment" | null>(null)
+  // Side by side gives each photo a TALL box, which is the shape person shots
+  // actually are. A landscape photo needs the opposite, so one wide image flips
+  // the pair to stacked.
+  const tryOnStacked = (tryOnAspect.person ?? 0) > 1.1 || (tryOnAspect.garment ?? 0) > 1.1
+  // A reference edited elsewhere (the Refs panel) keeps its id but gets a new
+  // url — keep whatever a slot is holding in step with the library.
+  useEffect(() => {
+    const follow = (prev: { url: string; refId: string | null }) => {
+      if (!prev.refId) return prev
+      const row = refLibrary.find(r => r.id === prev.refId)
+      return row && row.url !== prev.url ? { ...prev, url: row.url } : prev
+    }
+    setTryOnPerson(follow)
+    setTryOnGarment(follow)
+  }, [refLibrary])
+  const tryOnFileInputRef = useRef<HTMLInputElement>(null)
+  // Video refs cannot be tried on, and an <img> pointed at one renders broken
+  const tryOnRefs = useMemo(() => refLibrary.filter(r => !isVideoRefUrl(r.url)), [refLibrary])
   const [upscaleUploading, setUpscaleUploading] = useState(false)
   const [upscaleUploadError, setUpscaleUploadError] = useState<string | null>(null)
   const [selectedRefId, setSelectedRefId] = useState<string | null>(null)
@@ -17723,7 +18194,7 @@ function PromptBox({
         aspectRatio: typeof legacy.aspectRatio === "string" ? legacy.aspectRatio : model.aspectRatios[0],
         quality: typeof legacy.quality === "string" ? legacy.quality : "2k",
         outputFormat: legacy.outputFormat === "jpeg" || legacy.outputFormat === "webp" ? legacy.outputFormat : "png",
-        imageCount: Math.min(Math.max(1, Number(legacy.imageCount) || 1), model.maxImages ?? 1),
+        imageCount: Math.min(Math.max(1, Number(legacy.imageCount) || 1), maxImagesForUser),
       }
       // updatedAt 0 so a real server copy always wins the reconcile.
       // Pin defaults ON so Quick Generate is visible from the start.
@@ -17873,7 +18344,7 @@ function PromptBox({
     const qs: Quality[] = m.qualityOptions ?? (["2k", "4k"] as Quality[])
     setQuality(qs.includes(t.quality as Quality) ? (t.quality as Quality) : qs[0])
     setOutputFormat(t.outputFormat)
-    setImageCount(Math.min(Math.max(1, t.imageCount), m.maxImages ?? 1))
+    setImageCount(Math.min(Math.max(1, t.imageCount), isAdminAccount && (m.maxImages ?? 1) > 1 ? Math.max(m.maxImages ?? 1, ADMIN_MAX_IMAGES) : (m.maxImages ?? 1)))
     setSeedreamSafetyChecker(t.seedreamSafetyChecker ?? false)
     setWanSafetyChecker(t.wanSafetyChecker ?? false)
     setFluxDevSafetyChecker(t.fluxDevSafetyChecker ?? false)
@@ -17979,22 +18450,24 @@ function PromptBox({
     if (configOverride.quality) setQuality(configOverride.quality as Quality)
     if (configOverride.outputFormat) setOutputFormat(configOverride.outputFormat as "png" | "jpeg" | "webp")
     if (configOverride.imageCount) {
-      setImageCount(Math.min(Math.max(1, configOverride.imageCount), model.maxImages ?? 1))
+      setImageCount(Math.min(Math.max(1, configOverride.imageCount), maxImagesForUser))
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [configOverride?.version])
 
   const supportsLora = model.id === "z-image-base" || model.id === "z-image-turbo" || model.id === "flux-2" || model.id === "flux-1-dev"
   const upscaleTicketCost = (model.id === "aura-sr" || model.id === "esrgan" || model.id === "drct") ? 1 : (upscaleFactor === 4 ? 26 : 7)
-  const ticketCost = model.isUpscaler
+  const ticketCost = model.isUpscaler && !model.isTryOn
     ? upscaleTicketCost
     : calcTicketCost(model.id, quality, aspectRatio, supportsLora && !!selectedLoraUrl, activeRefImages.length > 0)
-  const totalCost = ticketCost * (model.maxImages ? imageCount : 1)
+  const totalCost = ticketCost * (maxImagesForUser > 1 ? imageCount : 1)
   const needsRefImage = !!model.requiresReferenceImage && activeRefImages.length === 0
   const slotsNeeded = (model.isFal || model.id === "nano-banana-pro-2" || model.id === "gpt-image-2") ? imageCount : 1
   const queueFull = activeJobCount + slotsNeeded > maxConcurrent
   const hasEnoughTickets = isAdminAccount || ticketBalance >= totalCost
-  const canGenerate = model.isUpscaler
+  const canGenerate = model.isTryOn
+    ? !isGenerationMaintenance && !!userId && tryOnPerson.url.startsWith("http") && tryOnGarment.url.startsWith("http") && !generating && !queueFull && hasEnoughTickets
+    : model.isUpscaler
     ? !isGenerationMaintenance && !!userId && upscaleSourceUrl.trim().startsWith("http") && !generating && !queueFull && (!model.isLocalModel || !!selectedLocalCheckpoint) && hasEnoughTickets
     : !isGenerationMaintenance && !!userId && prompt.trim().length > 0 && !generating && !needsRefImage && !queueFull && hasEnoughTickets
 
@@ -18083,12 +18556,58 @@ function PromptBox({
       return
     }
 
+    // --- Virtual Try-On: two named images, no prompt ---
+    // /api/generate feeds imageUrls[0] from upscaleImageUrl and the rest from
+    // referenceImages, and lib/fal-image-models maps [0] to person_image_url
+    // and [1] to product_image_url — so order here is the contract.
+    if (model.isTryOn) {
+      const label = "Virtual try-on"
+      // fal's num_images would return several images under ONE job; separate
+      // jobs match how every other model here batches, so each result gets its
+      // own feed tile, its own retry, and its own ticket line.
+      const count = Math.max(1, imageCount)
+      const slotIds = Array.from({ length: count }, (_, i) => `slot-${nextTempFeedId()}-${i}`)
+      slotIds.forEach(sid => onAddPending({
+        slotId: sid, status: "loading", prompt: label, modelId: model.apiId,
+        aspectRatio: "auto", quality: quality as Quality,
+      }))
+      try {
+        await Promise.all(slotIds.map(async (sid) => {
+          try {
+            const res = await fetch("/api/generate", {
+              signal: AbortSignal.timeout(90_000),
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                model: model.apiId,
+                adminMode: true,
+                // the result takes the person photo's shape — let the feed measure it
+                aspectRatio: "auto",
+                upscaleImageUrl: tryOnPerson.url,
+                referenceImages: [tryOnGarment.url],
+              }),
+            })
+            const data = await res.json()
+            if (!res.ok) { onUpdatePending(sid, { status: "failed", error: data.error || "Generation failed" }); return }
+            if (data.newBalance !== undefined) onBalanceChange(data.newBalance)
+            onUpdatePending(sid, { queueId: data.queueId })
+            onStartPolling(sid, data.queueId, label)
+          } catch (err: any) {
+            onUpdatePending(sid, { status: "failed", error: err.message || "Network error" })
+          }
+        }))
+      } finally {
+        setGenerating(false)
+      }
+      return
+    }
+
     // --- Upscaler models: completely different flow ---
     if (model.isUpscaler) {
       const upscalePrompt = prompt.trim() || "masterpiece, best quality, highres"
       const slotId = `slot-${Date.now()}-0`
       const pendingLabel = model.id === "aura-sr" ? `${upscaleFactor}x AuraSR` : model.id === "esrgan" ? `${upscaleFactor}x ESRGAN` : model.id === "drct" ? `${upscaleFactor}x DRCT` : model.id === "supir" ? `${upscaleFactor}x SUPIR` : `${upscaleFactor}x upscale`
-      onAddPending({ slotId, status: "loading", prompt: pendingLabel, modelId: model.apiId, aspectRatio: "1:1", quality: `${upscaleFactor}x` as Quality })
+      onAddPending({ slotId, status: "loading", prompt: pendingLabel, modelId: model.apiId, aspectRatio: "auto", quality: `${upscaleFactor}x` as Quality })
       try {
         const res = await fetch("/api/generate", {
           signal: AbortSignal.timeout(90_000),
@@ -18097,6 +18616,12 @@ function PromptBox({
           body: JSON.stringify({
             model: model.apiId,
             adminMode: true,
+            // An upscale/restore keeps the source's shape. Without this the
+            // route's '16:9' default cropped tall images to a landscape sliver
+            // (the legacy upscalers hardcode 'auto' server-side; the fal image
+            // suite reads it from the request). Pixelcut is the one model here
+            // that actually sizes its output from this, and its UI offers 1:1.
+            aspectRatio: model.id === "pixelcut-product-photo" ? "1:1" : "auto",
             upscaleImageUrl: upscaleSourceUrl,
             upscaleFactor,
             ...(model.id === "clarity-upscaler"
@@ -19007,6 +19532,73 @@ function PromptBox({
     }
   }
 
+  async function uploadTryOnFile(file: File, slot: "person" | "garment") {
+    setTryOnUploading(slot)
+    setTryOnError(null)
+    try {
+      const pass = typeof sessionStorage !== "undefined" ? (sessionStorage.getItem("admin-password") ?? "") : ""
+      const form = new FormData()
+      form.append("file", file)
+      const res = await fetch("/api/admin/upload-upscale-source", {
+        method: "POST",
+        headers: { ...(pass ? { "x-admin-password": pass } : {}) },
+        body: form,
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `Upload failed: ${res.status}`)
+      }
+      const { publicUrl } = await res.json() as { publicUrl: string }
+      ;(slot === "person" ? setTryOnPerson : setTryOnGarment)({ url: publicUrl, refId: null })
+      return true
+    } catch (e) {
+      setTryOnError(e instanceof Error ? e.message : "Upload failed")
+      return false
+    } finally {
+      setTryOnUploading(null)
+    }
+  }
+
+  /** Fill the active slot from the library, then move to the empty one. */
+  async function useRefForTryOn(img: RefImage) {
+    const slot = tryOnSlot
+    const other = slot === "person" ? "garment" : "person"
+    setTryOnError(null)
+    let ok = false
+    if (img.url.startsWith("http")) {
+      ;(slot === "person" ? setTryOnPerson : setTryOnGarment)({ url: img.url, refId: img.id })
+      ok = true
+    } else {
+      // File-backed refs are data URLs — fal needs something it can fetch
+      try {
+        const res = await fetch(img.url)
+        const blob = await res.blob()
+        ok = await uploadTryOnFile(new File([blob], "ref.jpg", { type: blob.type || "image/jpeg" }), slot)
+      } catch {
+        setTryOnError("Failed to use this image — try again")
+      }
+    }
+    const otherEmpty = other === "person" ? !tryOnPerson.url : !tryOnGarment.url
+    if (ok && otherEmpty) setTryOnSlot(other)
+  }
+
+  // Source pickers belong to the model that shows them. Switching away used to
+  // leave the picked image selected and still armed underneath the next model.
+  useEffect(() => {
+    if (!model.isUpscaler || model.isTryOn) {
+      setUpscaleSourceUrl("")
+      setSelectedRefId(null)
+      setUpscaleUploadError(null)
+    }
+    if (!model.isTryOn) {
+      setTryOnPerson({ url: "", refId: null })
+      setTryOnGarment({ url: "", refId: null })
+      setTryOnSlot("person")
+      setTryOnError(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model.id])
+
   const [showModelPicker, setShowModelPicker] = useState(false)
   const modelPickerRef = useRef<HTMLDivElement>(null)
   const [showFormatPicker, setShowFormatPicker] = useState(false)
@@ -19091,12 +19683,23 @@ function PromptBox({
             onLayerStackChange={(st) => onSaveLayers?.(editingRefImage.id, st)}
             onApply={(newUrl) => {
               // Stay open: swap to the re-created reference once the save lands
+              const fromSlot = tryOnEditSlot.current
               void Promise.resolve(onEditRef(editingRefImage.id, newUrl)).then((next) => {
+                // The saved reference usually comes back with a new id — a
+                // try-on slot pointing at the old one would keep rendering the
+                // photo the user just edited away.
+                if (fromSlot) {
+                  const replacement = next
+                    ? { url: next.url, refId: next.id }
+                    : { url: newUrl, refId: null }
+                  ;(fromSlot === "person" ? setTryOnPerson : setTryOnGarment)(replacement)
+                  setTryOnAspect(prev => ({ ...prev, [fromSlot]: null }))
+                }
                 if (next) setEditingRefImage(cur => cur ? next : cur)
                 else setEditingRefImage(null)
               })
             }}
-            onClose={() => setEditingRefImage(null)}
+            onClose={() => { tryOnEditSlot.current = null; setEditingRefImage(null) }}
           />
         )}
 
@@ -19220,8 +19823,214 @@ function PromptBox({
             </div>
           )}
 
+          {/* Virtual Try-On: refs as a masonry on the left, the two named
+              slots on the right. fal wants person_image_url and
+              product_image_url, so the UI names them instead of relying on
+              the order refs happen to be in. */}
+          {model.isTryOn && (
+            <div className="px-4 pt-4 pb-3 border-b border-white/5">
+              <div className="flex items-center justify-between mb-2.5">
+                <span className="text-[10px] font-mono text-slate-400 uppercase tracking-[0.2em]">Virtual Try-On</span>
+                {(tryOnPerson.url || tryOnGarment.url) && (
+                  <button
+                    onClick={() => {
+                      setTryOnPerson({ url: "", refId: null })
+                      setTryOnGarment({ url: "", refId: null })
+                      setTryOnAspect({ person: null, garment: null })
+                      setTryOnSlot("person"); setTryOnError(null)
+                    }}
+                    className="text-[10px] font-mono text-slate-600 hover:text-slate-400 transition-colors"
+                  >clear both</button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {/* left half: the library, masonry */}
+                <div className="min-w-0">
+                  <p className="text-[9px] font-mono uppercase tracking-[0.18em] text-slate-500 mb-1.5">
+                    Refs · tap to fill <span className="text-cyan-300">{tryOnSlot}</span>
+                  </p>
+                  {tryOnRefs.length > 0 ? (
+                    <div className="max-h-[260px] overflow-y-auto overscroll-contain pr-0.5 flex gap-1.5 items-start">
+                      {[0, 1, 2].map(col => (
+                        <div key={col} className="flex-1 min-w-0 flex flex-col gap-1.5">
+                          {tryOnRefs.filter((_, i) => i % 3 === col).map(img => {
+                            const used = img.url === tryOnPerson.url || img.id === tryOnPerson.refId
+                              ? "person"
+                              : img.url === tryOnGarment.url || img.id === tryOnGarment.refId
+                                ? "garment"
+                                : null
+                            return (
+                              <button
+                                key={img.id}
+                                onClick={() => useRefForTryOn(img)}
+                                disabled={!!tryOnUploading}
+                                title={`Use as ${tryOnSlot}`}
+                                className={`relative block w-full rounded-lg overflow-hidden border transition-all disabled:opacity-50 ${
+                                  used ? "border-cyan-400 ring-1 ring-cyan-400/40" : "border-white/10 hover:border-white/50"
+                                }`}
+                              >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                  src={refTileThumb(img.url, 256)}
+                                  alt=""
+                                  // NOT loading="lazy": it never fires inside a
+                                  // nested scroller on iPad Safari, leaving the
+                                  // tiles blank. The optimizer keeps them small.
+                                  decoding="async"
+                                  className="w-full h-auto block bg-slate-900"
+                                  // Next's optimizer 400s any host missing from
+                                  // remotePatterns; show the original rather than
+                                  // a broken-image icon.
+                                  onError={e => {
+                                    const el = e.target as HTMLImageElement
+                                    if (el.src !== img.url) el.src = img.url
+                                    else el.closest("button")?.classList.add("hidden")
+                                  }}
+                                />
+                                {used && (
+                                  <span className="absolute bottom-0 inset-x-0 bg-cyan-500/85 text-[8px] font-mono uppercase tracking-wide text-black text-center py-0.5">
+                                    {used}
+                                  </span>
+                                )}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-slate-500">
+                      No photos in your Refs library yet — add some via the <span className="text-slate-400">Refs</span> section, or upload straight into a slot.
+                    </p>
+                  )}
+                </div>
+
+                {/* right half: one section per image. Side by side gives each a
+                    TALL box, which is the shape person photos actually are; a
+                    landscape photo needs the opposite, so one wide image flips
+                    the pair to stacked. */}
+                <div className={`min-w-0 flex gap-2 sm:h-[260px] ${tryOnStacked ? "flex-col" : "flex-row"}`}>
+                  {([
+                    { key: "person" as const,  label: "Person",  hint: "who wears it",   state: tryOnPerson,  set: setTryOnPerson },
+                    { key: "garment" as const, label: "Garment", hint: "what to try on", state: tryOnGarment, set: setTryOnGarment },
+                  ]).map(slot => (
+                    <div
+                      key={slot.key}
+                      onClick={() => setTryOnSlot(slot.key)}
+                      className={`flex-1 min-h-0 min-w-0 flex flex-col rounded-xl border p-2 transition-all cursor-pointer ${
+                        tryOnSlot === slot.key
+                          ? "border-cyan-400/50 bg-cyan-500/[0.06]"
+                          : "border-white/10 bg-white/[0.02] hover:border-white/20"
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-white">{slot.label}</span>
+                        {tryOnStacked
+                          ? <span className="text-[9px] text-slate-500 truncate flex-1 min-w-0">{slot.hint}</span>
+                          : <span className="flex-1 min-w-0" />}
+                        <button
+                          onClick={e => { e.stopPropagation(); setTryOnSlot(slot.key); tryOnFileInputRef.current?.click() }}
+                          disabled={!!tryOnUploading}
+                          className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-white/[0.06] hover:bg-white/[0.10] border border-white/[0.08] text-[10px] text-slate-300 hover:text-white transition-all disabled:opacity-50 shrink-0"
+                        >
+                          <ImagePlus size={10} />Upload
+                        </button>
+                        {slot.state.url && (
+                          <button
+                            onClick={e => { e.stopPropagation(); slot.set({ url: "", refId: null }) }}
+                            className="text-[10px] font-mono text-slate-600 hover:text-slate-400 shrink-0"
+                          >clear</button>
+                        )}
+                      </div>
+
+                      {/* The whole photo, at its own shape — object-cover in a
+                          square box hid most of a tall person shot. */}
+                      <div className="relative flex-1 min-h-[86px] mt-1.5 flex items-center justify-center rounded-lg border border-white/5 bg-slate-950/60 overflow-hidden">
+                        {slot.state.url ? (
+                          // Tapping the photo opens the same reference editor the
+                          // Refs panel uses. Only library refs can be edited — an
+                          // image uploaded straight into the slot has no row to save
+                          // back to, so that case says so instead of failing quietly.
+                          <button
+                            type="button"
+                            onClick={e => {
+                              e.stopPropagation()
+                              setTryOnSlot(slot.key)
+                              const ref = slot.state.refId ? refLibrary.find(r => r.id === slot.state.refId) : null
+                              if (!ref) {
+                                setTryOnError("Only photos from your Refs library can be edited — add this one to Refs first.")
+                                return
+                              }
+                              setTryOnError(null)
+                              tryOnEditSlot.current = slot.key
+                              setEditingRefImage(ref)
+                            }}
+                            title="Edit this reference"
+                            className="group/edit relative w-full h-full flex items-center justify-center"
+                          >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={refTileThumb(slot.state.url, 256)}
+                              alt=""
+                              decoding="async"
+                              className="max-h-full max-w-full w-auto h-auto object-contain"
+                              // A URL outside next.config's remotePatterns makes the
+                              // optimizer 400 — fall back to the original file.
+                              onError={ev => {
+                                const el = ev.target as HTMLImageElement
+                                if (el.src !== slot.state.url) el.src = slot.state.url
+                              }}
+                              onLoad={ev => {
+                                const el = ev.target as HTMLImageElement
+                                if (!el.naturalWidth || !el.naturalHeight) return
+                                const ar = el.naturalWidth / el.naturalHeight
+                                setTryOnAspect(prev => prev[slot.key] === ar ? prev : { ...prev, [slot.key]: ar })
+                              }}
+                            />
+                            <span className="pointer-events-none absolute bottom-1 right-1 flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-black/70 border border-white/10 text-[9px] font-mono text-slate-300 opacity-0 group-hover/edit:opacity-100 transition-opacity">
+                              <Pencil size={9} />edit
+                            </span>
+                          </button>
+                        ) : (
+                          <span className="flex items-center gap-1.5 text-[10px] text-slate-600">
+                            <ImagePlus size={13} />tap a photo on the left
+                          </span>
+                        )}
+                        {tryOnUploading === slot.key && (
+                          <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+                            <Loader2 size={14} className="animate-spin text-cyan-400" />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {tryOnError && <p className="text-[11px] text-red-400 mt-2">{tryOnError}</p>}
+              {(!tryOnPerson.url || !tryOnGarment.url) && (
+                <p className="text-[10px] text-amber-400/80 mt-2">
+                  Both images are required — fal rejects the job without them.
+                </p>
+              )}
+
+              <input
+                ref={tryOnFileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={e => {
+                  const f = e.target.files?.[0]
+                  if (f) void uploadTryOnFile(f, tryOnSlot)
+                  e.target.value = ""
+                }}
+              />
+            </div>
+          )}
+
           {/* Upscaler source picker — unified for all 5 upscaler models */}
-          {model.isUpscaler && (
+          {model.isUpscaler && !model.isTryOn && (
             <div className="px-4 pt-4 pb-3 space-y-2.5 border-b border-white/5">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-mono text-slate-400 uppercase tracking-[0.2em]">Source Image</span>
@@ -19659,7 +20468,7 @@ function PromptBox({
               </button>
 
               {showModelPicker && (
-                <div className="absolute bottom-full left-0 mb-2 rounded-2xl border border-white/[0.08] bg-[#070b14]/95 backdrop-blur-md shadow-2xl overflow-hidden z-50" style={{ width: Math.min(428, window.innerWidth / promptScale - 16) }}>
+                <div className="absolute bottom-full left-0 mb-2 rounded-2xl border border-white/[0.08] bg-[#070b14]/95 backdrop-blur-md shadow-2xl overflow-hidden z-50" style={{ width: Math.min(720, window.innerWidth / promptScale - 16) }}>
                   <ModelMenuPanel
                     label="Image"
                     groups={IMAGE_MODEL_GROUPS}
@@ -19712,7 +20521,7 @@ function PromptBox({
             )}
 
             {/* Upscale factor toggle — upscaler only */}
-            {model.isUpscaler && (
+            {model.isUpscaler && !model.isTryOn && (
               <>
                 <div className="w-px h-3 bg-white/10 shrink-0 hidden sm:block" />
                 <div className="flex items-center rounded-md overflow-hidden border border-white/10 shrink-0">
@@ -20031,7 +20840,7 @@ function PromptBox({
             </button>
 
             {/* Image count picker — only for models that support multi-image */}
-            {(model.maxImages ?? 1) > 1 && (
+            {maxImagesForUser > 1 && (
               <>
                 <div className="w-px h-3 bg-white/10 shrink-0 hidden sm:block" />
                 <div className="flex items-center shrink-0">
@@ -20040,10 +20849,10 @@ function PromptBox({
                     disabled={imageCount <= 1}
                     className="w-4 h-5 flex items-center justify-center rounded text-slate-400 hover:text-white hover:bg-white/10 disabled:opacity-25 disabled:cursor-not-allowed transition-all text-sm leading-none font-bold"
                   >−</button>
-                  <span className="text-[11px] font-mono text-slate-300 w-3 text-center tabular-nums select-none">{imageCount}</span>
+                  <span className="text-[11px] font-mono text-slate-300 min-w-[14px] px-0.5 text-center tabular-nums select-none">{imageCount}</span>
                   <button
-                    onClick={() => setImageCount(c => Math.min(model.maxImages ?? 1, c + 1))}
-                    disabled={imageCount >= (model.maxImages ?? 1)}
+                    onClick={() => setImageCount(c => Math.min(maxImagesForUser, c + 1))}
+                    disabled={imageCount >= maxImagesForUser}
                     className="w-4 h-5 flex items-center justify-center rounded text-slate-400 hover:text-white hover:bg-white/10 disabled:opacity-25 disabled:cursor-not-allowed transition-all text-sm leading-none font-bold"
                   >+</button>
                 </div>
@@ -20440,7 +21249,7 @@ function FrameUploadArea({
           <img src={preview} alt="frame" className="w-full h-full object-contain" />
           {uploading && (
             <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
-              <div className="w-5 h-5 rounded-full border-2 border-orange-400/30 border-t-orange-400 animate-spin" />
+              <div className="w-5 h-5 rounded-full border-2 border-white/25 border-t-white animate-spin" />
             </div>
           )}
           <button
@@ -20453,9 +21262,9 @@ function FrameUploadArea({
       ) : (
         <button
           onClick={() => requestConsent(() => inputRef.current?.click())}
-          className="w-full rounded-lg border border-dashed border-orange-500/30 hover:border-orange-500/50 flex flex-col items-center justify-center gap-1.5 transition-all py-6"
+          className="w-full rounded-lg border border-dashed border-white/20 hover:border-white/40 flex flex-col items-center justify-center gap-1.5 transition-all py-6"
         >
-          <ImagePlus size={16} className="text-orange-400/60" />
+          <ImagePlus size={16} className="text-slate-400" />
           <span className="text-[10px] text-slate-500">{label}</span>
         </button>
       )}
@@ -20559,14 +21368,14 @@ function SD20RefPanel({
           </p>
           {videoRefImagePreviews.length < 9 && filesLeft > 0 && (
             <button onClick={() => requestConsent(() => imgInputRef.current?.click())}
-              className="text-[10px] text-orange-400/70 hover:text-orange-400 transition-colors flex items-center gap-0.5">
+              className="text-[10px] text-slate-400 hover:text-slate-200 transition-colors flex items-center gap-0.5">
               <Plus size={10} />Add
             </button>
           )}
         </div>
         <p className="text-[10px] text-slate-600 leading-snug">
           {allowFrameTags
-            ? <>Guide the video with up to 9 images ({refTagHint}). Tap <span className="text-orange-400 font-semibold">S</span> / <span className="text-orange-400 font-semibold">E</span> on an image to make it the exact start / end frame.</>
+            ? <>Guide the video with up to 9 images ({refTagHint}). Tap <span className="text-slate-200 font-semibold">S</span> / <span className="text-slate-200 font-semibold">E</span> on an image to make it the exact start / end frame.</>
             : <>Guide the video with up to 9 images ({refTagHint}).</>}
         </p>
         <input ref={imgInputRef} type="file" accept="image/*" className="hidden"
@@ -20586,7 +21395,7 @@ function SD20RefPanel({
                       onClick={() => onTagStart?.(startIdx === i ? null : i)}
                       title="Use as the start frame"
                       className={`w-5 h-4 rounded text-[8px] font-bold leading-none flex items-center justify-center transition-all ${
-                        startIdx === i ? "bg-orange-500 text-black" : "bg-black/70 text-white/60 hover:text-white"
+                        startIdx === i ? "bg-slate-200 text-black" : "bg-black/70 text-white/60 hover:text-white"
                       }`}
                     >
                       S
@@ -20595,7 +21404,7 @@ function SD20RefPanel({
                       onClick={() => onTagEnd?.(endIdx === i ? null : i)}
                       title="Use as the end frame"
                       className={`w-5 h-4 rounded text-[8px] font-bold leading-none flex items-center justify-center transition-all ${
-                        endIdx === i ? "bg-orange-500 text-black" : "bg-black/70 text-white/60 hover:text-white"
+                        endIdx === i ? "bg-slate-200 text-black" : "bg-black/70 text-white/60 hover:text-white"
                       }`}
                     >
                       E
@@ -20622,7 +21431,7 @@ function SD20RefPanel({
           </p>
           {videoRefVideoFilenames.length < 3 && filesLeft > 0 && videoRefVideoDuration < SD20_MAX_VIDEO_SEC && (
             <button onClick={() => requestConsent(() => vidInputRef.current?.click())}
-              className="text-[10px] text-orange-400/70 hover:text-orange-400 transition-colors flex items-center gap-0.5">
+              className="text-[10px] text-slate-400 hover:text-slate-200 transition-colors flex items-center gap-0.5">
               <Plus size={10} />Add
             </button>
           )}
@@ -20635,7 +21444,7 @@ function SD20RefPanel({
               <div key={i} className={`flex items-center gap-2 px-2.5 py-2 rounded-lg border text-[11px] ${videoRefVideoUrls[i] ? "bg-white/5 border-white/10 text-slate-300" : "bg-slate-900/80 border-white/5 text-slate-500"}`}>
                 {videoRefVideoUrls[i]
                   ? <Check size={11} className="text-green-400 shrink-0" />
-                  : <div className="w-3 h-3 rounded-full border-2 border-orange-400/30 border-t-orange-400 animate-spin shrink-0" />}
+                  : <div className="w-3 h-3 rounded-full border-2 border-white/25 border-t-white animate-spin shrink-0" />}
                 <span className="truncate flex-1">{name.length > 22 ? name.slice(0, 20) + "…" : name}</span>
                 <button onClick={() => { const dur = videoDurations.current[i] || 0; onRemoveRefVideo(i, dur) }}
                   className="shrink-0 text-slate-600 hover:text-red-400 transition-colors"><X size={11} /></button>
@@ -20660,7 +21469,7 @@ function SD20RefPanel({
           </p>
           {videoRefAudioFilenames.length < 3 && filesLeft > 0 && (
             <button onClick={() => requestConsent(() => audInputRef.current?.click())}
-              className="text-[10px] text-orange-400/70 hover:text-orange-400 transition-colors flex items-center gap-0.5">
+              className="text-[10px] text-slate-400 hover:text-slate-200 transition-colors flex items-center gap-0.5">
               <Plus size={10} />Add
             </button>
           )}
@@ -20731,6 +21540,8 @@ function VideoCustomizationPanel({
   lipsyncSyncMode = "cut_off",
   onLipsyncSyncModeChange,
   safetyChecker,
+  ltxFps = "25",
+  onLtxFpsChange,
   setSafetyChecker,
   isAdminAccount = false,
 }: {
@@ -20786,6 +21597,8 @@ function VideoCustomizationPanel({
   lipsyncSyncMode?: string
   onLipsyncSyncModeChange?: (m: string) => void
   safetyChecker?: boolean
+  ltxFps?: string
+  onLtxFpsChange?: (fps: string) => void
   setSafetyChecker?: (v: boolean) => void
   isAdminAccount?: boolean
 }) {
@@ -20895,18 +21708,26 @@ function VideoCustomizationPanel({
     ? parseInt(duration) * (resolution === "1080p" ? 12 : 7)
     : ({ "480p": { "5": 7, "10": 14 }, "720p": { "5": 13, "10": 26 }, "1080p": { "5": 20, "10": 40 } } as any)[resolution]?.[duration] ?? 20
 
-  const btnBase   = "py-1.5 rounded text-[11px] font-mono transition-all border"
-  const btnActive = "bg-orange-500/15 text-orange-400 border-orange-500/40"
-  const btnIdle   = "bg-white/5 text-slate-400 border-white/8 hover:border-white/15"
+  const btnBase   = "py-1.5 rounded-lg text-[11px] font-mono transition-all border"
+  const btnActive = "bg-white/15 text-white border-white/30"
+  const btnIdle   = "bg-white/5 text-slate-400 border-white/8 hover:border-white/20 hover:text-white"
+  // Shared control chrome so every row reads the same
+  const selectCls = "w-full px-3 py-2 rounded-lg bg-black/40 border border-white/15 text-[12px] text-white " +
+    "focus:outline-none focus:border-white/40 transition-colors appearance-none cursor-pointer"
+  const labelCls = "text-[10px] text-slate-400 font-semibold uppercase tracking-wider"
 
   return (
     <>
-    <div className="p-4 space-y-5">
-      {/* Header */}
-      <div className="flex items-center gap-2 pb-3 border-b border-white/5">
-        <Video size={13} className="text-orange-400 shrink-0" />
-        <span className="text-sm font-semibold text-white">{model.name}</span>
-        <span className="ml-auto text-[10px] font-mono text-orange-400/70 flex items-center gap-0.5">
+    <div className="relative isolate p-4 space-y-5 rounded-2xl">
+      <SilverRimOverlay />
+      {/* Header — site logo + model, matching the rest of the app */}
+      <div className="flex items-center gap-2.5 pb-3 border-b border-white/[0.06]">
+        <SiteLogoBox size={24} rounded={8} />
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-white truncate">{model.name}</p>
+          <p className="text-[9px] font-mono uppercase tracking-[0.2em] text-slate-500">Video settings</p>
+        </div>
+        <span className="ml-auto shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg border border-white/10 bg-white/[0.04] text-[10px] font-mono text-slate-300">
           <Ticket size={9} />{ticketCost}{(isSD20Family && duration === "auto") || (isLipsync && !lipsyncVideoDuration) || (isOmni && omniMode === "edit" && !editSourceDuration) ? "~" : ""}
         </span>
       </div>
@@ -20944,14 +21765,14 @@ function VideoCustomizationPanel({
           {/* Video upload */}
           <div className="space-y-1.5">
             <p className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">
-              Source Video <span className="text-orange-400/70">*</span>
+              Source Video <span className="text-slate-400">*</span>
             </p>
             <p className="text-[10px] text-slate-600 leading-snug">The video whose lips will be synced to the audio</p>
             {lipsyncVideoFilename ? (
               <div className={`relative rounded-lg overflow-hidden flex items-center gap-3 px-3 py-3 border ${lipsyncVideoUploading ? "bg-slate-900/80 border-white/10" : "bg-white/5 border-white/10"}`}>
-                <div className="w-8 h-8 rounded bg-orange-500/10 border border-orange-500/20 flex items-center justify-center shrink-0">
+                <div className="w-8 h-8 rounded bg-white/[0.06] border border-white/15 flex items-center justify-center shrink-0">
                   {lipsyncVideoUploading
-                    ? <div className="w-3.5 h-3.5 rounded-full border-2 border-orange-400/30 border-t-orange-400 animate-spin" />
+                    ? <div className="w-3.5 h-3.5 rounded-full border-2 border-white/20 border-t-white animate-spin" />
                     : <Check size={13} className="text-green-400" />
                   }
                 </div>
@@ -20969,9 +21790,9 @@ function VideoCustomizationPanel({
             ) : (
               <button onClick={() => requestConsent(() => lipsyncVidRef.current?.click())}
                 className={`w-full rounded-lg border border-dashed flex flex-col items-center justify-center gap-1.5 transition-all py-6 ${
-                  lipsyncVideoError ? "border-red-500/40 hover:border-red-500/60" : "border-orange-500/30 hover:border-orange-500/50"
+                  lipsyncVideoError ? "border-red-500/40 hover:border-red-500/60" : "border-white/20 hover:border-white/40"
                 }`}>
-                <Video size={16} className={lipsyncVideoError ? "text-red-400/60" : "text-orange-400/60"} />
+                <Video size={16} className={lipsyncVideoError ? "text-red-400/60" : "text-slate-200/60"} />
                 <span className="text-[10px] text-slate-500">Click to upload source video</span>
               </button>
             )}
@@ -20983,14 +21804,14 @@ function VideoCustomizationPanel({
           {/* Audio upload */}
           <div className="space-y-1.5">
             <p className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">
-              Audio Track <span className="text-orange-400/70">*</span>
+              Audio Track <span className="text-slate-400">*</span>
             </p>
             <p className="text-[10px] text-slate-600 leading-snug">The audio to sync the lips to (WAV, MP3, etc.)</p>
             {lipsyncAudioFilename ? (
               <div className={`relative rounded-lg overflow-hidden flex items-center gap-3 px-3 py-3 border ${lipsyncAudioUploading ? "bg-slate-900/80 border-white/10" : "bg-white/5 border-white/10"}`}>
-                <div className="w-8 h-8 rounded bg-orange-500/10 border border-orange-500/20 flex items-center justify-center shrink-0">
+                <div className="w-8 h-8 rounded bg-white/[0.06] border border-white/15 flex items-center justify-center shrink-0">
                   {lipsyncAudioUploading
-                    ? <div className="w-3.5 h-3.5 rounded-full border-2 border-orange-400/30 border-t-orange-400 animate-spin" />
+                    ? <div className="w-3.5 h-3.5 rounded-full border-2 border-white/20 border-t-white animate-spin" />
                     : <Check size={13} className="text-green-400" />
                   }
                 </div>
@@ -21005,8 +21826,8 @@ function VideoCustomizationPanel({
               </div>
             ) : (
               <button onClick={() => requestConsent(() => lipsyncAudRef.current?.click())}
-                className="w-full rounded-lg border border-dashed border-orange-500/30 hover:border-orange-500/50 flex flex-col items-center justify-center gap-1.5 transition-all py-6">
-                <Music size={16} className="text-orange-400/60" />
+                className="w-full rounded-lg border border-dashed border-white/20 hover:border-white/40 flex flex-col items-center justify-center gap-1.5 transition-all py-6">
+                <Music size={16} className="text-slate-200/60" />
                 <span className="text-[10px] text-slate-500">Click to upload audio track</span>
               </button>
             )}
@@ -21029,11 +21850,11 @@ function VideoCustomizationPanel({
           {/* Ticket estimate note */}
           {lipsyncVideoDuration ? (
             <p className="text-[10px] text-slate-600 leading-snug">
-              Cost based on video duration: {lipsyncVideoDuration.toFixed(1)}s × 6 = <span className="text-orange-400/70 font-mono">{Math.max(10, Math.ceil(lipsyncVideoDuration * 6))} tickets</span>
+              Cost based on video duration: {lipsyncVideoDuration.toFixed(1)}s × 6 = <span className="text-slate-400 font-mono">{Math.max(10, Math.ceil(lipsyncVideoDuration * 6))} tickets</span>
             </p>
           ) : (
             <p className="text-[10px] text-slate-600 leading-snug">
-              Min charge: <span className="text-orange-400/70 font-mono">10 tickets</span>. Final cost calculated after video upload.
+              Min charge: <span className="text-slate-400 font-mono">10 tickets</span>. Final cost calculated after video upload.
             </p>
           )}
         </>
@@ -21045,7 +21866,7 @@ function VideoCustomizationPanel({
         <div className="space-y-1.5">
           <p className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">
             {model.supportsMotionControl ? "Character Image" : model.textToVideo ? "Reference Image" : "Start Frame"}
-            {!model.textToVideo && !model.supportsMotionControl && <span className="text-orange-400/70"> *</span>}
+            {!model.textToVideo && !model.supportsMotionControl && <span className="text-slate-400"> *</span>}
             {model.textToVideo && !model.supportsMotionControl && <span className="text-slate-600 normal-case font-normal"> (optional)</span>}
           </p>
           {model.supportsMotionControl && (
@@ -21072,16 +21893,16 @@ function VideoCustomizationPanel({
           {/* Motion reference video */}
           <div className="space-y-1.5">
             <p className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">
-              Motion Reference Video <span className="text-orange-400/70">*</span>
+              Motion Reference Video <span className="text-slate-400">*</span>
             </p>
             <p className="text-[10px] text-slate-600 leading-snug">The character's movements in the output will follow this video</p>
             <input ref={endRef} type="file" accept="video/*" className="hidden"
               onChange={e => { const f = e.target.files?.[0]; if (f) { e.target.value = ""; setMotionVideoError(null); handleMotionVideoFile(f) }}} />
             {motionVideoFilename ? (
               <div className={`relative rounded-lg overflow-hidden flex items-center gap-3 px-3 py-3 border ${motionVideoUploading ? "bg-slate-900/80 border-white/10" : "bg-white/5 border-white/10"}`}>
-                <div className="w-8 h-8 rounded bg-orange-500/10 border border-orange-500/20 flex items-center justify-center shrink-0">
+                <div className="w-8 h-8 rounded bg-white/[0.06] border border-white/15 flex items-center justify-center shrink-0">
                   {motionVideoUploading
-                    ? <div className="w-3.5 h-3.5 rounded-full border-2 border-orange-400/30 border-t-orange-400 animate-spin" />
+                    ? <div className="w-3.5 h-3.5 rounded-full border-2 border-white/20 border-t-white animate-spin" />
                     : <Check size={13} className="text-green-400" />
                   }
                 </div>
@@ -21097,9 +21918,9 @@ function VideoCustomizationPanel({
             ) : (
               <button onClick={() => requestConsent(() => endRef.current.click())}
                 className={`w-full rounded-lg border border-dashed flex flex-col items-center justify-center gap-1.5 transition-all py-6 ${
-                  motionVideoError ? "border-red-500/40 hover:border-red-500/60" : "border-orange-500/30 hover:border-orange-500/50"
+                  motionVideoError ? "border-red-500/40 hover:border-red-500/60" : "border-white/20 hover:border-white/40"
                 }`}>
-                <Video size={16} className={motionVideoError ? "text-red-400/60" : "text-orange-400/60"} />
+                <Video size={16} className={motionVideoError ? "text-red-400/60" : "text-slate-200/60"} />
                 <span className="text-[10px] text-slate-500">Click to upload motion reference video</span>
                 <span className="text-[9px] text-slate-600">Must be between 3–30 seconds long</span>
               </button>
@@ -21142,7 +21963,7 @@ function VideoCustomizationPanel({
             </div>
             <button
               onClick={() => onKeepOriginalSoundToggle(!keepOriginalSound)}
-              className={`w-9 h-5 rounded-full transition-colors relative shrink-0 mt-0.5 ${keepOriginalSound ? "bg-orange-500" : "bg-slate-700"}`}
+              className={`w-9 h-5 rounded-full transition-colors relative shrink-0 mt-0.5 ${keepOriginalSound ? "bg-slate-200" : "bg-slate-700"}`}
             >
               <span className={`block w-3.5 h-3.5 rounded-full bg-white absolute top-[3px] transition-all ${keepOriginalSound ? "right-[3px]" : "left-[3px]"}`} />
             </button>
@@ -21196,16 +22017,16 @@ function VideoCustomizationPanel({
           {isOmni && sd20Mode === "edit" && (
             <div className="space-y-1.5">
               <p className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">
-                Source Video <span className="text-orange-400/70">*</span>
+                Source Video <span className="text-slate-400">*</span>
               </p>
               <p className="text-[10px] text-slate-600 leading-snug">The video to edit/restyle — output duration follows the source</p>
               <input ref={editSrcRef} type="file" accept="video/*,image/gif" className="hidden"
                 onChange={e => { const f = e.target.files?.[0]; if (f) { e.target.value = ""; handleEditSourceFile(f) } }} />
               {editSourceFilename ? (
                 <div className={`relative rounded-lg overflow-hidden flex items-center gap-3 px-3 py-3 border ${editSourceUploading ? "bg-slate-900/80 border-white/10" : "bg-white/5 border-white/10"}`}>
-                  <div className="w-8 h-8 rounded bg-orange-500/10 border border-orange-500/20 flex items-center justify-center shrink-0">
+                  <div className="w-8 h-8 rounded bg-white/[0.06] border border-white/15 flex items-center justify-center shrink-0">
                     {editSourceUploading
-                      ? <div className="w-3.5 h-3.5 rounded-full border-2 border-orange-400/30 border-t-orange-400 animate-spin" />
+                      ? <div className="w-3.5 h-3.5 rounded-full border-2 border-white/20 border-t-white animate-spin" />
                       : <Check size={13} className="text-green-400" />
                     }
                   </div>
@@ -21222,8 +22043,8 @@ function VideoCustomizationPanel({
                 </div>
               ) : (
                 <button onClick={() => requestConsent(() => editSrcRef.current?.click())}
-                  className="w-full rounded-lg border border-dashed border-orange-500/30 hover:border-orange-500/50 flex flex-col items-center justify-center gap-1.5 transition-all py-6">
-                  <Video size={16} className="text-orange-400/60" />
+                  className="w-full rounded-lg border border-dashed border-white/20 hover:border-white/40 flex flex-col items-center justify-center gap-1.5 transition-all py-6">
+                  <Video size={16} className="text-slate-200/60" />
                   <span className="text-[10px] text-slate-500">Click to upload the video to edit</span>
                 </button>
               )}
@@ -21251,58 +22072,47 @@ function VideoCustomizationPanel({
           {/* Duration — hidden in Omni edit mode (duration follows the source) */}
           {model.durations.length > 0 && (!isOmni || sd20Mode !== "edit") && (
             <div className="space-y-1.5">
-              <p className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Duration</p>
-              {model.durations.length > 4 ? (
-                <div className="grid grid-cols-5 gap-1">
-                  {model.durations.map(d => (
-                    <button key={d} onClick={() => onDurationChange(d)}
-                      className={`${btnBase} ${duration === d ? btnActive : btnIdle}`}>{d === "auto" ? "auto" : `${d}s`}</button>
-                  ))}
-                </div>
-              ) : (
-                <div className="flex gap-1.5">
-                  {model.durations.map(d => (
-                    <button key={d} onClick={() => onDurationChange(d)}
-                      className={`flex-1 ${btnBase} ${duration === d ? btnActive : btnIdle}`}>{d === "auto" ? "auto" : `${d}s`}</button>
-                  ))}
-                </div>
-              )}
+              <div className="flex items-center justify-between gap-2">
+                <p className={labelCls}>Duration</p>
+                <span className="px-2 py-0.5 rounded-md bg-white/10 border border-white/15 text-[11px] font-mono text-white">
+                  {duration === "auto" ? "auto" : `${duration}s`}
+                </span>
+              </div>
+              {/* Slider over the model's own allowed values — dragging cannot
+                  land on a duration the endpoint would reject */}
+              <input
+                type="range"
+                min={0}
+                max={Math.max(0, model.durations.length - 1)}
+                step={1}
+                value={Math.max(0, model.durations.indexOf(duration))}
+                onChange={e => onDurationChange(model.durations[Number(e.target.value)] ?? model.durations[0])}
+                className="w-full accent-white"
+              />
+              <div className="flex justify-between text-[9px] font-mono text-slate-600">
+                <span>{model.durations[0] === "auto" ? "auto" : `${model.durations[0]}s`}</span>
+                <span>{(() => { const last = model.durations[model.durations.length - 1]; return last === "auto" ? "auto" : `${last}s` })()}</span>
+              </div>
             </div>
           )}
 
           {/* Aspect ratio — Kling 3.0 / SeeDance / Omni (not in edit mode) */}
           {model.aspectRatios && (!isOmni || sd20Mode !== "edit") && (
             <div className="space-y-1.5">
-              <p className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Aspect Ratio</p>
+              <p className={labelCls}>Aspect Ratio</p>
               {model.startFrameLocksAspect && startFramePreview ? (
-                <div className="px-3 py-2 rounded-lg bg-white/4 border border-white/8 text-[11px] text-slate-400 italic">
+                <div className="px-3 py-2 rounded-lg bg-white/[0.04] border border-white/10 text-[11px] text-slate-400 italic">
                   Matches start frame
                 </div>
-              ) : model.aspectRatios.length > 4 ? (
-                <div className="grid grid-cols-4 gap-1">
-                  {model.aspectRatios.map(r => {
-                    const ratioLabel = PIXEL_DIM_RATIO[r]
-                    const label = ratioLabel ? `${ratioLabel} (${r})` : r
-                    return (
-                      <button key={r} onClick={() => onAspectRatioChange(r)}
-                        className={`${btnBase} ${aspectRatio === r ? btnActive : btnIdle}`}>
-                        {label}
-                      </button>
-                    )
-                  })}
-                </div>
               ) : (
-                <div className="flex gap-1.5">
-                  {model.aspectRatios.map(r => {
-                    const ratioLabel = PIXEL_DIM_RATIO[r]
-                    const label = ratioLabel ? `${ratioLabel} (${r})` : r
-                    return (
-                      <button key={r} onClick={() => onAspectRatioChange(r)}
-                        className={`flex-1 ${btnBase} ${aspectRatio === r ? btnActive : btnIdle}`}>
-                        {label}
-                      </button>
-                    )
-                  })}
+                <div className="relative">
+                  <select value={aspectRatio} onChange={e => onAspectRatioChange(e.target.value)} className={selectCls}>
+                    {model.aspectRatios?.map(r => {
+                      const dims = PIXEL_DIM_RATIO[r]
+                      return <option key={r} value={r} className="bg-[#0a101d]">{dims ? `${r}  ·  ${dims}` : r}</option>
+                    })}
+                  </select>
+                  <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
                 </div>
               )}
             </div>
@@ -21321,6 +22131,19 @@ function VideoCustomizationPanel({
             </div>
           )}
 
+          {/* Frame rate — LTX 2.5 only (its schema takes an fps enum) */}
+          {model.fpsOptions && model.fpsOptions.length > 0 && (
+            <div className="space-y-1.5">
+              <p className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Frame Rate</p>
+              <div className="flex gap-1.5">
+                {model.fpsOptions.map(f => (
+                  <button key={f} onClick={() => onLtxFpsChange?.(f)}
+                    className={`flex-1 ${btnBase} ${ltxFps === f ? btnActive : btnIdle}`}>{f} fps</button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Audio toggle — Kling 3.0 / SeeDance */}
           {model.audioType === "toggle" && (
             <div className="flex items-start justify-between gap-3 py-1">
@@ -21332,7 +22155,7 @@ function VideoCustomizationPanel({
               </div>
               <button
                 onClick={() => onAudioToggle(!audioEnabled)}
-                className={`w-9 h-5 rounded-full transition-colors relative shrink-0 mt-0.5 ${audioEnabled ? "bg-orange-500" : "bg-slate-700"}`}
+                className={`w-9 h-5 rounded-full transition-colors relative shrink-0 mt-0.5 ${audioEnabled ? "bg-slate-200" : "bg-slate-700"}`}
               >
                 <span className={`block w-3.5 h-3.5 rounded-full bg-white absolute top-[3px] transition-all ${audioEnabled ? "right-[3px]" : "left-[3px]"}`} />
               </button>
@@ -21357,7 +22180,7 @@ function VideoCustomizationPanel({
                 className="w-full py-2.5 rounded-lg border border-dashed border-white/10 hover:border-white/20 text-[11px] text-slate-500 hover:text-slate-300 flex items-center justify-center gap-2 transition-all"
               >
                 {audioUploading ? (
-                  <><div className="w-3 h-3 rounded-full border-2 border-orange-400/30 border-t-orange-400 animate-spin" />Uploading...</>
+                  <><div className="w-3 h-3 rounded-full border-2 border-white/20 border-t-white animate-spin" />Uploading...</>
                 ) : audioFile ? (
                   <><Check size={11} className="text-green-400" />{audioFile.name.length > 24 ? audioFile.name.slice(0, 22) + "…" : audioFile.name}</>
                 ) : (
@@ -21414,11 +22237,11 @@ function VideoCustomizationPanel({
       <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
         <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setShowSafetyModal(false)} />
         <div className="relative w-full max-w-sm rounded-2xl border border-white/[0.1] bg-[#0e0e1a] shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
-          <div className="h-1 w-full bg-gradient-to-r from-orange-500 to-red-500" />
+          <div className="h-1 w-full bg-gradient-to-r from-slate-300 to-slate-500" />
           <div className="p-6">
             <div className="flex items-center gap-3 mb-4">
-              <div className="w-9 h-9 rounded-xl bg-orange-500/15 border border-orange-500/30 flex items-center justify-center shrink-0">
-                <AlertTriangle size={18} className="text-orange-400" />
+              <div className="w-9 h-9 rounded-xl bg-white/15 border border-white/20 flex items-center justify-center shrink-0">
+                <AlertTriangle size={18} className="text-slate-200" />
               </div>
               <div>
                 <h3 className="text-sm font-bold text-white">Age Verification Required</h3>
@@ -21432,7 +22255,7 @@ function VideoCustomizationPanel({
               <div
                 onClick={() => setSafetyAgeConfirmed(v => !v)}
                 className={`w-4 h-4 mt-0.5 rounded border flex items-center justify-center shrink-0 transition-all ${
-                  safetyAgeConfirmed ? "bg-orange-500 border-orange-500" : "border-white/20 bg-white/5 group-hover:border-white/40"
+                  safetyAgeConfirmed ? "bg-slate-200 border-white/40" : "border-white/20 bg-white/5 group-hover:border-white/40"
                 }`}
               >
                 {safetyAgeConfirmed && <Check size={10} className="text-white" />}
@@ -21451,7 +22274,7 @@ function VideoCustomizationPanel({
                 onClick={() => { setSafetyChecker?.(false); setShowSafetyModal(false) }}
                 className={`flex-1 px-4 py-2 rounded-xl text-[12px] font-semibold transition-all ${
                   safetyAgeConfirmed
-                    ? "bg-gradient-to-r from-orange-500 to-red-500 text-white hover:opacity-90"
+                    ? "bg-gradient-to-r from-slate-300 to-slate-500 text-white hover:opacity-90"
                     : "bg-white/5 border border-white/10 text-white/25 cursor-not-allowed"
                 }`}
               >
@@ -22181,14 +23004,21 @@ function VideoPromptBar({
   promptScale?: number
 }) {
   const [prompt, setPromptRaw] = useState("")
-  // Mirror every keystroke up to the page so the saved draft stays current
-  const setPrompt = (v: string | ((p: string) => string)) => {
-    setPromptRaw(prev => {
-      const next = typeof v === "function" ? (v as (p: string) => string)(prev) : v
-      onPromptChange?.(next)
-      return next
-    })
-  }
+  const setPrompt = (v: string | ((p: string) => string)) =>
+    setPromptRaw(prev => (typeof v === "function" ? (v as (p: string) => string)(prev) : v))
+
+  // Mirror every keystroke up to the page so the saved draft stays current.
+  // This runs AFTER commit on purpose: the parent's setState used to be called
+  // from inside the setPromptRaw updater, and React runs updaters DURING
+  // render — which threw "Cannot update a component (PortalV2Page) while
+  // rendering a different component".
+  const mirroredPrompt = useRef<string | null>(null)
+  useEffect(() => {
+    if (mirroredPrompt.current === null) { mirroredPrompt.current = prompt; return }
+    if (mirroredPrompt.current === prompt) return
+    mirroredPrompt.current = prompt
+    onPromptChange?.(prompt)
+  }, [prompt, onPromptChange])
   const [modelOpen, setModelOpen] = useState(false)
   const startFrameInputRef = useRef<HTMLInputElement>(null)
   const motionVideoInputRef = useRef<HTMLInputElement>(null)
@@ -22305,7 +23135,7 @@ function VideoPromptBar({
                 }`}
               >
                 {startFrameUploading ? (
-                  <><div className="w-3 h-3 rounded-full border-2 border-orange-400/30 border-t-orange-400 animate-spin shrink-0" /><span className="truncate">Uploading…</span></>
+                  <><div className="w-3 h-3 rounded-full border-2 border-white/25 border-t-white animate-spin shrink-0" /><span className="truncate">Uploading…</span></>
                 ) : startFramePreview ? (
                   <><Check size={12} className="shrink-0" /><span className="truncate">Image ready</span></>
                 ) : (
@@ -22318,12 +23148,12 @@ function VideoPromptBar({
                 onClick={() => requestConsent(() => motionVideoInputRef.current?.click())}
                 className={`flex-1 flex items-center gap-2 px-3 py-2.5 rounded-xl border transition-all text-xs font-medium ${
                   motionVideoFilename
-                    ? "border-orange-500/40 bg-orange-500/8 text-orange-400"
+                    ? "border-white/30 bg-white/[0.08] text-white"
                     : "border-dashed border-white/15 bg-white/3 text-slate-500 hover:border-white/30 hover:text-slate-300"
                 }`}
               >
                 {motionVideoUploading ? (
-                  <><div className="w-3 h-3 rounded-full border-2 border-orange-400/30 border-t-orange-400 animate-spin shrink-0" /><span className="truncate">Uploading…</span></>
+                  <><div className="w-3 h-3 rounded-full border-2 border-white/25 border-t-white animate-spin shrink-0" /><span className="truncate">Uploading…</span></>
                 ) : motionVideoFilename ? (
                   <><Check size={12} className="shrink-0" /><span className="truncate">Video ready</span></>
                 ) : (
@@ -22338,11 +23168,11 @@ function VideoPromptBar({
                 onClick={onConfigOpen}
                 className={`flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-semibold shrink-0 transition-all ${
                   motionPromptText
-                    ? "border-orange-500/30 bg-orange-500/10 text-orange-300"
+                    ? "border-white/25 bg-white/[0.08] text-white"
                     : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/8"
                 }`}
               >
-                <SlidersHorizontal size={13} className="text-orange-400" />
+                <SlidersHorizontal size={13} className="text-slate-300" />
                 {motionPromptText ? "Config ✦" : "Config"}
               </button>
               <span className="flex-1 text-[10px] text-center font-mono truncate">
@@ -22356,7 +23186,7 @@ function VideoPromptBar({
                 disabled={!ready}
                 className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold shrink-0 transition-all ${
                   ready
-                    ? "bg-gradient-to-r from-orange-500 to-rose-500 text-white hover:opacity-90"
+                    ? "bg-gradient-to-r from-slate-200 to-slate-400 text-white hover:opacity-90"
                     : "bg-white/5 text-slate-600 cursor-not-allowed border border-white/10"
                 }`}
               >
@@ -22392,7 +23222,7 @@ function VideoPromptBar({
                 onClick={onConfigOpen}
                 className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/8 text-slate-300 text-xs font-semibold shrink-0 transition-all"
               >
-                <SlidersHorizontal size={13} className="text-orange-400" />
+                <SlidersHorizontal size={13} className="text-slate-300" />
                 Config
               </button>
               <span className="flex-1 text-[10px] text-center font-mono truncate">
@@ -22406,7 +23236,7 @@ function VideoPromptBar({
                 disabled={!ready}
                 className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold shrink-0 transition-all ${
                   ready
-                    ? "bg-gradient-to-r from-orange-500 to-rose-500 text-white hover:opacity-90"
+                    ? "bg-gradient-to-r from-slate-200 to-slate-400 text-white hover:opacity-90"
                     : "bg-white/5 text-slate-600 cursor-not-allowed border border-white/10"
                 }`}
               >
@@ -22430,12 +23260,12 @@ function VideoPromptBar({
             onClick={() => setModelOpen(v => !v)}
             className="flex items-center gap-1.5 h-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 hover:border-white/20 transition-all text-[11px] text-slate-300 font-medium whitespace-nowrap"
           >
-            <Video size={11} className="text-orange-400 shrink-0" />
+            <Video size={11} className="text-slate-300 shrink-0" />
             {model.name}
             <ChevronDown size={10} className={`text-slate-500 transition-transform ${modelOpen ? "rotate-180" : ""}`} />
           </button>
           {modelOpen && (
-            <div className="absolute bottom-full mb-1.5 left-0 rounded-2xl border border-white/[0.08] bg-[#070b14]/95 backdrop-blur-md shadow-2xl overflow-hidden z-50" style={{ width: Math.min(428, window.innerWidth / promptScale - 16) }}>
+            <div className="absolute bottom-full mb-1.5 left-0 rounded-2xl border border-white/[0.08] bg-[#070b14]/95 backdrop-blur-md shadow-2xl overflow-hidden z-50" style={{ width: Math.min(720, window.innerWidth / promptScale - 16) }}>
               {/* Same shared menu as the taskbar Video dropdown — List/Cards modes,
                   home-page media, admin section; preference stays in sync */}
               <ModelMenuPanel
@@ -22486,7 +23316,7 @@ function VideoPromptBar({
             disabled={!ready}
             className={`flex items-center gap-2 px-5 py-2 rounded-lg text-[12px] font-semibold transition-all ${
               ready
-                ? "bg-gradient-to-r from-orange-500 to-rose-500 text-white hover:opacity-90"
+                ? "bg-gradient-to-r from-slate-200 to-slate-400 text-white hover:opacity-90"
                 : "bg-white/5 text-slate-600 cursor-not-allowed border border-white/10"
             }`}
           >
@@ -23888,6 +24718,76 @@ export default function PortalV2Page() {
     return pass ? { "x-admin-password": pass } : {}
   }
 
+  // Save the selected generations into the account's reference library. Refs
+  // are IMAGES, so videos in the selection are skipped and reported rather
+  // than silently dropped.
+  const [bulkAddingRefs, setBulkAddingRefs] = useState(false)
+  const [bulkRefsNote, setBulkRefsNote] = useState<string | null>(null)
+  const handleBulkAddToRefs = async () => {
+    if (selectedImageIds.size === 0 || bulkAddingRefs) return
+    setBulkAddingRefs(true)
+    setBulkRefsNote(null)
+    try {
+      // The selection lives in this component but the feed's items do not, so
+      // resolve the ids to URLs server-side rather than reaching into the feed.
+      const ids = Array.from(selectedImageIds)
+      const lookup = await fetch("/api/images/by-ids", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageIds: ids }),
+      })
+      if (!lookup.ok) { setBulkRefsNote("Couldn't look those up — try again."); return }
+      const rows: { id: number; imageUrl: string }[] = (await lookup.json()).images ?? []
+
+      // References are IMAGES — videos in the selection are skipped and counted
+      // rather than silently dropped.
+      const isVideo = (u: string) => /\.(mp4|webm|mov|m4v|avi|mkv)(\?|#|$)/i.test(u)
+      const urls = rows
+        .map(r => r.imageUrl)
+        .filter((u): u is string => typeof u === "string" && u.startsWith("https://") && !isVideo(u))
+      const skipped = rows.length - urls.length
+
+      if (urls.length === 0) {
+        setBulkRefsNote(skipped > 0 ? "Those are videos — references must be images." : "Nothing to add.")
+        return
+      }
+
+      const room = Math.max(0, refLibraryLimit - refLibrary.length)
+      if (room === 0) {
+        setBulkRefsNote(`Reference library is full (${refLibraryLimit}). Remove some first.`)
+        return
+      }
+      const toAdd = urls.slice(0, room)
+
+      const created: RefImage[] = []
+      let limitHit = false
+      for (let i = 0; i < toAdd.length; i += 25) {
+        const res = await fetch("/api/user/references", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items: toAdd.slice(i, i + 25).map(u => ({ url: u, folderId: null })) }),
+        })
+        if (res.status === 409) { limitHit = true; break }
+        if (!res.ok) continue
+        const data = await res.json()
+        for (const row of data.references || []) {
+          created.push({ id: String(row.id), url: row.url, folderId: row.folderId ?? null })
+        }
+        if (typeof data.limit === "number") setRefLimit(data.limit)
+      }
+
+      if (created.length > 0) setRefLibrary(prev => [...prev, ...created])
+      const bits = [`Added ${created.length} to Refs`]
+      if (skipped > 0) bits.push(`${skipped} video${skipped === 1 ? "" : "s"} skipped`)
+      if (limitHit || toAdd.length < urls.length) bits.push("library limit reached")
+      setBulkRefsNote(bits.join(" · "))
+    } catch {
+      setBulkRefsNote("Couldn't reach the server — try again.")
+    } finally {
+      setBulkAddingRefs(false)
+    }
+  }
+
   const handleOpenAddToBucket = async () => {
     if (!isAdminAccount || selectedImageIds.size === 0) return
     setAddToBucketOpen(true)
@@ -24056,6 +24956,11 @@ export default function PortalV2Page() {
   const videoDraftSavedAt = useRef(0)            // newest draft this tab knows about
   const videoDraftTouched = useRef(0)            // when the user last changed something
   const [flux3VideoSafetyChecker, setFlux3VideoSafetyChecker] = useState(true)
+  const [wan30VideoSafetyChecker, setWan30VideoSafetyChecker] = useState(true)
+  const [videoLtxFps, setVideoLtxFps] = useState("25")
+  const [videoToolFactor, setVideoToolFactor] = useState("2")
+  const [videoToolCreativity, setVideoToolCreativity] = useState("0.35")
+  const [videoToolTargetFps, setVideoToolTargetFps] = useState("60")
   // Wan 2.2 custom-LoRA serving (admin): trained runs + current selection
   const [videoLoraRuns, setVideoLoraRuns] = useState<VideoLoraRun[] | null>(null)
   const [videoLoraSel, setVideoLoraSel] = useState<VideoLoraSel | null>(null)
@@ -24577,13 +25482,22 @@ export default function PortalV2Page() {
     const isSD20 = !!selectedVideoModel.supportsSD20Modes
     const sd20NeedsImage = (isSD20 || isOmni) && videoSD20Mode === "i2v" && !selectedVideoModel.supportsReferenceVideo
     const isTextToVideo = !!selectedVideoModel.textToVideo && !sd20NeedsImage
-    if (!videoStartFrameUrl && !isTextToVideo && !isLipsync) return
+    const hasVideoSource =
+      ((videoRefVideoUrls.some(Boolean) || !!videoEditSourceUrl) &&
+        (!!selectedVideoModel.isVideoTool || !!selectedVideoModel.supportsVideoExtend || !!selectedVideoModel.supportsReferenceVideo)) ||
+      // the unified refs panel holds the start image for these models
+      (!!selectedVideoModel.supportsReferenceVideo && videoRefImageUrls.some(Boolean))
+    if (!videoStartFrameUrl && !isTextToVideo && !isLipsync && !isMotion && !hasVideoSource) return
     if (isMotion && !videoMotionVideoUrl) return
     if (isLipsync && (!videoLipsyncVideoUrl || !videoLipsyncAudioUrl)) return
     // Wan 2.7 i2v: prompt is optional when a start image is present (fal schema)
-    // Say why nothing happened instead of returning silently — a dead Generate
-    // button is indistinguishable from a broken one
-    if (!isMotion && !isLipsync && !promptText.trim() && !(selectedVideoModel.id === "wan-2.7" && videoStartFrameUrl)) {
+    // A video tool transforms an uploaded clip, so it needs the clip, not text
+    if (selectedVideoModel.isVideoTool) {
+      const src = videoRefVideoUrls.filter(Boolean)[0] || videoEditSourceUrl
+      if (!src) { alert("Upload the video to process as a video reference first."); return }
+    } else if (!isMotion && !isLipsync && !promptText.trim() && !(selectedVideoModel.id === "wan-2.7" && videoStartFrameUrl)) {
+      // Say why nothing happened instead of returning silently — a dead Generate
+      // button is indistinguishable from a broken one
       alert("Add a prompt before generating.")
       return
     }
@@ -24610,9 +25524,11 @@ export default function PortalV2Page() {
         .filter((e): e is { u: string; i: number } => !!e.u)
       const vids = videoRefVideoUrls.filter(Boolean) as string[]
       const auds = videoRefAudioUrls.filter(Boolean) as string[]
-      // Models that continue a clip treat a single video reference as the
-      // source to extend rather than as a style reference
-      if (selectedVideoModel.supportsVideoExtend && vids.length > 0) {
+      // A tool's video reference IS its input
+      if (selectedVideoModel.isVideoTool && vids.length > 0) {
+        sdMode = "edit"; sdImageUrl = null; sdEndImageUrl = undefined
+        sdEditVideoUrl = vids[0]
+      } else if (selectedVideoModel.supportsVideoExtend && vids.length > 0) {
         sdMode = "edit"; sdImageUrl = null; sdEndImageUrl = undefined
         sdEditVideoUrl = vids[0]
       } else if (imgs.length === 0 && vids.length === 0 && auds.length > 0) {
@@ -24694,6 +25610,13 @@ export default function PortalV2Page() {
           ...(selectedVideoModel.id === "wan-2.7" ? { wan27SafetyChecker: wan27VideoSafetyChecker } : {}),
           ...(selectedVideoModel.id === "minimax-h3-max" ? { h3MaxSafetyChecker: h3MaxVideoSafetyChecker } : {}),
           ...(selectedVideoModel.id === "flux-3" ? { flux3SafetyChecker: flux3VideoSafetyChecker } : {}),
+          ...(selectedVideoModel.id.startsWith("wan-3.0") ? { wan30SafetyChecker: wan30VideoSafetyChecker } : {}),
+          ...(selectedVideoModel.fpsOptions ? { ltxFps: videoLtxFps } : {}),
+          ...(selectedVideoModel.isVideoTool ? {
+            videoUpscaleFactor: videoToolFactor,
+            videoToolCreativity: videoToolCreativity,
+            videoTargetFps: videoToolTargetFps,
+          } : {}),
           ...(selectedVideoModel.id === "wan-2.2-lora"
             ? { loras: videoLoraSel ? [{ path: videoLoraSel.path, scale: videoLoraSel.scale, transformer: videoLoraSel.transformer }] : [] }
             : {}),
@@ -24755,7 +25678,7 @@ export default function PortalV2Page() {
     } finally {
       setVideoGenerating(false)
     }
-  }, [videoStartFrameUrl, videoEndFrameUrl, videoDuration, videoResolution, videoAspectRatio, videoAudioEnabled, videoAudioUrl, selectedVideoModel, videoMotionVideoUrl, videoCharacterOrientation, videoKeepOriginalSound, videoMotionVideoDuration, videoSD20Mode, videoRefImageUrls, videoRefVideoUrls, videoRefAudioUrls, videoRefVideoDuration, videoRefStartIdx, videoRefEndIdx, videoLipsyncVideoUrl, videoLipsyncAudioUrl, videoLipsyncSyncMode, videoLipsyncVideoDuration, wan25VideoSafetyChecker, seedance15VideoSafetyChecker, wan27VideoSafetyChecker, h3MaxVideoSafetyChecker, flux3VideoSafetyChecker, videoEditSourceUrl, videoEditSourceDuration])
+  }, [videoStartFrameUrl, videoEndFrameUrl, videoDuration, videoResolution, videoAspectRatio, videoAudioEnabled, videoAudioUrl, selectedVideoModel, videoMotionVideoUrl, videoCharacterOrientation, videoKeepOriginalSound, videoMotionVideoDuration, videoSD20Mode, videoRefImageUrls, videoRefVideoUrls, videoRefAudioUrls, videoRefVideoDuration, videoRefStartIdx, videoRefEndIdx, videoLipsyncVideoUrl, videoLipsyncAudioUrl, videoLipsyncSyncMode, videoLipsyncVideoDuration, wan25VideoSafetyChecker, seedance15VideoSafetyChecker, wan27VideoSafetyChecker, h3MaxVideoSafetyChecker, flux3VideoSafetyChecker, wan30VideoSafetyChecker, videoLtxFps, videoEditSourceUrl, videoEditSourceDuration])
 
   const applyVideoModel = useCallback((model: VideoModelConfig) => {
     setSelectedVideoModel(model)
@@ -24773,6 +25696,13 @@ export default function PortalV2Page() {
     // end frame additionally requires the target to support end frames.
     const keepStartFrame = !model.supportsLipsync && !model.supportsReferenceVideo
     const keepEndFrame = keepStartFrame && model.supportsEndFrame
+    // Everything below follows the same rule: an upload survives the switch when
+    // the target model still shows the slot it lives in. Wiping a 40 MB clip
+    // because the user compared two models is pure re-upload for no reason.
+    const keepRefs = !!model.supportsReferenceVideo
+    const keepLipsync = !!model.supportsLipsync
+    const keepEditSource = !!model.isVideoTool || !!model.supportsVideoExtend
+    const keepMotion = model.id === "kling-v3-motion"
     if (!keepStartFrame) {
       setVideoStartFramePreview(null)
       setVideoStartFrameUrl(null)
@@ -24781,31 +25711,39 @@ export default function PortalV2Page() {
       setVideoEndFramePreview(null)
       setVideoEndFrameUrl(null)
     }
-    setVideoMotionVideoPreview(null)
-    setVideoMotionVideoUrl(null)
+    if (!keepMotion) {
+      setVideoMotionVideoPreview(null)
+      setVideoMotionVideoUrl(null)
+    }
     setVideoCharacterOrientation("image")
     setVideoKeepOriginalSound(true)
     // Mode-switched models (Omni) only show the frame slot in Image mode — land
     // there when carrying a frame over so it stays visible
     setVideoSD20Mode(keepStartFrame && model.videoModes?.includes("i2v") && videoStartFramePreview ? "i2v" : "t2v")
-    setVideoRefImagePreviews([])
-    setVideoRefImageUrls([])
-    setVideoRefVideoFilenames([])
-    setVideoRefVideoUrls([])
-    setVideoRefAudioFilenames([])
-    setVideoRefAudioUrls([])
-    setVideoRefVideoDuration(0)
-    setVideoRefStartIdx(null)
-    setVideoRefEndIdx(null)
-    setVideoLipsyncVideoFilename(null)
-    setVideoLipsyncVideoUrl(null)
-    setVideoLipsyncVideoDuration(0)
-    setVideoLipsyncAudioFilename(null)
-    setVideoLipsyncAudioUrl(null)
-    setVideoLipsyncSyncMode("cut_off")
-    setVideoEditSourceFilename(null)
-    setVideoEditSourceUrl(null)
-    setVideoEditSourceDuration(0)
+    if (!keepRefs) {
+      setVideoRefImagePreviews([])
+      setVideoRefImageUrls([])
+      setVideoRefVideoFilenames([])
+      setVideoRefVideoUrls([])
+      setVideoRefAudioFilenames([])
+      setVideoRefAudioUrls([])
+      setVideoRefVideoDuration(0)
+      setVideoRefStartIdx(null)
+      setVideoRefEndIdx(null)
+    }
+    if (!keepLipsync) {
+      setVideoLipsyncVideoFilename(null)
+      setVideoLipsyncVideoUrl(null)
+      setVideoLipsyncVideoDuration(0)
+      setVideoLipsyncAudioFilename(null)
+      setVideoLipsyncAudioUrl(null)
+      setVideoLipsyncSyncMode("cut_off")
+    }
+    if (!keepEditSource) {
+      setVideoEditSourceFilename(null)
+      setVideoEditSourceUrl(null)
+      setVideoEditSourceDuration(0)
+    }
   }, [videoStartFramePreview])
 
   // Collect the draft. Kept explicit rather than clever so it is obvious what
@@ -27063,6 +28001,9 @@ export default function PortalV2Page() {
           downloadError={downloadError}
           isAdmin={isAdminAccount}
           onAddToBucket={handleOpenAddToBucket}
+          onAddToRefs={handleBulkAddToRefs}
+          addingToRefs={bulkAddingRefs}
+          addToRefsNote={bulkRefsNote}
         />
       )}
 
@@ -27317,9 +28258,11 @@ export default function PortalV2Page() {
             )}
             <VideoCustomizationPanel
               model={selectedVideoModel}
-              safetyChecker={selectedVideoModel.id === "wan-2.5" ? wan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? seedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? wan27VideoSafetyChecker : selectedVideoModel.id === "minimax-h3-max" ? h3MaxVideoSafetyChecker : selectedVideoModel.id === "flux-3" ? flux3VideoSafetyChecker : undefined}
-              setSafetyChecker={selectedVideoModel.id === "wan-2.5" ? setWan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? setSeedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? setWan27VideoSafetyChecker : selectedVideoModel.id === "minimax-h3-max" ? setH3MaxVideoSafetyChecker : selectedVideoModel.id === "flux-3" ? setFlux3VideoSafetyChecker : undefined}
+              safetyChecker={selectedVideoModel.id === "wan-2.5" ? wan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? seedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? wan27VideoSafetyChecker : selectedVideoModel.id === "minimax-h3-max" ? h3MaxVideoSafetyChecker : selectedVideoModel.id === "flux-3" ? flux3VideoSafetyChecker : selectedVideoModel.id.startsWith("wan-3.0") ? wan30VideoSafetyChecker : undefined}
+              setSafetyChecker={selectedVideoModel.id === "wan-2.5" ? setWan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? setSeedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? setWan27VideoSafetyChecker : selectedVideoModel.id === "minimax-h3-max" ? setH3MaxVideoSafetyChecker : selectedVideoModel.id === "flux-3" ? setFlux3VideoSafetyChecker : selectedVideoModel.id.startsWith("wan-3.0") ? setWan30VideoSafetyChecker : undefined}
               isAdminAccount={isAdminAccount}
+              ltxFps={videoLtxFps}
+              onLtxFpsChange={setVideoLtxFps}
               duration={videoDuration}
               onDurationChange={setVideoDuration}
               aspectRatio={videoAspectRatio}
@@ -27420,7 +28363,7 @@ export default function PortalV2Page() {
             onGenerate={handleVideoGenerate}
             onPromptChange={setVideoPromptText}
             generating={videoGenerating}
-            canGenerate={!videoGenerating && (selectedVideoModel.supportsLipsync ? (!!videoLipsyncVideoUrl && !!videoLipsyncAudioUrl) : (selectedVideoModel.textToVideo || !!videoStartFrameUrl)) && (selectedVideoModel.id !== "kling-v3-motion" || !!videoMotionVideoUrl) && videoActiveJobCount < videoMaxConcurrent}
+            canGenerate={!videoGenerating && (selectedVideoModel.isVideoTool ? (videoRefVideoUrls.filter(Boolean).length > 0 || !!videoEditSourceUrl) : selectedVideoModel.supportsLipsync ? (!!videoLipsyncVideoUrl && !!videoLipsyncAudioUrl) : (selectedVideoModel.textToVideo || !!videoStartFrameUrl || (!!selectedVideoModel.supportsReferenceVideo && (videoRefImageUrls.some(Boolean) || videoRefVideoUrls.some(Boolean))))) && (selectedVideoModel.id !== "kling-v3-motion" || !!videoMotionVideoUrl) && videoActiveJobCount < videoMaxConcurrent}
             queueFull={videoActiveJobCount >= videoMaxConcurrent && videoMaxConcurrent !== Infinity}
             isGenerationMaintenance={isGenerationMaintenance && !isAdminAccount && !isAuditAccount}
             isAdminAccount={isAdminAccount}
@@ -27454,7 +28397,7 @@ export default function PortalV2Page() {
                 {/* Drag handle + header */}
                 <div className="sticky top-0 z-10 bg-[#050810] border-b border-white/5 px-4 py-3 flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <SlidersHorizontal size={14} className="text-orange-400" />
+                    <SlidersHorizontal size={14} className="text-slate-300" />
                     <span className="text-sm font-bold text-white">Video Configuration</span>
                   </div>
                   <button
@@ -27475,7 +28418,7 @@ export default function PortalV2Page() {
                       onChange={e => setVideoMotionPromptText(e.target.value)}
                       placeholder="Describe additional motion details..."
                       rows={2}
-                      className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 resize-none focus:outline-none focus:border-orange-500/40 transition-all"
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 resize-none focus:outline-none focus:border-white/40/40 transition-all"
                     />
                   </div>
                 )}
@@ -27485,8 +28428,8 @@ export default function PortalV2Page() {
                 )}
                 <VideoCustomizationPanel
                   model={selectedVideoModel}
-                  safetyChecker={selectedVideoModel.id === "wan-2.5" ? wan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? seedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? wan27VideoSafetyChecker : selectedVideoModel.id === "minimax-h3-max" ? h3MaxVideoSafetyChecker : selectedVideoModel.id === "flux-3" ? flux3VideoSafetyChecker : undefined}
-                  setSafetyChecker={selectedVideoModel.id === "wan-2.5" ? setWan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? setSeedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? setWan27VideoSafetyChecker : selectedVideoModel.id === "minimax-h3-max" ? setH3MaxVideoSafetyChecker : selectedVideoModel.id === "flux-3" ? setFlux3VideoSafetyChecker : undefined}
+                  safetyChecker={selectedVideoModel.id === "wan-2.5" ? wan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? seedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? wan27VideoSafetyChecker : selectedVideoModel.id === "minimax-h3-max" ? h3MaxVideoSafetyChecker : selectedVideoModel.id === "flux-3" ? flux3VideoSafetyChecker : selectedVideoModel.id.startsWith("wan-3.0") ? wan30VideoSafetyChecker : undefined}
+                  setSafetyChecker={selectedVideoModel.id === "wan-2.5" ? setWan25VideoSafetyChecker : selectedVideoModel.id === "seedance-1.5" ? setSeedance15VideoSafetyChecker : selectedVideoModel.id === "wan-2.7" ? setWan27VideoSafetyChecker : selectedVideoModel.id === "minimax-h3-max" ? setH3MaxVideoSafetyChecker : selectedVideoModel.id === "flux-3" ? setFlux3VideoSafetyChecker : selectedVideoModel.id.startsWith("wan-3.0") ? setWan30VideoSafetyChecker : undefined}
                   isAdminAccount={isAdminAccount}
                   duration={videoDuration}
                   onDurationChange={setVideoDuration}

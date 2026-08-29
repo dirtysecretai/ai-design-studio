@@ -9,6 +9,12 @@ import { isGenerationBlocked } from '@/lib/generation-guard'
 import { reserveGenerationTickets } from '@/lib/ticket-gate'
 import { checkUserConcurrency } from '@/lib/user-concurrency'
 import { enforceContentFilter } from '@/lib/content-filter'
+import {
+  FAL_IMAGE_MODEL_IDS,
+  getFalImageModelSpec,
+  buildFalImageInput,
+  falImageModelIsPromptless,
+} from '@/lib/fal-image-models'
 
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
@@ -101,9 +107,13 @@ export async function POST(request: Request) {
 
     // Gemini scanner models were retired from the public offering (2026-07-29):
     // ADMIN ONLY, enforced server-side regardless of which UI submitted the job
+    // The 2026-08 fal image batch (Qwen 3, Reve 2.1, MAI 2.5, Grok Imagine 2,
+    // Meta Muse, Bria FIBO, Ideogram v4, NB2 Lite, Recraft v4, Pixelcut,
+    // Virtual Try-On, Topaz suite) is admin-only while under test.
     const ADMIN_ONLY_IMAGE_MODELS = new Set([
       'gemini-2.5-flash-image', 'gemini-3-pro-image', 'gemini-3-pro-image-preview',
       'flash-scanner-v2.5', 'pro-scanner-v3',
+      ...FAL_IMAGE_MODEL_IDS,
     ])
     if (ADMIN_ONLY_IMAGE_MODELS.has(model)) {
       const { checkIsAdmin } = await import('@/lib/admin-check')
@@ -137,7 +147,7 @@ export async function POST(request: Request) {
     }
 
     // Upscaler models don't require a prompt
-    if (model !== 'clarity-upscaler' && model !== 'aura-sr' && model !== 'esrgan' && model !== 'drct' && model !== 'supir' && (!prompt || prompt.trim().length === 0)) {
+    if (model !== 'clarity-upscaler' && model !== 'aura-sr' && model !== 'esrgan' && model !== 'drct' && model !== 'supir' && !falImageModelIsPromptless(model) && (!prompt || prompt.trim().length === 0)) {
       return NextResponse.json(
         { error: 'Universe coordinates required' },
         { status: 400 }
@@ -782,9 +792,71 @@ export async function POST(request: Request) {
           })
         }
 
-        const inputParams: any = {
-          prompt: prompt.trim()
+        // ── 2026-08 fal image batch ─────────────────────────────────────────
+        // Input shapes live in lib/fal-image-models.ts, verified field-by-field
+        // against each endpoint's live OpenAPI Input schema. Nothing below this
+        // block touches these models — they skip the legacy quality/reference
+        // chain entirely.
+        const newFalSpec = getFalImageModelSpec(model)
+        let newFalInput: Record<string, any> | null = null
+        const newFalPermanentRefs: string[] = []
+
+        if (newFalSpec) {
+          modelEndpoint = newFalSpec.endpoint
+
+          // Input images: an explicit upscale-style source URL wins (matches the
+          // other upscalers), then the portal's reference images, in order.
+          const rawSources: string[] = []
+          if (typeof upscaleImageUrl === 'string' && upscaleImageUrl) rawSources.push(upscaleImageUrl)
+          if (Array.isArray(referenceImages)) rawSources.push(...referenceImages.filter((r: unknown) => typeof r === 'string' && r))
+
+          const falImageUrls: string[] = []
+          // Pure text-to-image endpoints (maxInputImages 0) skip uploads entirely.
+          for (const ref of rawSources.slice(0, newFalSpec.maxInputImages)) {
+            try {
+              const imageBuffer = await refToBuffer(ref)
+              const blob = new Blob([new Uint8Array(imageBuffer)], { type: 'image/jpeg' })
+              falImageUrls.push(await fal.storage.upload(blob))
+              // Keep a permanent copy for the DB record (reuse https refs as-is).
+              if (/^https?:\/\//i.test(ref)) {
+                newFalPermanentRefs.push(ref)
+              } else {
+                const refFilename = `reference-${user.id}-${Date.now()}-${falImageUrls.length}.jpg`
+                newFalPermanentRefs.push(await uploadToR2(refFilename, imageBuffer, 'image/jpeg'))
+              }
+            } catch (uploadError) {
+              console.error(`[${model}] failed to upload input image:`, uploadError)
+            }
+          }
+
+          try {
+            const built = buildFalImageInput(newFalSpec, {
+              prompt: typeof prompt === 'string' ? prompt.trim() : '',
+              aspectRatio,
+              quality,
+              imageUrls: falImageUrls,
+              options: body,
+            })
+            modelEndpoint = built.endpoint
+            newFalInput = built.input
+          } catch (buildErr: any) {
+            return NextResponse.json(
+              { error: buildErr?.message || `Invalid input for ${model}` },
+              { status: 400 }
+            )
+          }
+
+          console.log(`[${model}] endpoint=${modelEndpoint} input=${JSON.stringify(newFalInput).slice(0, 500)}`)
         }
+
+        // Prompt used for DB/queue bookkeeping — promptless models (Topaz,
+        // Pixelcut, Virtual Try-On) still need a non-empty label.
+        const jobPrompt =
+          (typeof prompt === 'string' ? prompt.trim() : '') || selectedModel.displayName
+
+        const inputParams: any = newFalInput
+          ? { ...newFalInput }
+          : { prompt: prompt.trim() }
 
         // Only add enable_safety_checker for models that support it (SeeDream)
         if (model === 'seedream-4.5') {
@@ -799,7 +871,9 @@ export async function POST(request: Request) {
         }
 
         // Configure quality/resolution based on model
-        if (model === 'seedream-4.5') {
+        if (newFalSpec) {
+          // input already fully built by lib/fal-image-models.ts
+        } else if (model === 'seedream-4.5') {
           const qualityMultiplier = quality === '4k' ? 2 : 1
           const baseSizes: Record<string, { width: number, height: number }> = {
             '1:1': { width: 1024, height: 1024 },
@@ -918,8 +992,8 @@ export async function POST(request: Request) {
         }
 
         // Handle reference images (upload to FAL storage first)
-        const permanentReferenceUrls: string[] = []
-        if (referenceImages && referenceImages.length > 0) {
+        const permanentReferenceUrls: string[] = newFalSpec ? [...newFalPermanentRefs] : []
+        if (!newFalSpec && referenceImages && referenceImages.length > 0) {
           console.log(`Processing ${referenceImages.length} reference images for ${selectedModel.displayName} edit mode`)
 
           if (model === 'seedream-4.5') {
@@ -997,7 +1071,7 @@ export async function POST(request: Request) {
           await prisma.generatedImage.create({
             data: {
               userId: user.id,
-              prompt: prompt.trim(),
+              prompt: jobPrompt,
               imageUrl: syncUrl,
               model,
               ticketCost: skipTickets ? 0 : ticketCost,
@@ -1068,7 +1142,7 @@ export async function POST(request: Request) {
                 userId: user.id,
                 modelId: model,
                 modelType: 'image',
-                prompt: prompt.trim(),
+                prompt: jobPrompt,
                 parameters: {
                   source: 'main-scanner',
                   quality,
@@ -1124,7 +1198,7 @@ export async function POST(request: Request) {
               userId: user.id,
               modelId: model,
               modelType: 'image',
-              prompt: prompt.trim(),
+              prompt: jobPrompt,
               parameters: {
                 source: 'main-scanner',
                 quality,

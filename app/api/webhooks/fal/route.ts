@@ -114,8 +114,15 @@ export async function POST(request: Request) {
 
     // ─── FAILURE PATH ───────────────────────────────────────────────
     if (status === 'ERROR' || status === 'FAILED' || error) {
-      const errorMsg = error?.message || error || 'FAL.ai generation failed'
-      console.error(`FAL.ai job failed for queue #${queueItem.id}:`, errorMsg)
+      // fal hands back anything from a string to a validation array. Keep the
+      // raw text for the record and show the user something they can act on —
+      // a stored "Unexpected status code: 422" tells nobody what to change.
+      const rawDetail = Array.isArray(error?.detail)
+        ? error.detail.map((d: any) => d?.msg || d?.message || JSON.stringify(d)).join('; ')
+        : (typeof error === 'string' ? error : error?.message || error?.detail || 'FAL.ai generation failed')
+      const { friendlyFalError } = await import('@/lib/fal-friendly-errors')
+      const errorMsg = friendlyFalError(String(rawDetail), params?.model)
+      console.error(`FAL.ai job failed for queue #${queueItem.id}:`, rawDetail)
       console.error(`FAL.ai full error object:`, JSON.stringify(error))
       console.error(`FAL.ai full body:`, JSON.stringify(body))
 
@@ -129,7 +136,10 @@ export async function POST(request: Request) {
           data: {
             status: 'failed',
             completedAt: new Date(),
-            errorMessage: errorMsg
+            errorMessage: errorMsg,
+            // Dev-server logs scroll away; the provider's own words belong on
+            // the row so a failure can be diagnosed after the fact.
+            parameters: { ...(params ?? {}), falError: String(rawDetail).slice(0, 600) },
           }
         })
       ])
@@ -208,9 +218,21 @@ export async function POST(request: Request) {
           const imgBuffer = Buffer.from(await imageResponse.arrayBuffer())
           console.log(`Downloaded image ${i + 1}: ${(imgBuffer.length / 1024 / 1024).toFixed(2)} MB`)
 
-          // Upload to Vercel Blob
-          const filename = `universe-scan-${queueItem.userId}-${Date.now()}-${i}.png`
-          const url = await uploadToR2(filename, imgBuffer, 'image/png')
+          // Keep the real file type. Recraft's vector models return SVG, and
+          // storing that as .png/image-png leaves a file nothing can render.
+          const falType = (imageResponse.headers.get('content-type') || '').split(';')[0].trim()
+          const looksSvg = falType === 'image/svg+xml'
+            || /\.svg(\?|#|$)/i.test(falImageUrl)
+            || imgBuffer.slice(0, 400).toString('utf8').trimStart().startsWith('<svg')
+          const ext = looksSvg ? 'svg'
+            : falType === 'image/webp' ? 'webp'
+            : falType === 'image/jpeg' ? 'jpg'
+            : 'png'
+          const mime = looksSvg ? 'image/svg+xml'
+            : falType.startsWith('image/') ? falType
+            : 'image/png'
+          const filename = `universe-scan-${queueItem.userId}-${Date.now()}-${i}.${ext}`
+          const url = await uploadToR2(filename, imgBuffer, mime)
           console.log(`Uploaded image ${i + 1} to blob: ${url}`)
 
           // Save to GeneratedImage table

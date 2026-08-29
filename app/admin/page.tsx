@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input"
 import {
   MessageSquare, Wrench, Image as ImageIcon, Sparkles, Tag,
   Users, CreditCard, ListOrdered, FlaskConical, Home, LayoutDashboard,
-  LogOut, ChevronRight, ShieldOff, Loader2, Shield, FileText, HardDrive, Database, Brain, ClipboardCheck, PackageOpen, Telescope, ShieldAlert, ShieldCheck, Film } from "lucide-react"
+  LogOut, ChevronRight, ShieldOff, Loader2, Shield, FileText, HardDrive, Database, Brain, ClipboardCheck, PackageOpen, Telescope, ShieldAlert, ShieldCheck, Film, Radar, Calculator } from "lucide-react"
 import { SiteBrandHero, SiteLogoBox } from "@/components/SitePageHeader"
 
 const TOOL_PAGES = [
@@ -34,6 +34,7 @@ const TOOL_PAGES = [
       { name: "LoRA Training",      description: "FAL trainers - Flux, Wan 2.2, LTX-2",   href: "/admin/lora-training",  icon: Sparkles, badge: "training" },
       { name: "Upscaler Training",  description: "Train ESRGAN / DRCT upscalers",         href: "/admin/upscaler",       icon: Telescope },
       { name: "Slicing Studio",     description: "Cut stored videos into frames & clips", href: "/admin/slicing-studio", icon: Film },
+      { name: "Model Watch",        description: "New fal.ai models we don't have yet",   href: "/admin/model-watch",    icon: Radar },
     ]
   },
   {
@@ -50,6 +51,7 @@ const TOOL_PAGES = [
       { name: "Maintenance",        description: "Feature & model toggles",               href: "/admin/maintenance",    icon: Wrench },
       { name: "Admins",             description: "Admin accounts & permissions",          href: "/admin/accounts",       icon: Shield },
       { name: "Storage",            description: "R2 uploads / migration / cleanup",      href: "/admin/storage",        icon: HardDrive },
+      { name: "Ticket Economics",   description: "Model ticket costs vs fal USD margins", href: "/admin/ticket-economics", icon: Calculator },
       { name: "Lab",                description: "Scanner, prototype & model test pages", href: "/admin/lab",            icon: FlaskConical },
     ]
   },

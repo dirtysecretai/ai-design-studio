@@ -5,6 +5,9 @@ import { useRouter } from "next/navigation"
 import { Ticket, Zap, Sparkles, ChevronLeft, Check, Shield } from "lucide-react"
 import Link from "next/link"
 import { SiteLogoBox } from "@/components/SitePageHeader"
+// Pack prices live in lib/ticket-pricing.ts so the shop and the admin
+// Ticket Economics page always quote the same USD-per-ticket.
+import { TICKET_PACKAGES } from "@/lib/ticket-pricing"
 
 interface UserData {
   id: number
@@ -12,16 +15,6 @@ interface UserData {
   ticketBalance: number
 }
 
-// Dev Tier discount is 10% (cut from 20/30% on 2026-07-29 — keep in sync with
-// the subscribe page, shop dropdown, and dashboard copy)
-const TICKET_PACKAGES = [
-  { tickets: 25,   freeTierPrice: 5.00,   devTierPrice: 4.50  },
-  { tickets: 50,   freeTierPrice: 9.00,   devTierPrice: 8.10,  popular: true  },
-  { tickets: 100,  freeTierPrice: 16.00,  devTierPrice: 14.40 },
-  { tickets: 250,  freeTierPrice: 35.00,  devTierPrice: 31.50 },
-  { tickets: 500,  freeTierPrice: 65.00,  devTierPrice: 58.50, bestValue: true },
-  { tickets: 1000, freeTierPrice: 120.00, devTierPrice: 108.00 },
-]
 
 const BENEFITS = [
   {
