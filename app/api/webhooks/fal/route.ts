@@ -240,6 +240,12 @@ export async function POST(request: Request) {
 
           const savedImage = await prisma.generatedImage.create({
             data: {
+              // QUEUE time, not completion time. The feed orders on createdAt,
+              // so defaulting to now() reshuffled every tile on refresh: jobs
+              // finish out of order (different models, retries, queue waits)
+              // and a batch of 100 landed in a different order than it ran.
+              // The queue row's own timestamp is when the user asked for it.
+              createdAt: queueItem.createdAt,
               userId: queueItem.userId,
               prompt: params?.savePrompt || queueItem.prompt,
               imageUrl: url,

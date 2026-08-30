@@ -85,8 +85,17 @@ export async function POST(req: Request) {
         if (!sessionUser) {
           console.error('Admin video-status: no session user — skipping DB save')
         } else {
+          // Queue time for the feed's ordering key. existingJob above is the
+          // completed-dedupe probe (null here by definition), so ask for the
+          // row itself: completion order is not the order things were asked for.
+          const queueRow = await prisma.generationQueue.findFirst({
+            where: { falRequestId: requestId },
+            select: { createdAt: true },
+            orderBy: { id: 'desc' },
+          })
           const created = await prisma.generatedImage.create({
             data: {
+              ...(queueRow ? { createdAt: queueRow.createdAt } : {}),
               userId:      sessionUser.id,
               prompt:      prompt || '',
               imageUrl:    permanentVideoUrl,

@@ -19,7 +19,7 @@ export async function POST(req: Request) {
 
     const body = await req.json()
     requestId = body.requestId
-    const { falEndpoint, prompt, outputFormat, aspectRatio, referenceImageUrls } = body
+    const { falEndpoint, prompt, outputFormat, aspectRatio, referenceImageUrls, queuedAt } = body
     if (!requestId || !falEndpoint) {
       return NextResponse.json({ error: 'Missing requestId or falEndpoint' }, { status: 400 })
     }
@@ -88,6 +88,11 @@ export async function POST(req: Request) {
           const created = await Promise.all(hostedImages.map(img =>
             prisma.generatedImage.create({
               data: {
+                // createdAt = when the user QUEUED this generation, not when it
+                // finished. The feed orders on createdAt, so completion time
+                // reshuffled tiles on every refresh. Sanity-capped to the last 24h.
+                ...(typeof queuedAt === 'number' && queuedAt > Date.now() - 24 * 3600 * 1000 && queuedAt <= Date.now() + 60_000
+                  ? { createdAt: new Date(queuedAt) } : {}),
                 userId:             targetUserId!,
                 prompt:             prompt || '',
                 imageUrl:           img.url,

@@ -13,6 +13,7 @@ import {
   FAL_IMAGE_MODEL_IDS,
   getFalImageModelSpec,
   buildFalImageInput,
+  resolveFalImageModelSpec,
   falImageModelIsPromptless,
 } from '@/lib/fal-image-models'
 
@@ -39,6 +40,27 @@ async function refToBuffer(ref: string): Promise<Buffer> {
 async function refToBase64(ref: string): Promise<string> {
   if (/^https?:\/\//i.test(ref)) return (await refToBuffer(ref)).toString('base64')
   return ref.split(',')[1] || ref
+}
+
+/**
+ * source URL -> fal storage URL, so a reference used by several runs is
+ * uploaded once. Process-local and bounded; a cold serverless instance simply
+ * uploads again, which is the behaviour this replaces.
+ */
+const falUploadCache = new Map<string, { url: string; at: number }>()
+const FAL_UPLOAD_TTL_MS = 30 * 60 * 1000
+const FAL_UPLOAD_CACHE_MAX = 200
+
+function rememberFalUpload(source: string, url: string) {
+  falUploadCache.set(source, { url, at: Date.now() })
+  if (falUploadCache.size > FAL_UPLOAD_CACHE_MAX) {
+    for (const [k, v] of falUploadCache) {
+      if (Date.now() - v.at >= FAL_UPLOAD_TTL_MS) falUploadCache.delete(k)
+    }
+    while (falUploadCache.size > FAL_UPLOAD_CACHE_MAX) {
+      falUploadCache.delete(falUploadCache.keys().next().value as string)
+    }
+  }
 }
 
 export async function POST(request: Request) {
@@ -797,28 +819,45 @@ export async function POST(request: Request) {
         // against each endpoint's live OpenAPI Input schema. Nothing below this
         // block touches these models — they skip the legacy quality/reference
         // chain entirely.
-        const newFalSpec = getFalImageModelSpec(model)
         let newFalInput: Record<string, any> | null = null
         const newFalPermanentRefs: string[] = []
 
+        // Input images: an explicit upscale-style source URL wins (matches the
+        // other upscalers), then the portal's reference images, in order.
+        const rawSources: string[] = []
+        if (typeof upscaleImageUrl === 'string' && upscaleImageUrl) rawSources.push(upscaleImageUrl)
+        if (Array.isArray(referenceImages)) rawSources.push(...referenceImages.filter((r: unknown) => typeof r === 'string' && r))
+
+        // Families that ship text-to-image and edit as separate fal endpoints are
+        // ONE model in the portal: attaching a reference is what selects the edit
+        // endpoint, so users pick a model rather than a mode.
+        const newFalSpec = resolveFalImageModelSpec(model, rawSources.length > 0)
+
         if (newFalSpec) {
           modelEndpoint = newFalSpec.endpoint
-
-          // Input images: an explicit upscale-style source URL wins (matches the
-          // other upscalers), then the portal's reference images, in order.
-          const rawSources: string[] = []
-          if (typeof upscaleImageUrl === 'string' && upscaleImageUrl) rawSources.push(upscaleImageUrl)
-          if (Array.isArray(referenceImages)) rawSources.push(...referenceImages.filter((r: unknown) => typeof r === 'string' && r))
 
           const falImageUrls: string[] = []
           // Pure text-to-image endpoints (maxInputImages 0) skip uploads entirely.
           for (const ref of rawSources.slice(0, newFalSpec.maxInputImages)) {
             try {
+              const isHttpRef = /^https?:\/\//i.test(ref)
+              // The same reference gets re-downloaded and re-uploaded on every
+              // run — four Virtual Try-Ons of one outfit pushed the same two
+              // photos to fal eight times. fal's storage URLs are stable, so
+              // remember them per source URL.
+              const hit = isHttpRef ? falUploadCache.get(ref) : undefined
+              if (hit && Date.now() - hit.at < FAL_UPLOAD_TTL_MS) {
+                falImageUrls.push(hit.url)
+                newFalPermanentRefs.push(ref)
+                continue
+              }
               const imageBuffer = await refToBuffer(ref)
               const blob = new Blob([new Uint8Array(imageBuffer)], { type: 'image/jpeg' })
-              falImageUrls.push(await fal.storage.upload(blob))
+              const uploadedUrl = await fal.storage.upload(blob)
+              falImageUrls.push(uploadedUrl)
               // Keep a permanent copy for the DB record (reuse https refs as-is).
-              if (/^https?:\/\//i.test(ref)) {
+              if (isHttpRef) {
+                rememberFalUpload(ref, uploadedUrl)
                 newFalPermanentRefs.push(ref)
               } else {
                 const refFilename = `reference-${user.id}-${Date.now()}-${falImageUrls.length}.jpg`

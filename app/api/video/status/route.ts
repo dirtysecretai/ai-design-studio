@@ -32,6 +32,7 @@ export async function POST(request: NextRequest) {
       resolution,
       ticketCost,
       thumbnailUrl,
+      queuedAt,
     } = await request.json();
 
     if (!requestId || !falEndpoint) {
@@ -93,6 +94,10 @@ export async function POST(request: NextRequest) {
       // Save completed video to DB
       const savedVideo = await prisma.generatedImage.create({
         data: {
+          // Queue order, not completion order — the feed sorts on createdAt and
+          // videos finish wildly out of order. Sanity-capped to the last 24h.
+          ...(typeof queuedAt === 'number' && queuedAt > Date.now() - 24 * 3600 * 1000 && queuedAt <= Date.now() + 60_000
+            ? { createdAt: new Date(queuedAt) } : {}),
           userId: user.id,
           prompt: actualPrompt,
           imageUrl: permanentVideoUrl,

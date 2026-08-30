@@ -26,6 +26,13 @@ export interface FalImageBuildContext {
 }
 
 export interface FalImageModelSpec {
+  /**
+   * Sibling spec to run instead when the request carries reference images.
+   * These families ship text-to-image and edit as separate fal endpoints; the
+   * portal exposes ONE model and picks by what the user attached, the way
+   * NanoBanana already behaves.
+   */
+  editVariant?: string
   /** App-side model id (matches config/ai-models.config.ts `id`). */
   id: string
   /** fal endpoint id passed to fal.queue.submit(). */
@@ -163,6 +170,7 @@ export const FAL_IMAGE_MODELS: Record<string, FalImageModelSpec> = {
   // ── Qwen Image 3 ───────────────────────────────────────────────────────────
   'qwen-image-3': {
     id: 'qwen-image-3',
+    editVariant: 'qwen-image-3-edit',
     promptMin: 1,
     promptMax: 5000,
     endpoint: 'alibaba/qwen-image-3/text-to-image',
@@ -210,6 +218,7 @@ export const FAL_IMAGE_MODELS: Record<string, FalImageModelSpec> = {
   // ── Reve 2.1 ───────────────────────────────────────────────────────────────
   'reve-2.1': {
     id: 'reve-2.1',
+    editVariant: 'reve-2.1-edit',
     promptMin: 1,
     promptMax: 4000,
     endpoint: 'reve/2.1/text-to-image',
@@ -249,6 +258,7 @@ export const FAL_IMAGE_MODELS: Record<string, FalImageModelSpec> = {
   // ── Microsoft MAI Image 2.5 Pro ────────────────────────────────────────────
   'mai-image-2.5-pro': {
     id: 'mai-image-2.5-pro',
+    editVariant: 'mai-image-2.5-pro-edit',
     promptMin: 3,
     promptMax: 5000,
     endpoint: 'microsoft/mai-image-2.5-pro',
@@ -288,6 +298,7 @@ export const FAL_IMAGE_MODELS: Record<string, FalImageModelSpec> = {
   // ── xAI Grok Imagine 2 ─────────────────────────────────────────────────────
   'grok-imagine-2': {
     id: 'grok-imagine-2',
+    editVariant: 'grok-imagine-2-edit',
     promptMin: 1,
     promptMax: 8000,
     endpoint: 'xai/grok-imagine-image/v2.0/text-to-image',
@@ -332,6 +343,7 @@ export const FAL_IMAGE_MODELS: Record<string, FalImageModelSpec> = {
   // ── Meta Muse ──────────────────────────────────────────────────────────────
   'meta-muse': {
     id: 'meta-muse',
+    editVariant: 'meta-muse-edit',
     promptMin: 1,
     promptMax: 20000,
     endpoint: 'meta/muse-image/text-to-image',
@@ -371,6 +383,7 @@ export const FAL_IMAGE_MODELS: Record<string, FalImageModelSpec> = {
   // ── Bria FIBO 1.5 ──────────────────────────────────────────────────────────
   'bria-fibo': {
     id: 'bria-fibo',
+    editVariant: 'bria-fibo-edit',
     endpoint: 'bria/fibo-gen-1.5/text-to-image',
     needsImage: false,
     imageParam: null,
@@ -749,6 +762,20 @@ export function falImageModelIsPromptless(id: string): boolean {
  * Builds the exact `input` object for fal.queue.submit(). Throws a plain Error
  * with a user-facing message when a required input image is missing.
  */
+/**
+ * The spec that should actually run: a merged family swaps to its edit sibling
+ * as soon as the request has an input image. Falls back to the base when the
+ * sibling is missing, so a bad id degrades to text-to-image rather than 500ing.
+ */
+export function resolveFalImageModelSpec(
+  modelId: string,
+  hasInputImages: boolean,
+): FalImageModelSpec | undefined {
+  const base = getFalImageModelSpec(modelId)
+  if (!base || !hasInputImages || !base.editVariant) return base
+  return getFalImageModelSpec(base.editVariant) ?? base
+}
+
 export function buildFalImageInput(
   spec: FalImageModelSpec,
   ctx: FalImageBuildContext,

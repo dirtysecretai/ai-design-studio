@@ -1,11 +1,12 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback, useMemo, useReducer, cloneElement, isValidElement, type ReactNode, type ReactElement } from "react"
+import { getTicketCost as configTicketCost } from "@/config/ai-models.config"
 import { createPortal } from "react-dom"
 import Link from "next/link"
 import ChatWidget from "@/components/ChatWidget"
 import ChatHub, { ChatProviderSettings, ChatLayoutSettings, ChatAgentSettings, ChatAgentCapabilities, ChatApiKeysSettings } from "@/components/chat-hub"
-import { Image, Video, Type, ChevronDown, ChevronLeft, ChevronRight, Ticket, User, BookMarked, ImagePlus, X, Plus, Check, Copy, Download, RotateCcw, ShoppingBag, SlidersHorizontal, Bell, AlertTriangle, CheckCircle, Info, Sparkles, Music, BookOpen, Star, Trash2, Loader2, Eye, RefreshCw, Upload, Pencil, Eraser, Crop, Undo2, Redo2, Square, Circle, Droplets, Lock, FolderPlus, Layers, Search, PanelLeft, PanelRight, PanelTop, PanelBottom, EyeOff, Folder, Maximize2, Minimize2, FolderInput, Zap, Pin, MessagesSquare, ArrowUpRight, Wand2, Scissors, List, LayoutGrid, Unlock, MousePointer2, ClipboardPaste, Play, Film, Mic, MicOff, Shield } from "lucide-react"
+import { Image, Video, Type, ChevronDown, ChevronLeft, ChevronRight, Ticket, User, BookMarked, ImagePlus, X, Plus, Check, Copy, Download, RotateCcw, ShoppingBag, SlidersHorizontal, Bell, AlertTriangle, CheckCircle, Info, Sparkles, Music, BookOpen, Star, Trash2, Loader2, Eye, RefreshCw, Upload, Pencil, Eraser, Crop, Undo2, Redo2, Square, Circle, Droplets, Lock, FolderPlus, Layers, Search, PanelLeft, PanelRight, PanelTop, PanelBottom, EyeOff, Folder, Maximize2, Minimize2, FolderInput, Zap, MessagesSquare, ArrowUpRight, Wand2, Scissors, List, LayoutGrid, Unlock, MousePointer2, ClipboardPaste, Play, Film, Mic, MicOff, Shield } from "lucide-react"
 import { AddToBucketModal, type Bucket, type BucketFolder } from "@/components/AddToBucketModal"
 import { NewsManager } from "@/components/NewsManager"
 import { HomeView } from "@/components/home/HomeView"
@@ -112,18 +113,12 @@ interface ImageModelConfig {
 
 const IMAGE_MODEL_CONFIGS: ImageModelConfig[] = [
   // ── Frontier additions (ADMIN ONLY while under test) ──
-  { id: "qwen-image-3",         apiId: "qwen-image-3",             name: "Qwen Image 3",        aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"], supportsQuality: true, qualityOptions: ["1k", "2k", "4k"], maxReferenceImages: 0, isFal: true, maxImages: 4 },
-  { id: "qwen-image-3-edit",    apiId: "qwen-image-3-edit",        name: "Qwen Image 3 Edit",   aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"], supportsQuality: true, qualityOptions: ["1k", "2k", "4k"], maxReferenceImages: 6, isFal: true, maxImages: 4 },
-  { id: "reve-2.1",             apiId: "reve-2.1",                 name: "Reve 2.1",            aspectRatios: ["auto", "21:9", "2:1", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "1:2"], supportsQuality: false, maxReferenceImages: 0, isFal: true, maxImages: 4 },
-  { id: "reve-2.1-edit",        apiId: "reve-2.1-edit",            name: "Reve 2.1 Edit",       aspectRatios: ["auto", "21:9", "2:1", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "1:2"], supportsQuality: false, maxReferenceImages: 1, isFal: true, maxImages: 4 },
-  { id: "mai-image-2.5-pro",    apiId: "mai-image-2.5-pro",        name: "MAI Image 2.5 Pro",   aspectRatios: ["auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3"], supportsQuality: false, maxReferenceImages: 0, isFal: true, maxImages: 4 },
-  { id: "mai-image-2.5-pro-edit", apiId: "mai-image-2.5-pro-edit", name: "MAI Image 2.5 Pro Edit", aspectRatios: ["auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3"], supportsQuality: false, maxReferenceImages: 1, isFal: true, maxImages: 4 },
-  { id: "grok-imagine-2",       apiId: "grok-imagine-2",           name: "Grok Imagine 2.0",    aspectRatios: ["2:1", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "1:2"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 0, isFal: true, maxImages: 4 },
-  { id: "grok-imagine-2-edit",  apiId: "grok-imagine-2-edit",      name: "Grok Imagine 2.0 Edit", aspectRatios: ["auto", "2:1", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "1:2"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 4, isFal: true, maxImages: 4 },
-  { id: "meta-muse",            apiId: "meta-muse",                name: "Meta Muse",           aspectRatios: ["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "9:21"], supportsQuality: false, maxReferenceImages: 0, isFal: true, maxImages: 4 },
-  { id: "meta-muse-edit",       apiId: "meta-muse-edit",           name: "Meta Muse Edit",      aspectRatios: ["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "9:21"], supportsQuality: false, maxReferenceImages: 10, isFal: true, maxImages: 4 },
-  { id: "bria-fibo",            apiId: "bria-fibo",                name: "Bria Fibo 1.5",       aspectRatios: ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9"], supportsQuality: true, qualityOptions: ["1k", "4k"], maxReferenceImages: 0, isFal: true, maxImages: 4 },
-  { id: "bria-fibo-edit",       apiId: "bria-fibo-edit",           name: "Bria Fibo Edit",      aspectRatios: ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9"], supportsQuality: false, maxReferenceImages: 10, isFal: true, maxImages: 4 },
+  { id: "qwen-image-3",         apiId: "qwen-image-3",             name: "Qwen Image 3",        aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"], supportsQuality: true, qualityOptions: ["1k", "2k", "4k"], maxReferenceImages: 6, isFal: true, maxImages: 4 },
+  { id: "reve-2.1",             apiId: "reve-2.1",                 name: "Reve 2.1",            aspectRatios: ["auto", "21:9", "2:1", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "1:2"], supportsQuality: false, maxReferenceImages: 1, isFal: true, maxImages: 4 },
+  { id: "mai-image-2.5-pro",    apiId: "mai-image-2.5-pro",        name: "MAI Image 2.5 Pro",   aspectRatios: ["auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3"], supportsQuality: false, maxReferenceImages: 1, isFal: true, maxImages: 4 },
+  { id: "grok-imagine-2",       apiId: "grok-imagine-2",           name: "Grok Imagine 2.0",    aspectRatios: ["2:1", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "1:2"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 4, isFal: true, maxImages: 4 },
+  { id: "meta-muse",            apiId: "meta-muse",                name: "Meta Muse",           aspectRatios: ["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "9:21"], supportsQuality: false, maxReferenceImages: 10, isFal: true, maxImages: 4 },
+  { id: "bria-fibo",            apiId: "bria-fibo",                name: "Bria Fibo 1.5",       aspectRatios: ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9"], supportsQuality: true, qualityOptions: ["1k", "4k"], maxReferenceImages: 10, isFal: true, maxImages: 4 },
   { id: "ideogram-v4-instant",  apiId: "ideogram-v4-instant",      name: "Ideogram v4 Instant", aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 0, isFal: true, maxImages: 4 },
   { id: "ideogram-v4-fast",     apiId: "ideogram-v4-fast",         name: "Ideogram v4 Fast",    aspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"], supportsQuality: true, qualityOptions: ["1k", "2k"], maxReferenceImages: 0, isFal: true, maxImages: 4 },
   { id: "nano-banana-2-lite",   apiId: "nano-banana-2-lite",       name: "NanoBanana 2 Lite",   aspectRatios: ["auto", "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16"], supportsQuality: false, maxReferenceImages: 0, isFal: true, maxImages: 4 },
@@ -221,7 +216,9 @@ function calcTicketCost(modelId: string, quality: Quality, aspectRatio?: AspectR
     }
     return 1
   }
-  return 1
+  // Anything not special-cased above bills straight from the shared config —
+  // the same function /api/generate charges with.
+  return configTicketCost(modelId, quality)
 }
 
 // Human-readable aspect ratio label for pixel-dimension tokens (e.g. "1920x1080" → "16:9")
@@ -1068,9 +1065,69 @@ function CostBadge({ tier }: { tier: "$" | "$$" | "$$$" | "$$$+" }) {
   )
 }
 // Name-keyed versions for the taskbar (which works with model names, not IDs)
-const IMAGE_MODEL_COST_BY_NAME: Record<string, "$" | "$$" | "$$$" | "$$$+"> = Object.fromEntries(
-  IMAGE_MODEL_CONFIGS.map(m => [m.name, IMAGE_MODEL_COST[m.id] ?? "$"])
-)
+/**
+ * Families the picker shows as ONE row. The endpoints really are separate
+ * models, but "which Topaz operation" is a setting, not a model choice — eight
+ * rows for one tool buried everything else in the list. Picking the row selects
+ * the first member; a selector in the controls strip switches between them.
+ */
+const IMAGE_VARIANT_GROUPS: { label: string; blurb: string; members: { id: string; label: string }[] }[] = [
+  {
+    label: "Topaz Image",
+    blurb: "Upscale, restore, sharpen, denoise",
+    members: [
+      { id: "topaz-img-upscale-precision",   label: "Upscale · Precision" },
+      { id: "topaz-img-upscale-creative",    label: "Upscale · Creative" },
+      { id: "topaz-img-upscale-generative",  label: "Upscale · Generative" },
+      { id: "topaz-img-upscale-transparent", label: "Upscale · Transparent" },
+      { id: "topaz-adjust",                  label: "Adjust" },
+      { id: "topaz-sharpen",                 label: "Sharpen" },
+      { id: "topaz-denoise",                 label: "Denoise" },
+      { id: "topaz-restore",                 label: "Restore" },
+    ],
+  },
+  {
+    label: "Recraft V4",
+    blurb: "Styled raster or SVG vector",
+    members: [
+      { id: "recraft-v4-style",      label: "Style" },
+      { id: "recraft-v4-style-pro",  label: "Style · Pro" },
+      { id: "recraft-v4-vector",     label: "Vector" },
+      { id: "recraft-v4-vector-pro", label: "Vector · Pro" },
+    ],
+  },
+  {
+    label: "Ideogram v4",
+    blurb: "Text inside images, two speeds",
+    members: [
+      { id: "ideogram-v4-instant", label: "Instant" },
+      { id: "ideogram-v4-fast",    label: "Fast" },
+    ],
+  },
+]
+
+/** The group a model belongs to, if any. */
+function imageVariantGroupOf(modelId: string) {
+  return IMAGE_VARIANT_GROUPS.find(g => g.members.some(m => m.id === modelId))
+}
+
+/** What the picker should show as selected for this model. */
+function imagePickerName(model: { id: string; name: string }): string {
+  return imageVariantGroupOf(model.id)?.label ?? model.name
+}
+
+/** Resolve a picker row back to a real model config. */
+function imageConfigByPickerName(name: string): ImageModelConfig | undefined {
+  const group = IMAGE_VARIANT_GROUPS.find(g => g.label === name)
+  if (group) return IMAGE_MODEL_CONFIGS.find(m => m.id === group.members[0].id)
+  return IMAGE_MODEL_CONFIGS.find(m => m.name === name)
+}
+
+const IMAGE_MODEL_COST_BY_NAME: Record<string, "$" | "$$" | "$$$" | "$$$+"> = Object.fromEntries([
+  ...IMAGE_MODEL_CONFIGS.map(m => [m.name, IMAGE_MODEL_COST[m.id] ?? "$"] as const),
+  // a merged row is badged by the member it opens on
+  ...IMAGE_VARIANT_GROUPS.map(g => [g.label, IMAGE_MODEL_COST[g.members[0].id] ?? "$"] as const),
+])
 
 // Feed model filter: a taskbar display name → every DB `model` value a
 // generation from it could have been saved under. Rows record either the
@@ -1091,20 +1148,20 @@ const IMAGE_MODEL_GROUPS = [
   { label: "Z-Image",           type: "text to image",             accent: "text-cyan-400",    dot: "bg-cyan-400",    items: ["Z-Image Base", "Z-Image Turbo"] },
 ]
 const ADMIN_IMAGE_MODEL_GROUPS = [
-  { label: "Alibaba",   type: "text to image · edit",       accent: "text-orange-400", dot: "bg-orange-400", items: ["Qwen Image 3", "Qwen Image 3 Edit"] },
-  { label: "Reve",      type: "text to image · edit",       accent: "text-pink-400",  dot: "bg-pink-400",  items: ["Reve 2.1", "Reve 2.1 Edit"] },
-  { label: "Microsoft", type: "text to image · edit",       accent: "text-sky-400",   dot: "bg-sky-400",   items: ["MAI Image 2.5 Pro", "MAI Image 2.5 Pro Edit"] },
-  { label: "xAI",       type: "text to image · edit",       accent: "text-slate-300", dot: "bg-slate-300", items: ["Grok Imagine 2.0", "Grok Imagine 2.0 Edit"] },
+  { label: "Alibaba",   type: "text to image · edit",       accent: "text-orange-400", dot: "bg-orange-400", items: ["Qwen Image 3"] },
+  { label: "Reve",      type: "text to image · edit",       accent: "text-pink-400",  dot: "bg-pink-400",  items: ["Reve 2.1"] },
+  { label: "Microsoft", type: "text to image · edit",       accent: "text-sky-400",   dot: "bg-sky-400",   items: ["MAI Image 2.5 Pro"] },
+  { label: "xAI",       type: "text to image · edit",       accent: "text-slate-300", dot: "bg-slate-300", items: ["Grok Imagine 2.0"] },
   { label: "Google",    type: "text to image · try-on",     accent: "text-emerald-400", dot: "bg-emerald-400", items: ["NanoBanana 2 Lite", "Virtual Try-On"] },
-  { label: "Meta",      type: "text to image · edit",       accent: "text-blue-400",  dot: "bg-blue-400",  items: ["Meta Muse", "Meta Muse Edit"] },
-  { label: "Bria",      type: "text to image · edit",       accent: "text-teal-400",  dot: "bg-teal-400",  items: ["Bria Fibo 1.5", "Bria Fibo Edit"] },
-  { label: "Ideogram",  type: "text in images",             accent: "text-amber-400", dot: "bg-amber-400", items: ["Ideogram v4 Instant", "Ideogram v4 Fast"] },
-  { label: "Recraft V4", type: "styles · SVG vector output", accent: "text-violet-400", dot: "bg-violet-400", items: ["Recraft V4 Style", "Recraft V4 Style Pro", "Recraft V4 Vector", "Recraft V4 Vector Pro"] },
+  { label: "Meta",      type: "text to image · edit",       accent: "text-blue-400",  dot: "bg-blue-400",  items: ["Meta Muse"] },
+  { label: "Bria",      type: "text to image · edit",       accent: "text-teal-400",  dot: "bg-teal-400",  items: ["Bria Fibo 1.5"] },
+  { label: "Ideogram",  type: "text in images",             accent: "text-amber-400", dot: "bg-amber-400", items: ["Ideogram v4"] },
+  { label: "Recraft V4", type: "styles · SVG vector output", accent: "text-violet-400", dot: "bg-violet-400", items: ["Recraft V4"] },
   // Gemini scanners retired from the public offering 2026-07-29 — admin only now
   { label: "Gemini",    type: "text to image",              accent: "text-blue-400",  dot: "bg-blue-400",  items: ["Flash Scanner v2.5", "Pro Scanner v3"] },
   { label: "Wan",       type: "text to image · custom LoRA", accent: "text-violet-400", dot: "bg-violet-400", items: ["Wan 2.2 T2I LoRA"] },
   { label: "Pixelcut",  type: "product photography",        accent: "text-rose-400",  dot: "bg-rose-400",  items: ["Pixelcut Product Photo"] },
-  { label: "Topaz",     type: "upscale · restore · adjust", accent: "text-lime-400",  dot: "bg-lime-400",  items: ["Topaz Upscale · Precision", "Topaz Upscale · Creative", "Topaz Upscale · Generative", "Topaz Upscale · Transparent", "Topaz Adjust", "Topaz Sharpen", "Topaz Denoise", "Topaz Restore"] },
+  { label: "Topaz",     type: "upscale · restore · adjust", accent: "text-lime-400",  dot: "bg-lime-400",  items: ["Topaz Image"] },
   { label: "Upscalers", type: "enhance & enlarge images",   accent: "text-slate-400", dot: "bg-slate-500", items: ["Clarity Upscaler", "AuraSR", "ESRGAN", "DRCT", "SUPIR"] },
   { label: "RunPod",    type: "local · PC must be running", accent: "text-cyan-400",  dot: "bg-cyan-500",  items: ["Real-ESRGAN (Local)", "DAT-2 (Local)", "Custom Flux LoRA"] },
 ]
@@ -1649,19 +1706,16 @@ const MODEL_BLURBS: Record<string, string> = {
   "ChatGPT Images 2.0":        "Best for text and diagrams",
   "Z-Image Base":              "Balanced quality for the price",
   "Z-Image Turbo":             "Fastest, cheapest drafts",
-  "Qwen Image 3":              "Alibaba flagship, strong realism",
-  "Qwen Image 3 Edit":         "Edit using up to 6 references",
-  "Reve 2.1":                  "Follows complex prompts closely",
-  "Reve 2.1 Edit":             "Precise edits from one image",
-  "MAI Image 2.5 Pro":         "Microsoft flagship, clean detail",
-  "MAI Image 2.5 Pro Edit":    "Instruction-driven photo editing",
-  "Grok Imagine 2.0":          "Expressive results, quick turnaround",
-  "Grok Imagine 2.0 Edit":     "Edit using up to 4 references",
+  "Topaz Image":               "Upscale, restore, sharpen, denoise",
+  "Recraft V4":                "Styled raster or SVG vector",
+  "Ideogram v4":               "Text inside images, two speeds",
+  "Qwen Image 3":              "Alibaba flagship; edits with refs",
+  "Reve 2.1":                  "Prompt-accurate; edits with a ref",
+  "MAI Image 2.5 Pro":         "Microsoft flagship; edits with a ref",
+  "Grok Imagine 2.0":          "Expressive and quick; edits with refs",
   "Virtual Try-On":            "Dress a person in a garment",
-  "Meta Muse":                 "Meta's text-to-image model",
-  "Meta Muse Edit":            "Edit using up to 10 references",
-  "Bria Fibo 1.5":             "Licensed data, commercially safe",
-  "Bria Fibo Edit":            "Masked edits on licensed data",
+  "Meta Muse":                 "Meta's model; edits with up to 10 refs",
+  "Bria Fibo 1.5":             "Licensed data; edits with refs",
   "Ideogram v4 Instant":       "Best at text inside images",
   "Ideogram v4 Fast":          "Text rendering with speed presets",
   "Recraft V4 Style":          "Brand styles and colour control",
@@ -18040,8 +18094,9 @@ function PromptBox({
     setTryOnGarment(follow)
   }, [refLibrary])
   const tryOnFileInputRef = useRef<HTMLInputElement>(null)
-  // Video refs cannot be tried on, and an <img> pointed at one renders broken
-  const tryOnRefs = useMemo(() => refLibrary.filter(r => !isVideoRefUrl(r.url)), [refLibrary])
+  // Source pickers take photographs: an <img> pointed at a video ref renders
+  // as a broken-image icon, and neither try-on nor an upscaler can use one.
+  const photoRefs = useMemo(() => refLibrary.filter(r => !isVideoRefUrl(r.url)), [refLibrary])
   const [upscaleUploading, setUpscaleUploading] = useState(false)
   const [upscaleUploadError, setUpscaleUploadError] = useState<string | null>(null)
   const [selectedRefId, setSelectedRefId] = useState<string | null>(null)
@@ -18456,8 +18511,16 @@ function PromptBox({
   }, [configOverride?.version])
 
   const supportsLora = model.id === "z-image-base" || model.id === "z-image-turbo" || model.id === "flux-2" || model.id === "flux-1-dev"
+  // The 7/26 scale belongs to the original factor-priced upscalers. The Topaz
+  // image suite and Pixelcut arrived later with flat per-run prices in the
+  // config, and were inheriting 7 (or 26) against a real cost of 2-5.
+  const LEGACY_FACTOR_UPSCALERS = new Set([
+    "clarity-upscaler", "aura-sr", "esrgan", "drct", "supir",
+    "local-realesrgan", "local-neosr",
+  ])
+  const usesFactorPricing = LEGACY_FACTOR_UPSCALERS.has(model.id)
   const upscaleTicketCost = (model.id === "aura-sr" || model.id === "esrgan" || model.id === "drct") ? 1 : (upscaleFactor === 4 ? 26 : 7)
-  const ticketCost = model.isUpscaler && !model.isTryOn
+  const ticketCost = model.isUpscaler && !model.isTryOn && usesFactorPricing
     ? upscaleTicketCost
     : calcTicketCost(model.id, quality, aspectRatio, supportsLora && !!selectedLoraUrl, activeRefImages.length > 0)
   const totalCost = ticketCost * (maxImagesForUser > 1 ? imageCount : 1)
@@ -18571,34 +18634,38 @@ function PromptBox({
         slotId: sid, status: "loading", prompt: label, modelId: model.apiId,
         aspectRatio: "auto", quality: quality as Quality,
       }))
-      try {
-        await Promise.all(slotIds.map(async (sid) => {
-          try {
-            const res = await fetch("/api/generate", {
-              signal: AbortSignal.timeout(90_000),
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                model: model.apiId,
-                adminMode: true,
-                // the result takes the person photo's shape — let the feed measure it
-                aspectRatio: "auto",
-                upscaleImageUrl: tryOnPerson.url,
-                referenceImages: [tryOnGarment.url],
-              }),
-            })
-            const data = await res.json()
-            if (!res.ok) { onUpdatePending(sid, { status: "failed", error: data.error || "Generation failed" }); return }
-            if (data.newBalance !== undefined) onBalanceChange(data.newBalance)
-            onUpdatePending(sid, { queueId: data.queueId })
-            onStartPolling(sid, data.queueId, label)
-          } catch (err: any) {
-            onUpdatePending(sid, { status: "failed", error: err.message || "Network error" })
-          }
-        }))
-      } finally {
-        setGenerating(false)
-      }
+
+      // Free Generate NOW, the way the main image path does. The submit itself
+      // is slow — the server re-fetches both photos and uploads them to fal
+      // before it can queue anything — and holding the button for that made it
+      // look broken next to models that return instantly. The tiles already
+      // exist, so the work can finish behind them.
+      setGenerating(false)
+
+      await Promise.all(slotIds.map(async (sid) => {
+        try {
+          const res = await fetch("/api/generate", {
+            signal: AbortSignal.timeout(90_000),
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: model.apiId,
+              adminMode: true,
+              // the result takes the person photo's shape — let the feed measure it
+              aspectRatio: "auto",
+              upscaleImageUrl: tryOnPerson.url,
+              referenceImages: [tryOnGarment.url],
+            }),
+          })
+          const data = await res.json()
+          if (!res.ok) { onUpdatePending(sid, { status: "failed", error: data.error || "Generation failed" }); return }
+          if (data.newBalance !== undefined) onBalanceChange(data.newBalance)
+          onUpdatePending(sid, { queueId: data.queueId })
+          onStartPolling(sid, data.queueId, label)
+        } catch (err: any) {
+          onUpdatePending(sid, { status: "failed", error: err.message || "Network error" })
+        }
+      }))
       return
     }
 
@@ -19334,23 +19401,44 @@ function PromptBox({
   const handleGenerate = async () => {
     if (!canGenerate) return
     // ── BATCH MODE (admin) ──
-    // One generation per batch, all sharing this prompt. Submissions are
-    // throttled to 4 in flight: 156 simultaneous POSTs would swamp the tab and
-    // the API, and the server queues anything past global capacity anyway.
-    // Each call gets that batch's refs via refUrlsOverride.
+    // Handed to the server in ONE request. This used to be a loop in the tab
+    // (four POSTs in flight), so a refresh mid-run abandoned every batch that
+    // had not been submitted yet — a run of 100 could stop at 21 with no record
+    // that the other 79 were ever asked for. The server now stores them as
+    // queued jobs and drains them at global concurrency, tab or no tab.
     if (batchMode && refBatchUrls.length > 0) {
+      setGenerating(true)
       setBatchProgress({ done: 0, total: refBatchUrls.length })
-      let done = 0
-      await runWithConcurrency(refBatchUrls, 4, async (urls) => {
-        await runGenerate({
-          model, prompt, aspectRatio, quality, outputFormat, imageCount,
-          seedreamSafetyChecker, wanSafetyChecker, fluxDevSafetyChecker, selectedLoraUrl,
-          refUrlsOverride: urls,
+      try {
+        const res = await fetch("/api/admin/batch-generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: model.apiId,
+            prompt,
+            aspectRatio,
+            quality,
+            outputFormat,
+            batches: refBatchUrls,
+            loraUrl: selectedLoraUrl || null,
+            seedreamSafetyChecker, wanSafetyChecker, fluxDevSafetyChecker,
+          }),
         })
-        done++
-        setBatchProgress({ done, total: refBatchUrls.length })
-      })
-      setTimeout(() => setBatchProgress(null), 2500)
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) {
+          setBatchProgress(null)
+          alert(data.error || "Couldn't queue those batches.")
+          return
+        }
+        setBatchProgress({ done: data.queued ?? refBatchUrls.length, total: refBatchUrls.length })
+      } catch (err: any) {
+        setBatchProgress(null)
+        alert(err?.message || "Network error while queueing batches.")
+        return
+      } finally {
+        setGenerating(false)
+        setTimeout(() => setBatchProgress(null), 4000)
+      }
       return
     }
     return runGenerate({
@@ -19796,7 +19884,9 @@ function PromptBox({
                           pinned ? "text-amber-400" : "text-slate-600 hover:text-amber-300"
                         }`}
                       >
-                        <Pin size={9} className={pinned ? "fill-amber-400/40" : ""} />
+                        {/* Same bolt as the Quick Generate button, so the tab
+                            marker and the control it arms read as one feature */}
+                        <Zap size={9} className={pinned ? "fill-amber-400/40" : ""} />
                       </button>
                     )}
                     {tabs.length > 1 && (
@@ -19850,11 +19940,11 @@ function PromptBox({
                   <p className="text-[9px] font-mono uppercase tracking-[0.18em] text-slate-500 mb-1.5">
                     Refs · tap to fill <span className="text-cyan-300">{tryOnSlot}</span>
                   </p>
-                  {tryOnRefs.length > 0 ? (
+                  {photoRefs.length > 0 ? (
                     <div className="max-h-[260px] overflow-y-auto overscroll-contain pr-0.5 flex gap-1.5 items-start">
                       {[0, 1, 2].map(col => (
                         <div key={col} className="flex-1 min-w-0 flex flex-col gap-1.5">
-                          {tryOnRefs.filter((_, i) => i % 3 === col).map(img => {
+                          {photoRefs.filter((_, i) => i % 3 === col).map(img => {
                             const used = img.url === tryOnPerson.url || img.id === tryOnPerson.refId
                               ? "person"
                               : img.url === tryOnGarment.url || img.id === tryOnGarment.refId
@@ -20029,85 +20119,130 @@ function PromptBox({
             </div>
           )}
 
-          {/* Upscaler source picker — unified for all 5 upscaler models */}
+          {/* Source picker — every upscale/restore tool takes one photo. Same
+              shape as Virtual Try-On: the library browses as a masonry on the
+              left, the chosen source and its controls sit on the right. The old
+              single row of 48px squares made picking from a large library
+              needlessly hard. */}
           {model.isUpscaler && !model.isTryOn && (
-            <div className="px-4 pt-4 pb-3 space-y-2.5 border-b border-white/5">
-              <div className="flex items-center justify-between">
+            <div className="px-4 pt-4 pb-3 border-b border-white/5">
+              <div className="flex items-center justify-between mb-2.5">
                 <span className="text-[10px] font-mono text-slate-400 uppercase tracking-[0.2em]">Source Image</span>
                 {upscaleSourceUrl && (
                   <button
-                    onClick={() => { setUpscaleSourceUrl(""); setSelectedRefId(null) }}
+                    onClick={() => { setUpscaleSourceUrl(""); setSelectedRefId(null); setUpscaleUploadError(null) }}
                     className="text-[10px] font-mono text-slate-600 hover:text-slate-400 transition-colors"
                   >clear</button>
                 )}
               </div>
 
-              {refLibrary.length > 0 ? (
-                <div className="flex flex-wrap gap-1.5">
-                  {refLibrary.map(img => {
-                    const isSelected = selectedRefId === img.id || (img.url.startsWith("http") && upscaleSourceUrl === img.url)
-                    const isUploading = upscaleUploading && selectedRefId === img.id
-                    return (
-                      <button
-                        key={img.id}
-                        onClick={() => selectRefAsUpscaleSource(img)}
-                        disabled={upscaleUploading}
-                        title="Use as upscale source"
-                        className={`relative w-12 h-12 rounded-lg overflow-hidden border shrink-0 transition-all disabled:opacity-50 ${
-                          isSelected ? "border-white ring-1 ring-white/40" : "border-white/10 hover:border-white/50"
-                        }`}
-                      >
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={refTileThumb(img.url, 128)} alt="" className="w-full h-full object-cover" />
-                        {isUploading && (
-                          <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
-                            <Loader2 size={14} className="animate-spin text-cyan-400" />
-                          </div>
-                        )}
-                        {isSelected && !isUploading && (
-                          <div className="absolute inset-0 bg-cyan-500/10 flex items-center justify-center">
-                            <Check size={14} className="text-cyan-400" />
-                          </div>
-                        )}
-                      </button>
-                    )
-                  })}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {/* left: the library */}
+                <div className="min-w-0">
+                  <p className="text-[9px] font-mono uppercase tracking-[0.18em] text-slate-500 mb-1.5">Refs · tap to use</p>
+                  {photoRefs.length > 0 ? (
+                    <div className="max-h-[260px] overflow-y-auto overscroll-contain pr-0.5 flex gap-1.5 items-start">
+                      {[0, 1, 2].map(col => (
+                        <div key={col} className="flex-1 min-w-0 flex flex-col gap-1.5">
+                          {photoRefs.filter((_, i) => i % 3 === col).map(img => {
+                            const isSelected = selectedRefId === img.id || (img.url.startsWith("http") && upscaleSourceUrl === img.url)
+                            const isUploading = upscaleUploading && selectedRefId === img.id
+                            return (
+                              <button
+                                key={img.id}
+                                onClick={() => selectRefAsUpscaleSource(img)}
+                                disabled={upscaleUploading}
+                                title="Use as source"
+                                className={`relative block w-full rounded-lg overflow-hidden border transition-all disabled:opacity-50 ${
+                                  isSelected ? "border-cyan-400 ring-1 ring-cyan-400/40" : "border-white/10 hover:border-white/50"
+                                }`}
+                              >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                  src={refTileThumb(img.url, 256)}
+                                  alt=""
+                                  // NOT loading="lazy": it never fires inside a
+                                  // nested scroller on iPad Safari.
+                                  decoding="async"
+                                  className="w-full h-auto block bg-slate-900"
+                                  onError={e => {
+                                    const el = e.target as HTMLImageElement
+                                    if (el.src !== img.url) el.src = img.url
+                                    else el.closest("button")?.classList.add("hidden")
+                                  }}
+                                />
+                                {isUploading && (
+                                  <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+                                    <Loader2 size={14} className="animate-spin text-cyan-400" />
+                                  </div>
+                                )}
+                                {isSelected && !isUploading && (
+                                  <span className="absolute bottom-0 inset-x-0 bg-cyan-500/85 text-[8px] font-mono uppercase tracking-wide text-black text-center py-0.5">
+                                    source
+                                  </span>
+                                )}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-slate-500">
+                      No photos in your Refs library yet — add some via the <span className="text-slate-400">Refs</span> section, or upload one here.
+                    </p>
+                  )}
                 </div>
-              ) : (
-                <p className="text-[11px] text-slate-500">No images in your Refs library yet — add some via the <span className="text-slate-400">Refs</span> section above.</p>
-              )}
 
-              {/* URL paste + upload */}
-              <div className="flex items-center gap-2">
-                {upscaleSourceUrl.startsWith("http") && !upscaleUploading && (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={upscaleSourceUrl}
-                    alt="source preview"
-                    className="w-8 h-8 rounded-md object-cover border border-white/10 shrink-0"
-                    onError={e => { (e.target as HTMLImageElement).style.display = "none" }}
-                    onLoad={e => { (e.target as HTMLImageElement).style.display = "block" }}
+                {/* right: the chosen source and its controls */}
+                <div className="min-w-0 flex flex-col gap-2 sm:h-[260px]">
+                  <div className="relative flex-1 min-h-[110px] flex items-center justify-center rounded-xl border border-white/10 bg-slate-950/60 overflow-hidden">
+                    {upscaleSourceUrl.startsWith("http") ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={refTileThumb(upscaleSourceUrl, 256)}
+                        alt="source preview"
+                        decoding="async"
+                        className="max-h-full max-w-full w-auto h-auto object-contain"
+                        onError={e => {
+                          const el = e.target as HTMLImageElement
+                          if (el.src !== upscaleSourceUrl) el.src = upscaleSourceUrl
+                        }}
+                      />
+                    ) : (
+                      <span className="flex items-center gap-1.5 text-[10px] text-slate-600">
+                        <ImagePlus size={13} />tap a photo on the left
+                      </span>
+                    )}
+                    {upscaleUploading && (
+                      <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+                        <Loader2 size={14} className="animate-spin text-cyan-400" />
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    onClick={() => upscaleFileInputRef.current?.click()}
+                    disabled={upscaleUploading}
+                    className="shrink-0 flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.10] border border-white/[0.08] text-[11px] text-slate-300 hover:text-white transition-all disabled:opacity-50"
+                  >
+                    {upscaleUploading && !selectedRefId
+                      ? <><Loader2 size={11} className="animate-spin" />Uploading…</>
+                      : <><ImagePlus size={11} />Upload a photo</>
+                    }
+                  </button>
+
+                  <input
+                    type="text"
+                    value={upscaleSourceUrl}
+                    onChange={e => { setUpscaleSourceUrl(e.target.value); setUpscaleUploadError(null); setSelectedRefId(null) }}
+                    placeholder="Or paste an image URL…"
+                    className="shrink-0 w-full min-w-0 px-2 py-1.5 rounded-lg bg-slate-950 border border-white/10 text-[11px] text-white placeholder-slate-600 focus:outline-none focus:border-white/30"
                   />
-                )}
-                <input
-                  type="text"
-                  value={upscaleSourceUrl}
-                  onChange={e => { setUpscaleSourceUrl(e.target.value); setUpscaleUploadError(null); setSelectedRefId(null) }}
-                  placeholder="Or paste an image URL…"
-                  className="flex-1 bg-transparent text-sm text-white placeholder-slate-600 focus:outline-none min-w-0"
-                />
-                <button
-                  onClick={() => upscaleFileInputRef.current?.click()}
-                  disabled={upscaleUploading}
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.10] border border-white/[0.08] text-[11px] text-slate-300 hover:text-white transition-all disabled:opacity-50 shrink-0"
-                >
-                  {upscaleUploading && !selectedRefId
-                    ? <><Loader2 size={11} className="animate-spin" />Uploading…</>
-                    : <><ImagePlus size={11} />Upload</>
-                  }
-                </button>
+                </div>
               </div>
-              {upscaleUploadError && <p className="text-[11px] text-red-400">{upscaleUploadError}</p>}
+
+              {upscaleUploadError && <p className="text-[11px] text-red-400 mt-2">{upscaleUploadError}</p>}
             </div>
           )}
 
@@ -20474,10 +20609,10 @@ function PromptBox({
                     groups={IMAGE_MODEL_GROUPS}
                     adminGroups={isAdminAccount ? ADMIN_IMAGE_MODEL_GROUPS : undefined}
                     onSelect={(item) => {
-                      const cfg = IMAGE_MODEL_CONFIGS.find((m) => m.name === item)
+                      const cfg = imageConfigByPickerName(item)
                       if (cfg) { onModelChange(cfg); setShowModelPicker(false) }
                     }}
-                    activeItem={model.name}
+                    activeItem={imagePickerName(model)}
                     itemCosts={IMAGE_MODEL_COST_BY_NAME}
                     menuTitle="Image Generation Model"
                     menuDescription="Models are grouped by company."
@@ -20488,6 +20623,31 @@ function PromptBox({
                 </div>
               )}
             </div>
+
+            {/* Which member of a merged family is running. The picker shows one
+                row per family; this is where the actual endpoint gets chosen. */}
+            {(() => {
+              const group = imageVariantGroupOf(model.id)
+              if (!group) return null
+              return (
+                <>
+                  <div className="w-px h-3 bg-white/10 shrink-0 hidden sm:block" />
+                  <select
+                    value={model.id}
+                    onChange={e => {
+                      const next = IMAGE_MODEL_CONFIGS.find(m => m.id === e.target.value)
+                      if (next) onModelChange(next)
+                    }}
+                    title={`${group.label} mode`}
+                    className="shrink-0 px-2 py-1 rounded-md bg-slate-950 border border-white/10 text-[11px] text-white focus:outline-none focus:border-white/30"
+                  >
+                    {group.members.map(mem => (
+                      <option key={mem.id} value={mem.id}>{mem.label}</option>
+                    ))}
+                  </select>
+                </>
+              )
+            })()}
 
             {!model.isUpscaler && <div className="w-px h-3 bg-white/10 shrink-0 hidden sm:block" />}
 
@@ -26396,6 +26556,66 @@ export default function PortalV2Page() {
   }, [videoPendingSlots, startVideoPolling])
 
   // Queue limits — owner accounts: unlimited, dev tier: 6 image / 2 video, free: 2 image / 1 video
+  // ── Adopt the account's outstanding jobs ────────────────────────────────
+  // Generations belong to the user, not to the tab that started them. Without
+  // this, reloading mid-run left finished work to appear only on the next feed
+  // load, and server-side batches drew no tiles at all because no tab ever
+  // created slots for them. Anything queued or processing gets a placeholder
+  // here and joins the normal polling path, so it finishes into a real tile.
+  const adoptedJobIds = useRef<Set<number>>(new Set())
+  useEffect(() => {
+    if (!user) return
+    let cancelled = false
+
+    const adopt = async () => {
+      try {
+        const res = await fetch("/api/admin/my-active-jobs")
+        if (!res.ok || cancelled) return
+        const data = await res.json()
+        const jobs: {
+          id: number; modelId: string; prompt: string; createdAt: string
+          aspectRatio?: string; quality?: string; referenceImageUrls?: string[]
+        }[] = Array.isArray(data.jobs) ? data.jobs : []
+        if (cancelled || jobs.length === 0) return
+
+        const fresh = jobs.filter(j => !adoptedJobIds.current.has(j.id))
+        if (fresh.length === 0) return
+
+        setPendingSlots(prev => {
+          // A slot this tab created already tracks the job under its own id
+          const known = new Set(prev.map(sl => sl.queueId).filter((n): n is number => typeof n === "number"))
+          const additions = fresh
+            .filter(j => !known.has(j.id))
+            .map(j => ({
+              slotId: `adopted-${j.id}`,
+              status: "loading" as const,
+              prompt: j.prompt,
+              modelId: j.modelId,
+              aspectRatio: j.aspectRatio ?? "auto",
+              quality: j.quality,
+              queueId: j.id,
+              // Queue order, not adoption order — the feed sorts on this
+              queuedAtMs: new Date(j.createdAt).getTime(),
+              referenceImageUrls: j.referenceImageUrls ?? [],
+            })) as PendingSlot[]
+          return additions.length > 0 ? [...additions, ...prev] : prev
+        })
+
+        // startPolling de-dupes on queueId, so re-adopting is harmless
+        for (const j of fresh) {
+          adoptedJobIds.current.add(j.id)
+          startPolling(`adopted-${j.id}`, j.id, j.prompt)
+        }
+      } catch {
+        // a failed poll is not worth surfacing — the next tick retries
+      }
+    }
+
+    void adopt()
+    const timer = setInterval(adopt, 10000)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [user?.id, startPolling])
+
   const isOwner = user?.email === "dirtysecretai@gmail.com" || user?.email === "promptandprotocol@gmail.com"
   const hasEffectiveDevAccess = hasPromptStudioDev || isAdminAccount || isAuditAccount
   // Server value wins once fetched; fallback mirrors lib/ref-limits.ts tiers
@@ -27752,7 +27972,7 @@ export default function PortalV2Page() {
   }, [])
 
   const handleSelectImageModel = (name: string) => {
-    const config = IMAGE_MODEL_CONFIGS.find((m) => m.name === name)
+    const config = imageConfigByPickerName(name)
     if (config) { setSelectedModel(config); setScannerMode("image") }
   }
 
