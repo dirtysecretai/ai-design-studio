@@ -17,6 +17,7 @@ import {
   Brush, UserCheck, Type, LayoutTemplate, MousePointerClick, MessageSquareText,
   Instagram, User as UserIcon, ExternalLink, Pipette,
   Lightbulb, Landmark, Aperture, Gem, PersonStanding, UsersRound, Layers, EyeOff, Copy, RotateCw, Eraser, GripVertical, Pin, PinOff, Star,
+  Maximize2,
 } from "lucide-react"
 import {
   CHAT_HUB_MODELS, CHAT_HUB_PROVIDERS, CHAT_CREATE_MODELS, CHAT_CREATE_GROUPS, usableCreateModels,
@@ -33,6 +34,7 @@ import {
 import { SiteLogoBox } from "@/components/SitePageHeader"
 import {
   AGENT_SKILLS, ALL_SKILL_IDS, BUILT_IN_EMPLOYEES, SKILL_CATEGORIES, estimateRunCost,
+  MOVIE_FORMATS, DEFAULT_MOVIE_FORMAT,
 } from "@/lib/chat-hub-skills"
 
 const ROUTING_LS_KEY = "chat-hub-routing"
@@ -602,7 +604,58 @@ const ErasedOverlay = memo(function ErasedOverlay({ src, w, h, erase, style, src
   return <canvas ref={cvRef} width={w} height={h} className="absolute pointer-events-none" style={style} />
 })
 
-const VideoTile = memo(function VideoTile({ src, className }: { src: string; className?: string }) {
+/**
+ * What a still-rendering tile says it is doing.
+ *
+ * Everything used to read "Generating image", including video: a batch shot
+ * from render_shots carries no `kind` on its step, so it fell through to the
+ * image wording. The phrase is picked by a STABLE index (the placeholder's own
+ * key), never at random — a label that reshuffles on every re-render is worse
+ * than a dull one.
+ */
+const PLACEHOLDER_LABELS: Record<string, string[]> = {
+  video: ["Rolling camera\u2026", "Shooting the take\u2026", "Generating video\u2026"],
+  image: ["Generating image\u2026", "Painting the frame\u2026", "Composing the shot\u2026"],
+  edit: ["Editing\u2026", "Working the layers\u2026"],
+  film: ["Cutting the film\u2026", "Assembling the edit\u2026"],
+  audio: ["Scoring\u2026", "Writing the music\u2026"],
+}
+
+function placeholderLabel(step: AgentStep): string {
+  const bucket =
+    step.tool === "edit_image" ? "edit"
+    : step.tool === "assemble_film" ? "film"
+    : step.tool === "create_audio" ? "audio"
+    : (step.tool === "render_shots" || step.kind === "video") ? "video"
+    : "image"
+  const list = PLACEHOLDER_LABELS[bucket]
+  // the "#N" suffix on a batch placeholder keeps each tile on its own phrase
+  const n = Number(String(step.id).split("#")[1] ?? 0)
+  return list[Math.abs(n) % list.length]
+}
+
+/**
+ * The render hand-back the client posts when a batch of shots settles.
+ *
+ * It has to be a user turn for the model, but it is machinery, not the user
+ * talking \u2014 shown in their own bubble it looked like the app was writing
+ * messages on their behalf.
+ */
+function isShotHandback(content: string | null | undefined): boolean {
+  return typeof content === "string" && content.startsWith("[SHOTS SETTLED")
+}
+
+/** The status line, minus the instructions aimed at the model. */
+function shotHandbackSummary(content: string): string {
+  return content
+    .split("\n")
+    .filter(l => /^\[SHOTS SETTLED|^Shot queue #/.test(l.trim()))
+    .join("\n")
+    .replace(/^\[|\]$/gm, "")
+    .trim() || "Shots settled."
+}
+
+const VideoTile = memo(function VideoTile({ src, className, onExpand }: { src: string; className?: string; onExpand?: () => void }) {
   const ref = useRef<HTMLVideoElement>(null)
   useEffect(() => {
     const el = ref.current
@@ -616,18 +669,42 @@ const VideoTile = memo(function VideoTile({ src, className }: { src: string; cla
     io.observe(el)
     return () => io.disconnect()
   }, [])
+  const expand = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    const el = ref.current as (HTMLVideoElement & {
+      webkitEnterFullscreen?: () => void
+      webkitSupportsFullscreen?: boolean
+    }) | null
+    // iPad: the video element owns fullscreen, not the page
+    if (el?.webkitSupportsFullscreen && typeof el.webkitEnterFullscreen === 'function') {
+      el.webkitEnterFullscreen()
+      return
+    }
+    if (el?.requestFullscreen) { void el.requestFullscreen().catch(() => onExpand?.()); return }
+    onExpand?.()
+  }
   return (
-    <video
-      ref={ref}
-      src={`${src}#t=0.001`}
-      muted
-      loop
-      autoPlay
-      playsInline
-      controls
-      preload="metadata"
-      className={className}
-    />
+    <div className={`relative group/vid ${className ?? ''}`}>
+      <video
+        ref={ref}
+        src={`${src}#t=0.001`}
+        muted
+        loop
+        autoPlay
+        playsInline
+        controls
+        preload="metadata"
+        className="w-full h-auto block rounded-[inherit]"
+      />
+      <button
+        onClick={expand}
+        title="View fullscreen"
+        aria-label="View fullscreen"
+        className="absolute top-1.5 right-1.5 z-10 p-1.5 rounded-md bg-black/60 border border-white/15 text-white/90 hover:bg-black/80 hover:text-white transition-colors"
+      >
+        <Maximize2 size={13} />
+      </button>
+    </div>
   )
 })
 
@@ -707,6 +784,7 @@ export default function ChatHub({
 
   // Per-chat enabled skills (null = all = Full Studio / legacy)
   const [chatSkills, setChatSkills] = useState<string[] | null>(null)
+  const [movieFormat, setMovieFormatState] = useState<string>(DEFAULT_MOVIE_FORMAT)
   const patchChatSkills = (next: string[] | null) => {
     setChatSkills(next)
     if (activeChatId) {
@@ -816,6 +894,8 @@ export default function ChatHub({
         }
         const de = d?.preferences?.chatHubDefaultEmployee
         setDefaultEmployeeId(typeof de === "string" && de ? de : null)
+        const mf = d?.preferences?.chatHubMovieFormat
+        if (typeof mf === "string" && MOVIE_FORMATS.some(f => f.id === mf)) setMovieFormatState(mf)
         const customs = d?.preferences?.chatHubCustomModels
         if (Array.isArray(customs)) {
           setCustomModels(customs.filter((m: any) =>
@@ -1014,6 +1094,92 @@ export default function ChatHub({
     return () => clearInterval(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runningChats, streaming])
+
+  // Batches already handed back, so a re-run of the poll cannot send twice.
+  const continuedRef = useRef<Set<string>>(new Set())
+
+  // Shots submitted to the render queue outlive the turn that ordered them:
+  // create_media returns a queue id and the reply finishes while fal is still
+  // working. Poll until every shot in the newest reply has settled, then
+  // refresh so the finished clips appear in the reply that ordered them.
+  // Server-side state, so this survives a reload or a second device.
+  useEffect(() => {
+    if (!activeChatId || streaming) return
+    // render_shots submits a BATCH and stores queueIds; a single video stores
+    // queueId. Watching only the singular field meant a batch-rendered film
+    // never started polling, so the shots never came back into the chat.
+    const hasPendingShots = messages.some(m =>
+      (m.agentSteps ?? []).some((st: any) =>
+        st?.status === "running"
+        && ((typeof st.queueId === "number" && !st.imageUrl)
+          || (Array.isArray(st.queueIds) && st.queueIds.length > 0))))
+    if (!hasPendingShots) return
+    // NEVER auto-continue while an approval is on screen. A reply that paused
+    // for approval has emitted tool calls the model still owes results for;
+    // injecting a user message in front of them breaks the message sequence
+    // outright ("the messages do not match the ModelMessage[] schema") and
+    // steals a decision that belongs to the user. Wait for them to answer.
+    if (messages.some(m => m.pendingApproval?.calls?.length)) return
+
+    let stop = false
+    const tick = async () => {
+      try {
+        const r = await fetch(`/api/chat-hub/chats/${activeChatId}/film-status`, { cache: "no-store" })
+        if (!r.ok || stop) return
+        const d = await r.json()
+        // Only re-read the thread when something actually changed
+        const settledNow = Array.isArray(d.shots)
+          && d.shots.some((x: any) => x.status === "completed" || x.status === "failed")
+        if (settledNow) reloadMessages(activeChatId)
+
+        if (d.done) {
+          stop = true
+          // One continuation per settled batch. The effect re-runs whenever
+          // `messages` changes, so without this a second poll could fire the
+          // same hand-back again and the user watches messages they did not
+          // write pile up in their own thread.
+          const sentKey = `${activeChatId}:${(d.shots ?? []).map((x: any) => x.queueId).join(",")}`
+          if (continuedRef.current.has(sentKey)) return
+          continuedRef.current.add(sentKey)
+          // The run paused because the renders outlive the request, not because
+          // the work is finished. Hand the results back so the employee judges
+          // the frames, cuts the film and scores it — the user asked for a
+          // movie, not a pile of clips.
+          // Two steps can carry the same queue id (a re-submitted shot list),
+          // and reporting a shot twice made the employee think it had twice the
+          // footage it does. One line per shot, first status wins.
+          const seenShot = new Set<number>()
+          const uniq = (d.shots ?? []).filter((x: any) => {
+            if (seenShot.has(x.queueId)) return false
+            seenShot.add(x.queueId); return true
+          })
+          const ok = uniq.filter((x: any) => x.status === "completed")
+          const bad = uniq.filter((x: any) => x.status === "failed")
+          // A stalled shot is not a failure to retry blindly — it is a render
+          // that never came back. The cut proceeds without it, and the employee
+          // has to say so rather than quietly delivering a short film.
+          const stalled = uniq.filter((x: any) => x.status === "stalled")
+          if (ok.length || bad.length || stalled.length) {
+            const trouble = bad.length + stalled.length
+            const lines = [
+              `[SHOTS SETTLED — ${ok.length} rendered${trouble ? `, ${trouble} missing` : ""}]`,
+              ...ok.map((x: any) => `Shot queue #${x.queueId}: ready`),
+              ...bad.map((x: any) => `Shot queue #${x.queueId}: FAILED — ${x.error ?? "unknown"}`),
+              ...stalled.map((x: any) => `Shot queue #${x.queueId}: NEVER RETURNED — still rendering long past the expected time`),
+              trouble
+                ? "Assemble the film from the shots that DID land, then tell the user plainly which shot numbers are missing and offer to re-render them. Do not silently deliver a short cut."
+                : "Call check_shots on these ids, judge each shot from its frames, then assemble and score the film.",
+            ]
+            void sendMessage(activeChatId, lines.join(String.fromCharCode(10)))
+          }
+        }
+      } catch {}
+    }
+    void tick()
+    const t = setInterval(() => { if (!stop) void tick(); else clearInterval(t) }, 8000)
+    return () => { stop = true; clearInterval(t) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChatId, messages, streaming])
 
   // Reconnect-after-reload: a send's stream dies with the page, but the server
   // keeps generating and persists the reply. When a chat opens with a user
@@ -3568,6 +3734,36 @@ export default function ChatHub({
       ? `Describe the ${createMode.kind} to create with ${createMode.label}…`
       : `Message ${activeModel?.label ?? "the model"}…`
 
+  // Movie runtime for the Movie Studio employee. Only rendered when this chat
+  // has the movie-production skill on, so it never clutters the composer for
+  // anyone else. Persisted per account (no per-chat column exists) through the
+  // same shallow-merge preferences endpoint the rest of the hub uses.
+  const movieSkillOn = chatSkills === null || chatSkills.includes("movie-production")
+  const setMovieFormat = (id: string) => {
+    setMovieFormatState(id)
+    fetch("/api/user/preferences", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chatHubMovieFormat: id }),
+    }).catch(() => {})
+  }
+  const movieFormatChip = movieSkillOn ? (
+    <label className="flex items-center gap-1 shrink-0" title="How long a film the Movie Studio plans for">
+      <span className="text-[10px] text-slate-500">🎞️</span>
+      <select
+        value={movieFormat}
+        onChange={e => setMovieFormat(e.target.value)}
+        className="rounded-lg border border-white/10 bg-slate-950 px-1.5 py-1.5 text-[10px] text-slate-300 focus:outline-none focus:border-white/30"
+      >
+        {MOVIE_FORMATS.map(f => (
+          <option key={f.id} value={f.id}>
+            {f.id === "ask" ? f.label : `${f.label} · ${f.seconds}`}
+          </option>
+        ))}
+      </select>
+    </label>
+  ) : null
+
   // Agent permission mode — plan / ask-before-tools / auto. Shown on both
   // composers; on the starter box the choice is applied to the new chat.
   const agentModeChip = (
@@ -4307,6 +4503,7 @@ export default function ChatHub({
                           : e.id === "emp-marketing-studio" ? "📣"
                           : e.id === "emp-film-director" ? "🎥"
                           : e.id === "emp-social-manager" ? "📱"
+                          : e.id === "emp-movie-studio" ? "🎞️"
                           : "🤖",
                         agentMode: null as AgentMode | null, builtIn: true,
                       })),
@@ -4440,6 +4637,7 @@ export default function ChatHub({
                   {renderPlusMenu("down")}
                   {renderModelDropdown("down")}
                   {agentModeChip}
+                  {movieFormatChip}
                   <div className="flex-1" />
                   <button
                     onClick={startNewChat}
@@ -4462,6 +4660,21 @@ export default function ChatHub({
           ) : (
             <div className={`${chatWidthClass} mx-auto flex flex-col gap-3`}>
               {messages.map(m => m.role === "user" ? (
+                // The render hand-back is stored as a user turn because the model
+                // needs it in that slot, but it is NOT something the user wrote.
+                // Showing it in their own bubble read as the app sending messages
+                // on their behalf, so it renders as the status line it actually is.
+                isShotHandback(m.content) ? (
+                  <div key={m.id} className="self-center w-full max-w-[85%] my-1">
+                    <div style={{ fontSize: Math.max(11, chatTextPx - 2) }}
+                      className="rounded-xl border border-slate-600/40 bg-slate-800/40 px-3 py-2 text-slate-400 whitespace-pre-wrap break-words">
+                      <span className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-slate-500 mb-1">
+                        <Clapperboard size={11} /> Render queue — automatic
+                      </span>
+                      {shotHandbackSummary(m.content ?? "")}
+                    </div>
+                  </div>
+                ) : (
                 <div key={m.id} className="self-end max-w-[85%] flex flex-col items-end gap-1">
                   {(m.imageUrls?.length ?? 0) > 0 && (
                     <div className="flex flex-wrap justify-end gap-1">
@@ -4508,6 +4721,7 @@ export default function ChatHub({
                     })()}
                   </div>
                 </div>
+                )
               ) : (
                 /* Assistant reply = one bounded "model section": colored edge +
                    model header on top, steps/images/text inside — clear start
@@ -4714,6 +4928,20 @@ export default function ChatHub({
                                   s.status === "pending" ? "Has questions for you" : s.status === "denied" ? "Questions skipped" : "Questions answered"
                                 ) : s.tool === "propose_plan" ? (
                                   s.status === "pending" ? "Proposed a plan" : s.status === "denied" ? "Plan denied" : "Plan approved"
+                                ) : s.tool === "render_shots" ? (
+                                  s.status === "pending" ? "Wants to render the shot list"
+                                    : s.status === "denied" ? "Shot list denied"
+                                    : s.status === "running" ? "Shots rendering…"
+                                    : "Shot list submitted"
+                                ) : s.tool === "check_shots" ? (
+                                  s.status === "running" ? "Checking shots…" : "Shots checked"
+                                ) : s.tool === "assemble_film" ? (
+                                  s.status === "running" ? "Cutting the film…" : "Film assembled"
+                                ) : s.tool === "create_audio" ? (
+                                  s.status === "pending" ? "Wants to generate audio"
+                                    : s.status === "denied" ? "Audio denied"
+                                    : s.status === "running" ? "Generating audio…"
+                                    : "Audio generated"
                                 ) : s.tool === "reasoning" ? (
                                   s.status === "running" ? "Thinking it through…" : "Thought it through"
                                 ) : s.tool === "record_evaluation" ? (
@@ -4900,12 +5128,34 @@ export default function ChatHub({
                     // back to just before the Summary when no step claims it)
                     const isMediaTool = (s: AgentStep) =>
                       s.tool === "create_media" || s.tool === "generate_image" || s.tool === "edit_image"
+                      || s.tool === "render_shots" || s.tool === "assemble_film"
                     const mediaSteps = steps.filter(isMediaTool)
-                    const pendingMedia = mediaSteps.filter(s => s.status === "running" && !s.imageUrl)
+                    // A render_shots step is N shots in one step, so it gets N
+                    // placeholder tiles — the film shows up as it renders
+                    // instead of the reply looking empty until every shot lands.
+                    const pendingMedia = mediaSteps.flatMap(s => {
+                      if (s.status !== "running") return []
+                      const ids = (s as any).queueIds
+                      if (Array.isArray(ids) && ids.length) {
+                        const landed = Object.keys((s as any).shotResults ?? {}).length
+                        // Each placeholder needs its OWN key: the tiles are keyed
+                        // on the step id, and repeating one object N times gave
+                        // N tiles the same key.
+                        return Array.from({ length: Math.max(0, ids.length - landed) },
+                          (_, k) => ({ ...s, id: `${s.id}#${k}` }))
+                      }
+                      return s.imageUrl ? [] : [s]
+                    })
                     const firstMediaSeg = mediaSteps.length
                       ? Math.min(...mediaSteps.map(s => s.seg ?? 0))
                       : null
-                    const tileGrid = (urls: string[], pendingSteps: AgentStep[]) => {
+                    const tileGrid = (rawUrls: string[], pendingSteps: AgentStep[]) => {
+                      // Replies saved before the producer was fixed can carry an
+                      // empty string here; <img src=""> re-downloads the page.
+                      // Replies saved before the write-side fixes can carry an
+                      // empty string (a pending video) or the same url twice (two
+                      // overlapping settle polls) — neither should reach a tile.
+                      const urls = [...new Set(rawUrls.filter(u => typeof u === "string" && u.length > 0))]
                       const total = urls.length + pendingSteps.length
                       if (total === 0) return null
                       return (
@@ -4920,6 +5170,7 @@ export default function ChatHub({
                               : "columns-2 sm:columns-3 md:columns-4 gap-2"}>
                           {urls.map((u, i) => isVideoUrl(u) ? (
                             <VideoTile key={i} src={u}
+                              onExpand={() => openMediaViewer(m, u)}
                               className="w-full mb-2 break-inside-avoid rounded-lg border border-white/10" />
                           ) : (
                             <button
@@ -4955,11 +5206,11 @@ export default function ChatHub({
                               >
                                 <div className="absolute inset-0 animate-pulse bg-gradient-to-br from-fuchsia-500/[0.08] via-transparent to-cyan-500/[0.08]" />
                                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 px-2 text-center">
-                                  {s.kind === "video"
+                                  {(s.kind === "video" || s.tool === "render_shots" || s.tool === "assemble_film")
                                     ? <Clapperboard size={16} className="text-fuchsia-400/80 animate-pulse" />
                                     : <ImageIcon size={16} className="text-fuchsia-400/80 animate-pulse" />}
                                   <span className="text-[9px] text-slate-400">
-                                    {s.tool === "edit_image" ? "Editing…" : s.kind === "video" ? "Generating video…" : "Generating image…"}
+                                    {placeholderLabel(s)}
                                   </span>
                                   {s.model && (
                                     <span className="text-[8px] text-slate-600 truncate max-w-full">{labelFor(s.model)}</span>
@@ -5004,7 +5255,10 @@ export default function ChatHub({
                               {pendingMedia.length > 0 && (
                                 <span className="text-cyan-400/80">
                                   {" · "}{pendingMedia.length}{" "}
-                                  {pendingMedia.every(s => s.tool === "edit_image") ? "editing" : "generating"}
+                                  {pendingMedia.every(s => s.tool === "edit_image") ? "editing"
+                                    : pendingMedia.every(s => s.tool === "assemble_film") ? "cutting"
+                                    : pendingMedia.some(s => s.tool === "render_shots" || s.kind === "video") ? "shooting"
+                                    : "generating"}
                                 </span>
                               )}
                             </span>
@@ -5190,13 +5444,46 @@ export default function ChatHub({
                   {/* Completion strip — unambiguous end-of-run marker once the
                       reply has settled (nothing streaming, nothing pending) */}
                   {(() => {
-                    const settled = !m.pendingApproval && !((streaming || awaitingReply) && m.id === lastMsgId)
+                    // Shots that outlive the reply keep it unsettled: stamping
+                    // "Done" on a run whose renders have not landed reads as a
+                    // finished job that never happened.
+                    const shotsRendering = (m.agentSteps ?? []).some((st: any) =>
+                      st?.status === "running"
+                      && ((typeof st.queueId === "number" && !st.imageUrl)
+                        || (Array.isArray(st.queueIds) && st.queueIds.length > 0)))
+                    // A film runs across several replies: shots settle, the
+                    // queue hands them back, the run picks up again. Stamping
+                    // "Done" on the reply that happens to end first says the job
+                    // is finished when the next pass has not even started.
+                    const lastRow = messages[messages.length - 1]
+                    const continuationPending =
+                      m.id === lastMsgId
+                      && !!lastRow && lastRow.role === "user" && isShotHandback(lastRow.content)
+                    const settled = !m.pendingApproval && !shotsRendering && !continuationPending
+                      && !((streaming || awaitingReply) && m.id === lastMsgId)
                     // "Done" requires SUBSTANTIVE work — playbook loads and
                     // browsing alone are prep, and a prep-only reply stamped
                     // "Done" reads as a completed job that never happened
-                    const SUBSTANTIVE = ["create_media", "generate_image", "edit_image", "delegate_task", "publish_instagram", "dataset_edit", "record_evaluation", "write_summary"]
+                    const SUBSTANTIVE = ["create_media", "generate_image", "edit_image", "delegate_task", "publish_instagram", "dataset_edit", "record_evaluation", "write_summary", "render_shots", "assemble_film", "create_audio"]
                     const hasWork = (m.agentSteps?.some(s => SUBSTANTIVE.includes(s.tool)) ?? false)
                       || (m.imageUrls?.length ?? 0) > 0
+                    if (shotsRendering || continuationPending) {
+                      return (
+                        <div className="flex items-center gap-2 mt-0.5 pt-2 border-t border-violet-500/15">
+                          <span className="w-4 h-4 rounded-full bg-violet-500/15 border border-violet-500/40 flex items-center justify-center shrink-0">
+                            <span className="w-2 h-2 rounded-full border-2 border-violet-400/40 border-t-violet-300 animate-spin" />
+                          </span>
+                          <span className="text-[10px] font-semibold uppercase tracking-wider text-violet-300/90">
+                            {shotsRendering ? "Shots rendering" : "Still working"}
+                          </span>
+                          <span className="text-[9px] text-slate-600">
+                            {shotsRendering
+                              ? "they land here on their own, then the run continues"
+                              : "the render queue reported back — picking the film up again"}
+                          </span>
+                        </div>
+                      )
+                    }
                     if (!settled || !hasWork) return null
                     const doneMedia = (m.agentSteps ?? []).filter(s =>
                       (s.tool === "create_media" || s.tool === "generate_image" || s.tool === "edit_image") && s.imageUrl)
@@ -5385,9 +5672,36 @@ export default function ChatHub({
                 cost: total,
               }
             }
+            // The film tools pause for approval too. Without these branches
+            // they fell through to the generic label below and the card read
+            // "Generate an image" for a shot list or a music cue, priced at a
+            // made-up 7 tickets.
+            if (c.toolName === "render_shots") {
+              const shots = Array.isArray(input.shots) ? (input.shots as any[]) : []
+              const cost = shots.reduce((sum, sh) => {
+                const spec = typeof sh?.model === "string" ? getCreateModel(sh.model) : null
+                return sum + (spec ? computeCreateCost(spec, resolveCreateSettings(spec, sh?.settings)) : 0)
+              }, 0)
+              const models = [...new Set(shots.map((sh: any) => {
+                const spec = typeof sh?.model === "string" ? getCreateModel(sh.model) : null
+                return spec?.label ?? sh?.model
+              }).filter(Boolean))]
+              return {
+                text: `Shoot ${shots.length} shot${shots.length === 1 ? "" : "s"}${models.length ? ` — ${models.join(", ")}` : ""}`,
+                cost,
+              }
+            }
+            if (c.toolName === "create_audio") {
+              const kind = String(input.kind ?? "music")
+              return { text: `Generate ${kind === "speech" ? "dialogue audio" : `a ${kind} track`} for the film` }
+            }
+            if (c.toolName === "assemble_film") return { text: "Cut the film together — free, no tickets" }
+            if (c.toolName === "check_shots") return { text: "Check the rendered shots — free, no tickets" }
+            if (c.toolName === "extract_frames") return { text: "Pull frames out of a shot — free, no tickets" }
             const mi = mediaInfo(c)
             if (mi) return { text: `Create ${mi.spec.kind} with ${mi.spec.label}`, cost: mi.cost }
-            return { text: "Generate an image", cost: 7 }
+            // Unknown tool: name it rather than guessing a price for it.
+            return { text: `Run ${String(c.toolName).replace(/_/g, " ")}` }
           }
           const hasFreeEdits = calls.some(c => c.toolName === "edit_image")
           const submit = (autoApproveEdits = false) => {
@@ -5695,6 +6009,7 @@ export default function ChatHub({
                 {renderPlusMenu("up")}
                 {renderModelDropdown("up")}
                 {agentModeChip}
+                {movieFormatChip}
                 <div className="flex-1" />
                 {streaming ? (
                   <>

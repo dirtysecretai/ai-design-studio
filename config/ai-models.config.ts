@@ -52,6 +52,24 @@ export const AI_MODELS: AIModel[] = [
     provider: 'fal'
   },
 
+  // NANOBANANA PRO 2 - FAL.ai (Gemini 3 Pro Image 2) - Flagship
+  // Was portal-only: the admin scanner drove it through its own
+  // /api/admin/nano-banana-2-live route, so it existed nowhere in AI_MODELS.
+  // Anything validating against this config — the chat hub included —
+  // answered "Model nano-banana-pro-2 is not available".
+  {
+    id: 'nano-banana-pro-2',
+    name: 'fal-ai/nano-banana-2',
+    displayName: 'NanoBanana Pro 2',
+    description: 'Newest Gemini image model - 7 tickets (2K) or 12 tickets (4K)',
+    ticketCost: 7,
+    category: 'premium',
+    rateLimit: { rpm: 0, rpd: 0 },
+    quality: 'high',
+    isAvailable: true,
+    provider: 'fal'
+  },
+
   // SEEDREAM 4.5 - FAL.ai (ByteDance)
   {
     id: 'seedream-4.5',
@@ -733,6 +751,11 @@ export function getTicketCost(modelId: string, quality?: '2k' | '4k' | string): 
   // NanoBanana Pro: 7 tickets for 2K, 14 tickets for 4K
   if (modelId === 'nano-banana-pro') {
     return quality === '4k' ? 14 : 7
+  }
+
+  // NanoBanana Pro 2: 7 tickets for 2K, 12 tickets for 4K
+  if (modelId === 'nano-banana-pro-2') {
+    return quality === '4k' ? 12 : 7
   }
 
   // Pro Scanner v3: 7 tickets for 2K, 15 tickets for 4K

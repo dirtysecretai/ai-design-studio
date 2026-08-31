@@ -15,7 +15,12 @@ import {
   type ChatHubModel, type ChatHubProvider, type ChatHubRoute, type CustomChatModel,
 } from '@/lib/chat-hub-models'
 import { buildFalCall, generateWithGeminiApi, persistChatGeneration } from '@/lib/chat-hub-create'
-import { AGENT_SKILLS, skillOn, type SkillSet } from '@/lib/chat-hub-skills'
+import { AGENT_SKILLS, skillOn, movieFormatById, movieFormatSeconds, DEFAULT_MOVIE_FORMAT, type SkillSet } from '@/lib/chat-hub-skills'
+import { policyMarker, strictFilterRisk } from '@/lib/model-content-policy'
+import { submitChatVideo } from '@/lib/chat-video-submit'
+import { submitChatImage } from '@/lib/chat-image-submit'
+import { executeRenderShots, executeCheckShots, executeAssembleFilm, executeCreateAudio, executeExtractFrames } from '@/lib/chat-film-tools'
+import { AUDIO_MODELS } from '@/lib/audio-models'
 import { getPlaybook } from '@/lib/chat-hub-playbooks'
 
 fal.config({ credentials: process.env.FAL_KEY })
@@ -26,7 +31,7 @@ export type AgentMode = 'plan' | 'accept' | 'approved'
 
 export type AgentStep = {
   id: string                 // toolCallId — upsert key
-  tool: 'delegate_task' | 'generate_image' | 'create_media' | 'edit_image' | 'search_refs' | 'dataset' | 'dataset_edit' | 'web_search' | 'save_memory' | 'edit_instructions' | 'ask_user' | 'propose_plan' | 'reasoning' | 'record_evaluation' | 'write_summary' | 'load_skill' | 'remember' | 'publish_instagram'
+  tool: 'delegate_task' | 'generate_image' | 'create_media' | 'edit_image' | 'search_refs' | 'dataset' | 'dataset_edit' | 'web_search' | 'save_memory' | 'edit_instructions' | 'ask_user' | 'propose_plan' | 'reasoning' | 'record_evaluation' | 'write_summary' | 'load_skill' | 'remember' | 'publish_instagram' | 'render_shots' | 'check_shots' | 'assemble_film' | 'create_audio' | 'extract_frames'
   status: 'running' | 'done' | 'error' | 'pending' | 'denied' | 'superseded'
   model?: string             // delegate target / create model id
   task?: string
@@ -40,6 +45,9 @@ export type AgentStep = {
   editRecipe?: { image_url?: string; canvas?: { width: number; height: number; color?: string }; operations: unknown[] }
   resultPreview?: string
   imageUrl?: string          // generated media URL (image or video)
+  queueId?: number           // video submitted to the queue — settled later by
+                             // the film-status route, not by this turn
+  queueIds?: number[]        // render_shots: every shot submitted by this step
   error?: string
   ms?: number
   seg?: number               // text-segment round the call was made in — the UI
@@ -84,7 +92,10 @@ export function toolPausesForApproval(toolName: string, mode: AgentMode, planBud
   if (toolName === 'propose_plan' || toolName === 'ask_user' || toolName === 'edit_instructions') return true
   // AUTO mode ('approved') = full autonomy: media calls run inline, no plan
   // budget required. Ask/plan modes keep the plan-approval economy.
-  if (toolName === 'create_media' || toolName === 'generate_image') return mode === 'approved' ? false : !planBudgetActive
+  if (toolName === 'create_media' || toolName === 'generate_image' || toolName === 'render_shots' || toolName === 'create_audio') {
+    return mode === 'approved' ? false : !planBudgetActive
+  }
+  if (toolName === 'check_shots' || toolName === 'assemble_film' || toolName === 'extract_frames') return false
   if (mode === 'accept' && (toolName === 'delegate_task' || toolName === 'edit_image')) return !planBudgetActive
   return false
 }
@@ -112,6 +123,7 @@ export async function loadChatPrefs(userId: number): Promise<{
   customModels: CustomChatModel[]
   agentRoster: string[] | null
   modelPrefs: ModelPrefs
+  movieFormat: string
 }> {
   try {
     const row = await prisma.user.findUnique({
@@ -126,6 +138,9 @@ export async function loadChatPrefs(userId: number): Promise<{
     return {
       customModels: sanitizeCustomModels(prefs.chatHubCustomModels),
       agentRoster: roster && roster.length > 0 ? roster : null,
+      movieFormat: typeof prefs.chatHubMovieFormat === 'string'
+        ? prefs.chatHubMovieFormat
+        : DEFAULT_MOVIE_FORMAT,
       modelPrefs: {
         video: typeof mp.video === 'string' && getCreateModel(mp.video) ? mp.video : undefined,
         image: typeof mp.image === 'string' && getCreateModel(mp.image) ? mp.image : undefined,
@@ -133,8 +148,32 @@ export async function loadChatPrefs(userId: number): Promise<{
       },
     }
   } catch {
-    return { customModels: [], agentRoster: null, modelPrefs: {} }
+    return { customModels: [], agentRoster: null, modelPrefs: {}, movieFormat: DEFAULT_MOVIE_FORMAT }
   }
+}
+
+/**
+ * The runtime the Movie Studio should plan for. Rendered only when the
+ * movie-production skill is on, so no other employee pays for these tokens.
+ */
+export function movieFormatInstructions(skills: SkillSet, formatId: string): string {
+  if (!skillOn(skills, 'movie-production')) return ''
+  const f = movieFormatById(formatId)
+  if (f.id === 'ask') {
+    return 'MOVIE FORMAT — the user has NOT fixed a runtime: propose one alongside your loglines (offer a teaser ~15s, a short ~30s and a standard ~60s with their shot counts) and let them pick before you plan the shot list.'
+  }
+  return [
+    `MOVIE FORMAT — THE RUNTIME IS ALREADY SETTLED: the user picked ${f.label} (${f.seconds}, ${f.shots} — ${f.note}) from the dropdown in this employee's own settings. DO NOT ASK THEM HOW LONG THE FILM SHOULD BE. Asking again contradicts a choice they have already made in the UI, and any answer they give in chat conflicts with the setting still on screen. Do not put runtime in an ask_user question and do not offer length options. Plan the shot list to ${f.seconds} and say in one line that you are working to their ${f.label} setting. Only if the story genuinely cannot work at that length, say so in one line and let them change the dropdown.`,
+    // A film that ships far shorter than the setting is the failure the
+    // user actually sees, so the arithmetic is spelled out rather than implied.
+    `RUNTIME IS A TARGET YOU HAVE TO HIT, NOT A LABEL. ${f.label} means the FINISHED CUT runs about ${f.seconds}. Video models produce roughly 5-10s per shot, so work out the shot count from the runtime (${f.shots}) and shoot that many. If shots fail, RESHOOT OR REPLACE THEM before assembling — do not quietly deliver whatever survived. If the finished cut comes out far under ${f.seconds}, it is NOT done: say exactly how short it is and either keep shooting or ask, but never present it as the finished film.`,
+    // Always-on, not just in the playbook: under-spending an offered budget was
+    // the single most common way a film came back looking cheap.
+    'BUDGET IS A MANDATE, NOT A CEILING. If the user picked a large budget or said no limit, a shot list that never touches the flagship tier (SeeDance 2.5, then 2.0) is a planning failure — they paid for a better film and got change instead. Put the opening image, the turn and the closing image on the best model each one is ALLOWED to use, and remember a strict provider only refuses the shots the restricted character appears in, so plates, landscapes, weather, effects and object inserts can always take the flagship. Say the tier you chose per shot so the user can move the money.',
+    // The owner's standing instruction, kept always-on because the on-demand
+    // playbook loads too late to shape the FIRST plan the user is shown.
+    'SEEDANCE 2.5 AND 2.0 ARE THE BEST VIDEO MODELS IN THIS STUDIO BY A LARGE MARGIN, AND EVERY SHOT LIST MUST REACH FOR THEM. A plan that proposes neither is wrong unless the budget genuinely cannot afford one. Default: SeeDance on the opening plate, the turn, the closing image, and on every shot with no restricted character in frame. A RESTRICTED LEAD DOES NOT REMOVE SEEDANCE FROM THE FILM — it removes the restricted LIKENESS from the references you send it. Shoot those shots on SeeDance anyway with DIFFERENT REFERENCES: a plate you generated, an unrestricted supporting character, an object, the location, a wide where no face reads. Only the shots that must show the restricted face go to a permissive model. If you propose a shot list with no SeeDance in it, state in one line WHY every shot was ineligible — and if you cannot justify it, put SeeDance back.',
+  ].join(String.fromCharCode(10))
 }
 
 // Available ticket balance for instructions (null = admin/unlimited)
@@ -272,23 +311,70 @@ export { skillOn, type SkillSet } from '@/lib/chat-hub-skills'
 export function coreDisciplineInstructions(): string {
   return [
     'CLARIFY BEFORE CRAFT: when a creative brief leaves real choices open (style/mood, palette, layout direction, exact text copy, which subject variant to feature), ask 1-4 focused multiple-choice questions with the ask_user TOOL (renders as a tappable quiz) BEFORE planning or building. One good quiz beats three revision cycles. Questions written as plain reply text do NOT pause anything — if you must ask in prose (open-ended), END the reply with the question and WAIT for the user\'s next message; never ask and then keep working as if answered, and never call write_summary on a reply that ends in a question.',
+    'A NEW USER MESSAGE STARTS A NEW TASK. Everything above it — earlier plans, approved budgets, completed steps, generated media — is FINISHED HISTORY and context about this user, not work in progress. Do not resume an old plan, do not re-run a completed step, and do not treat a previous approval as covering this request: read what they just asked for and plan THAT. Carry forward what you learned about their characters, style and preferences; leave the old task\'s machinery behind.',
     'INTERMEDIATE UPDATES: between plan steps, write exactly ONE short sentence as normal text — what just happened and what you are doing next (e.g. "Start frame approved — sharp focus, good colors. Generating the end frame now."), then CALL the next tool. These progress notes guide the user through the run — keep writing them.',
     'THE SUMMARY IS A TOOL CALL — HARD RULE: when (and ONLY when) every step is fully complete, finish the run by calling write_summary — it renders as the dedicated Summary card at the bottom of the reply. Never write the wrap-up as normal text, and never call write_summary while any step remains (generations unfinished, evaluations pending). If steps remain, your text MUST end with the next tool call — the system detects premature endings and pushes you to continue.',
     'write_summary is the LAST call of a reply — NEVER call propose_plan after it (the system rejects it). If the budget runs out mid-plan, propose the update BEFORE summarizing; summarize only once everything is settled.',
   ].join('\n')
 }
 
+/**
+ * A named real person or owned character in the user's message means the strict
+ * providers WILL refuse the job — after accepting and queueing it, so the user
+ * pays for the discovery. Say so up front rather than letting the agent find
+ * out one failed shot at a time.
+ *
+ * Text only. A reference PHOTO of a real person is the more common trigger and
+ * is invisible here — the agent can see the images, so the rule below tells it
+ * to make that judgement itself.
+ */
+export function providerFilterWarning(userText: string, skills: SkillSet = null): string {
+  if (!skillOn(skills, 'video-production') && !skillOn(skills, 'image-generation')) return ''
+  const hit = strictFilterRisk(userText)
+  const base =
+    'PROVIDER FILTER PRE-CHECK: strict providers (the SeeDance/ByteDance family, Google Virtual Try-On) refuse two things above all — REFERENCE PHOTOS THAT READ AS A SPECIFIC REAL PERSON, and OWNED FRANCHISE CHARACTERS named in the prompt. Both are judged before your prompt wording matters, and a refusal costs the user the shot. LOOK at the reference images you were given and read the brief: if either applies, do not route to a strict model.'
+  if (!hit) return base
+  const what = hit.kind === 'real-person'
+    ? `the brief names a real person ("${hit.term}")`
+    : `the brief names an owned character ("${hit.term}")`
+  return `${base}\nTHIS REQUEST TRIPS THAT CHECK: ${what}.
+THIS IS A PER-SHOT CONSTRAINT, NOT A PER-FILM ONE, AND IT IS NOT A REASON TO ABANDON THE BEST MODELS. The filter judges the REFERENCE IMAGES and the prompt of the SINGLE SHOT being rendered. It knows nothing about the rest of the film.
+- Shots where the restricted character IS on screen: route to a model whose safety is tunable or off.
+- EVERY OTHER SHOT still goes to the flagship (SeeDance 2.5, then 2.0): establishing plates, landscapes, skies, weather, water, fire, debris, interiors, props, relics, vehicles, distant crowds, pure effects, and any supporting character who is NOT the restricted one. Give those shots DIFFERENT REFERENCES - a plate you generated yourself, or an unrestricted character's stills. Passing the restricted likeness is what trips the filter, so simply do not pass it on those shots.
+Dropping the flagship from the whole film because one character is restricted throws away most of the quality the user is paying for. Name the model you avoided and on WHICH SHOTS, in one line - never as a reason to downgrade the entire film.`
+}
+
+/**
+ * Film plates default to the model's BEST quality.
+ *
+ * resolveCreateSettings fills every unset field with the catalog default, which
+ * for the premium image models is the cheap tier ('2k'). Right for a casual
+ * chat image, wrong for a film: the plate is what a video model animates and
+ * what every extracted frame inherits, so a 2K plate caps the whole shot. An
+ * explicit choice by the caller always wins, so a deliberate draft still works.
+ */
+function topQualityForFilm(input: { model: string; settings?: Record<string, string> }): Record<string, string> | undefined {
+  const settings = input.settings
+  if (settings && typeof settings.quality === 'string') return settings
+  const spec = getCreateModel(input.model)
+  if (!spec || spec.kind !== 'image') return settings
+  const field = (spec.fields ?? []).find(f => f.key === 'quality')
+  if (!field || field.options.length === 0) return settings
+  return { ...(settings ?? {}), quality: field.options[field.options.length - 1] }
+}
+
 // The studio's image/video models the orchestrator can use via create_media.
 // Always requires user approval (costs tickets), so tell the model to present
 // a recommendation and cost first. `balance` = the user's available tickets
 // (null = unlimited/admin). `skills` gates which knowledge modules render.
-export function mediaInstructions(balance?: number | null, modelPrefs?: ModelPrefs, skills: SkillSet = null): string {
+export function mediaInstructions(balance?: number | null, modelPrefs?: ModelPrefs, skills: SkillSet = null, isAdmin = false): string {
   const imageOn = skillOn(skills, 'image-generation')
   const videoOn = skillOn(skills, 'video-production')
   if (!imageOn && !videoOn) return ''
-  // Hub is admin-only today — the true flag is explicit so the gate is
-  // findable when the hub ever opens to non-admins
-  const usable = usableCreateModels(true).filter(m => !m.disabled
+  // The REAL flag now: admin accounts see the whole studio, everyone else sees
+  // only the production models. Opening the hub to regular users is a change to
+  // requireChatHubAdmin, not to this list.
+  const usable = usableCreateModels(isAdmin).filter(m => !m.disabled
     && ((m.kind === 'image' && imageOn) || (m.kind === 'video' && videoOn)))
   const lines = usable.map(m => {
     // Annotate options whose choice CHANGES the ticket cost — plans must be
@@ -305,7 +391,10 @@ export function mediaInstructions(balance?: number | null, modelPrefs?: ModelPre
         return `${f.key}: ${parts.join('|')}`
       })
       .join('; ')
-    return `- ${m.id} (${m.label}, ${m.kind}${m.needsRef ? ', needs a reference image' : ''}, ~${baseCost} tickets at defaults${opts ? ` | options → ${opts}` : ''})${m.strengths ? ` — ${m.strengths}` : ''}`
+    // The provider's OWN filter is a selection criterion, not a footnote: a
+    // model that refuses the user's cast wastes the whole shot.
+    const policy = policyMarker(m.id)
+    return `- ${m.id} (${m.label}, ${m.kind}${m.needsRef ? ', needs a reference image' : ''}, ~${baseCost} tickets at defaults${opts ? ` | options → ${opts}` : ''})${m.strengths ? ` — ${m.strengths}` : ''}${policy ? ` [${policy}]` : ''}`
   })
   const prefLines: string[] = []
   if (modelPrefs?.video && videoOn) prefLines.push(`preferred VIDEO model: ${modelPrefs.video}`)
@@ -322,6 +411,9 @@ export function mediaInstructions(balance?: number | null, modelPrefs?: ModelPre
       ? `USER TICKET BALANCE: ${balance} tickets available right now. NEVER propose a plan that costs more than this balance — scale models/settings down to fit, and tell the user when the balance is the constraint. If they need more, they can top up in the Shop.`
       : 'USER TICKET BALANCE: unlimited (admin account) — still be cost-conscious and say what things would cost.',
     'BUDGET: for multi-asset or project-scale requests, include a budget question in your ask_user quiz (e.g. "How many tickets should this project spend? ~15 / ~40 / ~90 / no limit") and design the plan to fit both their answer and their balance. State a total cost estimate before generating.',
+    'PROVIDER CONTENT FILTERS ARE A MODEL-SELECTION CRITERION. Some providers run their own filter that we cannot turn off, marked [STRICT provider filter] above. They reject reference images — a character that renders everywhere else comes back as a content policy violation, and the user pays for the attempt because the job is accepted first and only fails at execution. BEFORE choosing a model, LOOK at the reference images you were given: if the cast is revealing, suggestive, intimate, or otherwise likely to trip a conservative filter, do NOT route to a strict model — pick one whose safety is tunable or off, and say in one line why you avoided the stricter option. When you are unsure, prove it cheaply: run the FIRST shot on the strict model before committing a whole sequence to it.',
+    'A STRICT PROVIDER IS BLOCKED PER SHOT, NOT PER PROJECT. The filter judges what is IN the frame. A shot with no character in it \u2014 an establishing plate, a landscape, weather, an object or relic insert, an effect, a crowd at distance, a vehicle, a title background \u2014 is fine on a strict model no matter who the film stars. Split the shot list: shots where the restricted character appears go to a permissive model, everything else can still use the strongest model available. Most of a film\'s running time is not close-ups, so this is usually the difference between a varied production and a flat one.',
+    'IF A GENERATION COMES BACK AS A CONTENT POLICY VIOLATION: that model has refused this cast and will refuse it again — do NOT retry the same model with a reworded prompt, and do NOT quietly drop the character. Switch to a model with a tunable or disabled safety checker, tell the user which model refused and that you have switched, and continue.',
     'Media generation costs the user tickets and ALWAYS requires their approval — your create_media calls pause until they approve.',
     'PLANNING IS MANDATORY — whenever the user wants media created (any phrasing: create, generate, make, render, draw), your FIRST tool action in the reply must be one of:',
     '(A) ask_user — a short quiz when essential info is missing (image vs video, style, subject; include a budget question for multi-asset projects). Never quiz about things already stated or easily inferred.',
@@ -424,6 +516,7 @@ export function modeInstructions(mode: AgentMode): string {
       'You are in PLAN mode — the deliverable IS a thorough written plan; no tools are available and nothing executes. This is the extra thinking pass: invest it.',
       'PLAN MODE OVERRIDES: every earlier rule about tool calls (quizzes, propose_plan, create_media, evaluations) describes the OTHER modes — here you write the whole plan as text.',
       'Produce: (1) a one-paragraph read of the brief and the creative direction you recommend; (2) numbered steps, each naming the exact model, settings, and estimated tickets, with a one-line WHY; (3) the full draft prompt for every generation step, written to that model\'s prompting style; (4) risks and checkpoints — what you will evaluate after each step and what would trigger a revision; (5) the total ticket estimate.',
+      'If the brief is missing something the plan genuinely depends on (no story for a film, no product for an ad, no audience for a campaign), do NOT invent it silently and do NOT hand back a question instead of a plan: open with a short lettered MENU of 3-5 concrete options built from what you can actually see in the user\'s images and words, plan the strongest one in full as the recommended default, and end by asking them to confirm or swap. A plan the user cannot choose from is not a plan.',
       'End by asking the user to switch to Ask or Auto mode to execute it.',
     ].join('\n')
   }
@@ -457,6 +550,11 @@ const IMAGE_HISTORY_WINDOW = 8
 // those models, past tool activity is narrated as plain prose with no bracket
 // syntax and no raw media URL to mimic (recent images still arrive as real
 // attachments below, which is where reuse URLs live).
+/** Replies whose individual tool steps are still worth spelling out. */
+const STEP_DETAIL_WINDOW = 3
+/** Per-reply cap on replayed step markers, newest kept. */
+const MAX_STEP_MARKERS = 6
+
 export function buildHistoryMessages(rows: HistoryRow[], opts?: { weakModel?: boolean }): ModelMessage[] {
   const weak = opts?.weakModel ?? false
   return rows.flatMap((m, i): ModelMessage | ModelMessage[] => {
@@ -478,17 +576,31 @@ export function buildHistoryMessages(rows: HistoryRow[], opts?: { weakModel?: bo
           const names = [...new Set(acted.map(s => s.tool === 'delegate_task' ? `delegate_task→${s.model}` : s.tool))]
           stepMarkers = `(Earlier this conversation you already ran these tools: ${names.join(', ')}. Those runs are finished. Do NOT write tool names, "[Agent step …]", or media URLs as text — when you need to act, emit a real tool call and the system runs it for you.)`
         }
-      } else {
-        stepMarkers = realSteps
-          .map(s => {
+      } else if (i >= rows.length - STEP_DETAIL_WINDOW) {
+        // Recent replies keep their detail — the model may still be acting on
+        // them — but a long run is truncated so one reply cannot dominate.
+        const shown = realSteps.slice(-MAX_STEP_MARKERS)
+        const hidden = realSteps.length - shown.length
+        stepMarkers = [
+          ...(hidden > 0 ? [`[${hidden} earlier step${hidden === 1 ? '' : 's'} in this reply omitted]`] : []),
+          ...shown.map(s => {
             if (s.status === 'superseded') return `[Agent step set aside — the user replied with new context instead of approving: ${s.tool}${s.model ? ` → ${s.model}` : ''}]`
             if (s.status === 'denied') return `[Agent step DENIED by user: ${s.tool}${s.model ? ` → ${s.model}` : ''}]`
             if (s.tool === 'delegate_task') {
               return `[Agent step: delegate_task → ${s.model} | task: ${(s.task ?? '').slice(0, 150)} | result: ${(s.resultPreview ?? s.error ?? '').slice(0, 300)}]`
             }
             return `[Agent step: ${s.tool}${s.model ? ` → ${s.model}` : ''} | ${(s.task ?? s.prompt ?? '').slice(0, 150)} | ${s.status}${s.error ? `: ${s.error.slice(0, 120)}` : ''}]`
-          })
-          .join('\n')
+          }),
+        ].join('\n')
+      } else if (realSteps.length) {
+        // Older replies collapse to one line: enough to know what happened,
+        // too little to imitate.
+        const counts = new Map<string, number>()
+        for (const st of realSteps) counts.set(st.tool, (counts.get(st.tool) ?? 0) + 1)
+        const summary = [...counts.entries()]
+          .map(([tool, n]) => (n > 1 ? `${tool} ×${n}` : tool))
+          .join(', ')
+        stepMarkers = `(Completed earlier in this conversation: ${summary}. Finished work — not pending.)`
       }
       // Weak models copy `[Generated media: <url>]` as literal output — the recent
       // images arrive as real attachments (below) with their reuse URLs, so drop
@@ -665,10 +777,16 @@ export async function executeDelegateTask(
 // (tickets charged, refs from the current message, settings validated per model)
 export async function executeCreateMedia(
   input: { model: string; prompt: string; settings?: Record<string, string>; reference_image_urls?: string[] },
-  ctx: { user: { id: number; email: string }; attachedImageUrls: string[]; allowedImages?: Set<string> },
-): Promise<{ model: string; mediaUrl: string; kind: string; ticketCost: number; settings: Record<string, string>; referenceImageUrls: string[]; note: string } | { error: string }> {
+  ctx: { user: { id: number; email: string }; attachedImageUrls: string[]; allowedImages?: Set<string>; isAdmin?: boolean },
+): Promise<{ model: string; mediaUrl: string; kind: string; ticketCost: number; settings: Record<string, string>; referenceImageUrls: string[]; note: string; pending?: boolean; queueId?: number } | { error: string }> {
   const spec = getCreateModel(input.model)
   if (!spec || spec.disabled) return { error: `Media model ${input.model} is not available` }
+  // Defence in depth: the tool enum is already filtered, and the site route
+  // re-checks ADMIN_ONLY_VIDEO_MODELS — this stops a hallucinated model id in
+  // between the two.
+  if (spec.admin && ctx.isAdmin === false) {
+    return { error: `${spec.label} is an admin-only model and is not available on this account.` }
+  }
   if (!spec.geminiApi && !process.env.FAL_KEY) return { error: 'FAL_KEY is not configured' }
 
   const settings = resolveCreateSettings(spec, input.settings)
@@ -687,12 +805,42 @@ export async function executeCreateMedia(
     return { error: `${spec.label} needs a reference image (image-to-${spec.kind} model) — attach one or pass reference_image_urls with an image from this conversation` }
   }
 
-  const ticketResult = await deductGenerationTickets(ctx.user.id, ctx.user.email, ticketCost)
-  if (!ticketResult.ok) {
-    return { error: `Insufficient tickets — ${spec.label} costs ${ticketCost}, the user has ${ticketResult.have}. Tell the user to top up tickets.` }
+  // Both kinds now submit through the site's own generation routes, which own
+  // the ticket maths, the admin gate and the queue row. Charging here as well
+  // would bill the user twice for one generation, so the routes are left as the
+  // sole authority. (The legacy Gemini-API path below still pre-charges — it
+  // does not go through a route.)
+  if (spec.geminiApi) {
+    const ticketResult = await deductGenerationTickets(ctx.user.id, ctx.user.email, ticketCost)
+    if (!ticketResult.ok) {
+      return { error: `Insufficient tickets — ${spec.label} costs ${ticketCost}, the user has ${ticketResult.have}. Tell the user to top up tickets.` }
+    }
   }
   try {
     let mediaUrl: string | undefined
+    if (spec.kind === 'video') {
+      // Routed through the site's own generation path: all 31 video models,
+      // the real ADMIN_ONLY_VIDEO_MODELS gate, real ticket accounting, a
+      // GenerationQueue row and a concurrency slot — none of which the hub's
+      // private catalog had. Returns as soon as fal accepts the job; the
+      // render itself outlives this 300s function, so the shot is reported as
+      // pending and settled by the queue/poller rather than waited on here.
+      const submitted = await submitChatVideo(spec, input.prompt, refs, settings, {
+        userId: ctx.user.id,
+      })
+      if (!submitted.ok) return { error: submitted.error }
+      return {
+        model: spec.id,
+        mediaUrl: '',
+        kind: spec.kind,
+        ticketCost: submitted.ticketCost || ticketCost,
+        settings,
+        referenceImageUrls: refs,
+        pending: true,
+        queueId: submitted.queueId,
+        note: `${spec.label} shot submitted (queue #${submitted.queueId}). Rendering continues on the server and finishes in the user's feed — do NOT wait for it here and do NOT claim it is done. Report it as submitted and move on to the next step.`,
+      }
+    }
     if (spec.geminiApi) {
       const r = await generateWithGeminiApi(spec.geminiApi, input.prompt, refs, settings)
       if ('error' in r) {
@@ -700,6 +848,35 @@ export async function executeCreateMedia(
         return { error: r.error }
       }
       mediaUrl = r.url
+    } else if (spec.kind === 'image') {
+      // Through /api/generate: every image model the studio ships, the real
+      // ADMIN_ONLY_IMAGE_MODELS gate, real tickets and a queue row. Waited for,
+      // because an image the agent cannot see in this turn cannot be evaluated
+      // before the next step builds on it.
+      const out = await submitChatImage(spec, input.prompt, refs, settings, ctx.user.id)
+      if (!out.ok) return { error: out.error }
+      if ('pending' in out) {
+        return {
+          model: spec.id,
+          mediaUrl: '',
+          kind: spec.kind,
+          ticketCost: out.ticketCost || ticketCost,
+          settings,
+          referenceImageUrls: refs,
+          pending: true,
+          queueId: out.queueId,
+          note: `${spec.label} is taking longer than usual (queue #${out.queueId}). It finishes on the server and lands in this reply on its own — do NOT re-submit it, and do not claim it is done.`,
+        }
+      }
+      return {
+        model: spec.id,
+        mediaUrl: out.url,
+        kind: spec.kind,
+        ticketCost: out.ticketCost || ticketCost,
+        settings,
+        referenceImageUrls: refs,
+        note: `Image generated with ${spec.label} (${out.ticketCost || ticketCost} tickets). It is shown to the user automatically — do not print the raw URL; describe what was created. MANDATORY: evaluate the attached image in your reply (subject, composition, artifacts, prompt adherence) BEFORE any dependent next step.`,
+      }
     } else {
       const call = buildFalCall(spec.id, input.prompt, refs, settings)
       if ('error' in call) {
@@ -725,7 +902,9 @@ export async function executeCreateMedia(
     return {
       model: spec.id, mediaUrl, kind: spec.kind, ticketCost, settings,
       referenceImageUrls: refs,
-      note: `${spec.kind === 'video' ? 'Video' : 'Image'} generated with ${spec.label} (${ticketCost} tickets). It is shown to the user automatically — do not print the raw URL; describe what was created.${spec.kind === 'image' ? ' MANDATORY: evaluate the attached image in your reply (subject, composition, artifacts, prompt adherence) BEFORE any dependent next step.' : ''}`,
+      // Video returns earlier (submitted, not rendered), so anything reaching
+      // here is an image.
+      note: `Image generated with ${spec.label} (${ticketCost} tickets). It is shown to the user automatically — do not print the raw URL; describe what was created. MANDATORY: evaluate the attached image in your reply (subject, composition, artifacts, prompt adherence) BEFORE any dependent next step.`,
     }
   } catch (err: any) {
     console.error('chat-hub create_media error:', err)
@@ -2370,6 +2549,8 @@ export function makeAgentTools(ctx: {
   attachedImageUrls: string[]
   generatedUrls: string[]
   allowedImages: Set<string>
+  /** Runtime the user picked in the format dropdown, in seconds (0 = unset). */
+  targetSeconds?: number
   projectId: number | null
   // Approved plan budget (propose_plan): while set, in-plan work executes
   // inline without pausing; the object is shared with the route for persistence
@@ -2430,7 +2611,7 @@ export function makeAgentTools(ctx: {
     additionalProperties: false,
   })
   // Media catalog filtered to the enabled kinds — shrinks the tool schema too
-  const usableCreate = usableCreateModels(true).filter(m => !m.disabled
+  const usableCreate = usableCreateModels(!!ctx.isAdmin).filter(m => !m.disabled
     && ((m.kind === 'image' && imageOn) || (m.kind === 'video' && videoOn)))
   const createMediaSchema = jsonSchema<{ model: string; prompt: string; settings?: Record<string, string>; reference_image_urls?: string[] }>({
     type: 'object',
@@ -2491,10 +2672,25 @@ export function makeAgentTools(ctx: {
               }
             }
           }
-          const out = await executeCreateMedia(input as any, ctx)
+          // A still generated for a FILM is the source of a video shot and of
+          // every frame cut out of it, so the cheap tier is the wrong default
+          // there: the user picks a flagship budget and the plates still come
+          // back 2K. When the film skill is on and the model offers a better
+          // tier, take it unless the caller asked for a specific one.
+          const out = await executeCreateMedia(
+            skillOn(skills, 'movie-production')
+              ? { ...(input as any), settings: topQualityForFilm(input as any) }
+              : (input as any),
+            ctx,
+          )
           if ('mediaUrl' in out) {
-            ctx.generatedUrls.push(out.mediaUrl)
-            ctx.allowedImages.add(out.mediaUrl)
+            // A submitted-but-unrendered video has no URL yet; pushing the
+            // empty string put <img src=""> in the reply, which the browser
+            // resolves as the page itself and re-downloads.
+            if (out.mediaUrl) {
+              ctx.generatedUrls.push(out.mediaUrl)
+              ctx.allowedImages.add(out.mediaUrl)
+            }
             if (!b) return out
             b.spent += out.ticketCost
             return {
@@ -2594,6 +2790,153 @@ export function makeAgentTools(ctx: {
       return { type: 'json' as const, value: output }
     }
   }
+  const renderShotsTool = tool({
+    description:
+      'Submit an ENTIRE shot list for rendering in ONE call. Each shot names its own model, prompt, settings and reference images, so different shots use different models — that is the point. Returns queue ids immediately; the renders outlive this reply and come back on their own. Never loop create_media to render a sequence.',
+    inputSchema: jsonSchema<{ shots: { n: number; model: string; prompt: string; settings?: Record<string, string>; reference_image_urls?: string[] }[]; aspect?: string; fps?: number }>({
+      type: 'object',
+      properties: {
+        shots: {
+          type: 'array',
+          description: 'The shot list in cut order, max 16',
+          items: {
+            type: 'object',
+            properties: {
+              n: { type: 'number', description: 'Shot number in the cut' },
+              model: { type: 'string', description: 'Video model id for THIS shot — match it to the shot type' },
+              prompt: { type: 'string', description: 'Full shot prompt, carrying the canon descriptors verbatim' },
+              settings: { type: 'object', additionalProperties: { type: 'string' }, description: 'duration / resolution / audio for this shot' },
+              reference_image_urls: { type: 'array', items: { type: 'string' }, description: 'Start image and/or character stills — URLs already in this conversation. For a FRAME-CHAIN, the last frame of the previous shot goes first.' },
+            },
+            required: ['n', 'model', 'prompt'],
+            additionalProperties: false,
+          },
+        },
+        aspect: { type: 'string', description: 'One aspect for the whole film, e.g. 16:9' },
+        fps: { type: 'number', description: 'Frame rate for the finished cut (default 24)' },
+      },
+      required: ['shots'],
+      additionalProperties: false,
+    }),
+    execute: (input) => executeRenderShots(input as any, ctx as any),
+  })
+
+  const checkShotsTool = tool({
+    description:
+      'Status of submitted shots, with the MID and LAST frame of every finished one. You cannot watch video — these frames are how you judge a shot, and a LAST frame is the start image for a chained next shot.',
+    inputSchema: jsonSchema<{ queue_ids: number[] }>({
+      type: 'object',
+      properties: { queue_ids: { type: 'array', items: { type: 'number' }, description: 'Queue ids returned by render_shots' } },
+      required: ['queue_ids'],
+      additionalProperties: false,
+    }),
+    execute: (input) => executeCheckShots(input as any, ctx as any),
+  })
+
+  const assembleFilmTool = tool({
+    description:
+      'Cut the approved shots into ONE film, and/or mix music and voiceover over an existing cut. Pass clips (shot URLs in cut order) to stitch; pass video_url plus music/voice to score a cut you already made. Costs no tickets — it is ffmpeg, not a model.',
+    inputSchema: jsonSchema<{ clips?: { url: string; trimStart?: number; trimEnd?: number }[]; video_url?: string; aspect?: string; fps?: number; music?: { url: string; gainDb?: number; fadeOutSec?: number }; voice?: { url: string; atSec?: number; gainDb?: number }[] }>({
+      type: 'object',
+      properties: {
+        clips: {
+          type: 'array',
+          description: 'Shot URLs in CUT ORDER (max 16, 120s total)',
+          items: {
+            type: 'object',
+            properties: {
+              url: { type: 'string' },
+              trimStart: { type: 'number', description: 'Seconds to trim off the head' },
+              trimEnd: { type: 'number', description: 'Cut point in seconds from the clip start' },
+            },
+            required: ['url'],
+            additionalProperties: false,
+          },
+        },
+        video_url: { type: 'string', description: 'An existing cut to score instead of stitching' },
+        aspect: { type: 'string', description: 'e.g. 16:9 — every shot is padded to this' },
+        fps: { type: 'number' },
+        music: {
+          type: 'object',
+          description: 'Music bed from create_audio',
+          properties: {
+            url: { type: 'string' },
+            gainDb: { type: 'number', description: 'Default -14: under the shot audio, not over it' },
+            fadeOutSec: { type: 'number' },
+          },
+          required: ['url'],
+          additionalProperties: false,
+        },
+        captions: {
+          type: 'array',
+          description: 'Subtitles burned into the finished cut. Dialogue and narration only — a TITLE needs real typography, so build that on a still with edit_image instead.',
+          items: {
+            type: 'object',
+            properties: {
+              text: { type: 'string' },
+              startSec: { type: 'number' },
+              endSec: { type: 'number' },
+            },
+            required: ['text', 'startSec', 'endSec'],
+            additionalProperties: false,
+          },
+        },
+        captionPosition: { type: 'string', enum: ['bottom', 'top'], description: 'Default bottom' },
+        voice: {
+          type: 'array',
+          description: 'Voiceover lines placed on the timeline',
+          items: {
+            type: 'object',
+            properties: { url: { type: 'string' }, atSec: { type: 'number' }, gainDb: { type: 'number' } },
+            required: ['url'],
+            additionalProperties: false,
+          },
+        },
+      },
+      additionalProperties: false,
+    }),
+    execute: (input) => executeAssembleFilm(input as any, ctx as any),
+  })
+
+  const createAudioTool = tool({
+    description:
+      `Generate a music bed, a voiceover line, or sound scored to a clip. Models: ${AUDIO_MODELS.map(m => `${m.id} (${m.kind})`).join(', ')}. Write voiceover to picture AFTER the cut exists — you cannot time narration to shots you have not seen.`,
+    inputSchema: jsonSchema<{ kind: string; model?: string; prompt?: string; text?: string; duration_sec?: number; voice?: string; video_url?: string }>({
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['music', 'voice', 'sfx'], description: 'music bed | spoken line | sound scored to a clip' },
+        model: { type: 'string', description: 'Specific audio model id (optional — one is chosen per kind)' },
+        prompt: { type: 'string', description: 'music/sfx: what it should sound like' },
+        text: { type: 'string', description: 'voice: the line to speak' },
+        duration_sec: { type: 'number', description: 'Target length — match the cut' },
+        voice: { type: 'string', description: 'voice: named voice' },
+        video_url: { type: 'string', description: 'sfx: the clip to score' },
+      },
+      required: ['kind'],
+      additionalProperties: false,
+    }),
+    execute: (input) => executeCreateAudio(input as any, ctx as any),
+  })
+
+  const extractFramesTool = tool({
+    description:
+      'Pull stills out of any video in this conversation. Video models produce frames at image-model quality, and each one is an asset: the LAST frame is a seamless start image for the next shot, any frame works as a reference for an image generation, an edit plate, a poster source or a thumbnail. Free — no model runs.',
+    inputSchema: jsonSchema<{ video_url: string; at?: string[] }>({
+      type: 'object',
+      properties: {
+        video_url: { type: 'string', description: 'A video already in this conversation' },
+        at: {
+          type: 'array',
+          items: { type: 'string', enum: ['first', 'mid', 'last'] },
+          description: 'Which frames to pull (default: all three)',
+        },
+      },
+      required: ['video_url'],
+      additionalProperties: false,
+    }),
+    execute: (input) => executeExtractFrames(input as any, ctx as any),
+  })
+
   const datasetTool = tool({
     toModelOutput: datasetToModelOutput,
     description:
@@ -2957,6 +3300,14 @@ export function makeAgentTools(ctx: {
     record_evaluation: recordEvaluationTool, write_summary: writeSummaryTool,
     ...(loadableSkills.length ? { load_skill: loadSkillTool } : {}),
     ...(skillOn(skills, 'reference-library') ? { search_refs: searchRefsTool } : {}),
+    ...(skillOn(skills, 'movie-production') ? {
+      render_shots: renderShotsTool,
+      check_shots: checkShotsTool,
+      assemble_film: assembleFilmTool,
+      create_audio: createAudioTool,
+    } : {}),
+    // Frame extraction is useful to any video work, not just films
+    ...(skillOn(skills, 'video-production') ? { extract_frames: extractFramesTool } : {}),
     ...(ctx.isAdmin && skillOn(skills, 'dataset-ops') ? { dataset: datasetTool, dataset_edit: datasetEditTool } : {}),
     ...(skillOn(skills, 'web-research') ? { web_search: webSearchTool } : {}),
     ...(skillOn(skills, 'project-memory') ? { save_memory: saveMemoryTool, remember: rememberTool } : {}),
@@ -3295,11 +3646,26 @@ export function agentStreamResponse(opts: {
                 if (out.error) {
                   s.status = 'error'
                   s.error = String(out.error).slice(0, 500)
+                } else if (Array.isArray(out.queueIds) && out.queueIds.length > 0) {
+                  // A batch of shots is still rendering — the reply is not
+                  // finished until they land, so the step stays running and
+                  // carries every id for the settler.
+                  s.status = 'running'
+                  ;(s as AgentStep & { queueIds?: number[] }).queueIds =
+                    (out.queueIds as unknown[]).filter((n): n is number => typeof n === 'number')
+                  s.resultPreview = String(out.note ?? '').slice(0, 4000) || undefined
+                } else if (out.pending === true && typeof out.queueId === 'number') {
+                  // A video that was SUBMITTED, not rendered. It stays running
+                  // and carries its queue id so film-status can settle it after
+                  // this turn ends — the render outlives the request.
+                  s.status = 'running'
+                  ;(s as AgentStep & { queueId?: number }).queueId = out.queueId
+                  s.resultPreview = String(out.note ?? '').slice(0, 4000) || undefined
                 } else {
                   s.status = 'done'
                   s.resultPreview = String(out.answer ?? out.note ?? '').slice(0, 4000) || undefined
                   if (typeof out.imageUrl === 'string') s.imageUrl = out.imageUrl
-                  if (typeof out.mediaUrl === 'string') s.imageUrl = out.mediaUrl
+                  if (typeof out.mediaUrl === 'string' && out.mediaUrl) s.imageUrl = out.mediaUrl
                   // create_media reports which references it ACTUALLY used
                   if (Array.isArray(out.referenceImageUrls)) {
                     s.refs = (out.referenceImageUrls as unknown[])

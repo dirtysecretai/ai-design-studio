@@ -8688,6 +8688,9 @@ function ImageDetailModal({
     return p.length === 2 && p[0] > 0 && p[1] > 0 ? p[0] / p[1] : null
   })()
   const [measuredAr, setMeasuredAr] = useState<number | null>(null)
+  // Pixel dimensions come from the loaded media: no width/height is stored on
+  // the row, and measuring works for every past generation as well.
+  const [measuredSize, setMeasuredSize] = useState<{ w: number; h: number } | null>(null)
   useEffect(() => { setMeasuredAr(null) }, [image.id, image.imageUrl])
   const mediaAr = measuredAr ?? arFromMeta ?? 1
   const sidePanelPx = infoPos === "left" || infoPos === "right" ? 288 : 0
@@ -8786,7 +8789,13 @@ function ImageDetailModal({
               className="max-w-full max-h-full object-contain cursor-pointer hover:opacity-90"
               title="Open full size"
               style={zoom.imgStyle}
-              onLoad={e => { const el = e.currentTarget; if (el.naturalWidth > 0 && el.naturalHeight > 0) setMeasuredAr(el.naturalWidth / el.naturalHeight) }}
+              onLoad={e => {
+                const el = e.currentTarget
+                if (el.naturalWidth > 0 && el.naturalHeight > 0) {
+                  setMeasuredAr(el.naturalWidth / el.naturalHeight)
+                  setMeasuredSize({ w: el.naturalWidth, h: el.naturalHeight })
+                }
+              }}
               onClick={() => { if (zoom.shouldSuppressClick()) return; window.open(image.imageUrl, "_blank") }}
             />
           )}
@@ -8840,11 +8849,33 @@ function ImageDetailModal({
                 <p className="text-[11px] text-slate-400">{formattedDate}</p>
               </div>
             )}
+            {measuredSize && (
+              <div>
+                <p className="text-[10px] font-mono text-slate-600 uppercase tracking-widest mb-1.5">Size</p>
+                <p className="text-[11px] text-slate-400 font-mono tabular-nums">
+                  {measuredSize.w} &times; {measuredSize.h}
+                  <span className="text-slate-600"> px</span>
+                  <span className="text-slate-600"> &middot; {(measuredSize.w * measuredSize.h / 1e6).toFixed(1)} MP</span>
+                </p>
+              </div>
+            )}
             {showSettings && (
               <div>
                 <p className="text-[10px] font-mono text-slate-600 uppercase tracking-widest mb-1.5">Settings</p>
                 <div className="flex flex-wrap gap-1.5">
-                  {isUpscalerImage ? (
+                  {modelConfig?.isTryOn ? (
+                    <>
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-white/[0.04] border border-white/10 text-slate-300 text-[11px] font-mono">
+                        person + garment
+                      </span>
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-white/[0.04] border border-white/10 text-slate-300 text-[11px] font-mono">
+                        {(image.referenceImageUrls?.length ?? 0)} source image{(image.referenceImageUrls?.length ?? 0) === 1 ? "" : "s"}
+                      </span>
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-white/[0.04] border border-white/10 text-slate-300 text-[11px] font-mono">
+                        shape follows the person photo
+                      </span>
+                    </>
+                  ) : isUpscalerImage ? (
                     <>
                       {image.videoMetadata?.upscaleFactor != null && (
                         <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-cyan-500/10 border border-cyan-500/20 text-cyan-300 text-[11px] font-mono">
@@ -8969,6 +9000,7 @@ function ImageDetailModal({
               {!isUpscalerImage && image.aspectRatio && <span className="px-2 py-0.5 rounded-md bg-white/[0.04] border border-white/10 text-slate-300 text-[10px] font-mono">{image.aspectRatio}</span>}
               {!isUpscalerImage && image.quality && <span className="px-2 py-0.5 rounded-md bg-white/[0.04] border border-white/10 text-slate-300 text-[10px] font-mono">{image.quality.toUpperCase()}</span>}
               {image.loraUrl && <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[10px] font-mono"><Sparkles size={8} />{image.loraName || "LoRA"}</span>}
+              {measuredSize && <span className="px-2 py-0.5 rounded-md bg-white/[0.04] border border-white/10 text-slate-300 text-[10px] font-mono tabular-nums">{measuredSize.w}&times;{measuredSize.h}</span>}
               {formattedDate && <span className="text-[10px] text-slate-600">{formattedDate}</span>}
             </div>
             {!image.failed && image.id > 0 && (
@@ -9258,6 +9290,9 @@ function VideoDetailModal({
     return p.length === 2 && p[0] > 0 && p[1] > 0 ? p[0] / p[1] : null
   })()
   const [measuredAr, setMeasuredAr] = useState<number | null>(null)
+  // Pixel dimensions come from the loaded media: no width/height is stored on
+  // the row, and measuring works for every past generation as well.
+  const [measuredSize, setMeasuredSize] = useState<{ w: number; h: number } | null>(null)
   useEffect(() => { setMeasuredAr(null) }, [video.videoUrl])
   useEffect(() => {
     const el = videoElRef.current
@@ -9356,6 +9391,13 @@ function VideoDetailModal({
               loop
               playsInline
               className="max-w-full max-h-full object-contain"
+              onLoadedMetadata={e => {
+                const el = e.currentTarget
+                if (el.videoWidth > 0 && el.videoHeight > 0) {
+                  setMeasuredAr(el.videoWidth / el.videoHeight)
+                  setMeasuredSize({ w: el.videoWidth, h: el.videoHeight })
+                }
+              }}
             />
           )}
         </div>
@@ -9422,6 +9464,15 @@ function VideoDetailModal({
                     </span>
                   )}
                 </div>
+              </div>
+            )}
+            {measuredSize && (
+              <div>
+                <p className="text-[10px] font-mono text-slate-600 uppercase tracking-widest mb-1.5">Size</p>
+                <p className="text-[11px] text-slate-400 font-mono tabular-nums">
+                  {measuredSize.w} &times; {measuredSize.h}
+                  <span className="text-slate-600"> px</span>
+                </p>
               </div>
             )}
             {(video.startFrameUrl || video.endFrameUrl) && (
@@ -26578,12 +26629,28 @@ export default function PortalV2Page() {
         }[] = Array.isArray(data.jobs) ? data.jobs : []
         if (cancelled || jobs.length === 0) return
 
-        const fresh = jobs.filter(j => !adoptedJobIds.current.has(j.id))
+        // A job younger than this is almost certainly the one the tab is
+        // mid-submit on: the queue row exists server-side seconds before the
+        // response carrying its id gets back, and adopting inside that window
+        // draws a second tile for a job already on screen. If the tab really
+        // did go away, the next poll picks it up.
+        const SETTLE_MS = 45_000
+        const fresh = jobs.filter(j =>
+          !adoptedJobIds.current.has(j.id)
+          && Date.now() - new Date(j.createdAt).getTime() > SETTLE_MS)
         if (fresh.length === 0) return
 
         setPendingSlots(prev => {
-          // A slot this tab created already tracks the job under its own id
-          const known = new Set(prev.map(sl => sl.queueId).filter((n): n is number => typeof n === "number"))
+          // A slot this tab created already tracks the job — but under EITHER
+          // id: the sync path stores the queue row in queueId, the async image
+          // models (NanoBanana 2, Kling, GPT-Image, Wan) store it in
+          // queueJobId. Checking only one of them adopted a duplicate tile for
+          // every job the other path had created, so a batch of 4 looked like 8.
+          const known = new Set<number>()
+          for (const sl of prev) {
+            if (typeof sl.queueId === "number") known.add(sl.queueId)
+            if (typeof sl.queueJobId === "number") known.add(sl.queueJobId)
+          }
           const additions = fresh
             .filter(j => !known.has(j.id))
             .map(j => ({

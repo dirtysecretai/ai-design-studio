@@ -8,6 +8,9 @@
 //  - 'direct': the provider's own API via its @ai-sdk package — model
 //    addressed as `directId`, billed on that provider's own API key.
 
+import { CHAT_VIDEO_MODELS } from '@/lib/chat-video-catalog'
+import { CHAT_IMAGE_MODELS } from '@/lib/chat-image-catalog'
+
 export type ChatHubProvider = 'Anthropic' | 'OpenAI' | 'Google' | 'xAI'
 export type ChatHubRoute = 'gateway' | 'direct'
 
@@ -209,6 +212,7 @@ export function computeCreateCost(model: ChatCreateModel, s: ChatCreateSettings)
     case 'kling-v3':          return dur * (s.audio === 'on' ? 8 : 6)
     case 'seedance-1.5':      return Math.ceil(dur * 2.0 * resMult * (s.audio === 'on' ? 1.0 : 0.5)) + 1
     case 'seedance-2.0':      return Math.ceil(dur * 15 * resMult)
+    case 'seedance-2.5':      return Math.ceil(dur * 18 * resMult)
     case 'seedance-2.0-fast': return Math.ceil(dur * 12 * (s.resolution === '480p' ? 0.5 : 1.0))
     case 'wan-2.5': {
       const table: Record<string, Record<string, number>> = {
@@ -298,33 +302,60 @@ export const CHAT_CREATE_MODELS: ChatCreateModel[] = [
     fields: [A('AR', ['1:1', '16:9', '9:16', '4:3', '3:4', '4:5'], '1:1'), Q(['1k', '2k', '4k'], '2k')] },
   // ── Video ── (taskbar Video dropdown order)
   { id: 'kling-v3',          label: 'Kling 3.0',          kind: 'video', group: 'Kling', maxRefs: 2, ticketCost: 30, needsRef: true, endFrame: true,
-    strengths: 'PREMIUM TIER — cinematic motion, physics, camera work; supports START + END frame (2nd ref = end frame) for controlled shots; native audio with dialogue + lip sync',
+    strengths: 'BEST FOR: hero beats, dialogue, real physics, deliberate camera moves. The only reliable START+END frame control (2nd ref = end frame), which is what makes shot-to-shot continuity chaining possible. Native audio with lip sync. WEAK AT: cost, only 2 references, and CHARACTER DRIFT UNDER MOVEMENT \u2014 the more the subject moves, the faster the face and wardrobe wander off the reference. A start frame alone is fine for a stationary subject, a camera pull-back or a landscape move; for any shot where a character MOVES A LOT, pass an end frame as well and the character holds across the whole clip. PERMISSIVE: no known likeness or IP refusals.',
     guide: 'Direct like a cinematographer: scene descriptions with ACTIVE verbs ("walks", "billows"), explicit camera moves ("slow push-in", "tracking shot", "dolly zoom") — no camera direction = static shot. Short punchy sentences, one action each; no keyword lists. 3-6s is the coherence sweet spot (max 15s). Ref 1 = start frame; optional ref 2 = end frame — it animates from start toward end (morphs, transitions, loops).',
     fields: [D(SECONDS(3, 15), '5'), A('AR', ['16:9', '9:16', '1:1'], '16:9'), AUDIO] },
   { id: 'kling-v3-motion',   label: 'Kling V3 Motion',    kind: 'video', group: 'Kling', maxRefs: 0, ticketCost: 0, disabled: 'needs a motion video input' },
   { id: 'seedance-1.5',      label: 'SeeDance 1.5',       kind: 'video', group: 'ByteDance', maxRefs: 2, ticketCost: 6, endFrame: true,
-    strengths: 'best budget video (6 tickets) — good motion for drafts and social clips; supports START + END frame (2nd ref = end frame)',
+    strengths: 'BEST FOR: drafts, proof-of-story passes, establishing plates, inserts and cutaways. The cheapest way to find out whether a sequence works before committing budget. Supports START+END frame (2nd ref = end frame). WEAK AT: fine detail and faces held close. REFUSES: recognisable real people and owned franchise characters (ByteDance filter, no override).',
     fields: [D(SECONDS(4, 12), '5'), R(['480p', '720p', '1080p'], '720p'), A('AR', ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'], '16:9'), AUDIO] },
   { id: 'seedance-2.0',      label: 'SeeDance 2.0',       kind: 'video', group: 'ByteDance', maxRefs: 9, ticketCost: 75,
-    strengths: 'FLAGSHIP — the best video quality in the studio, FIRST CHOICE for hero/final video content; cinematic detail, native synced audio, multi-shot sequences. Takes up to 9 reference images, addressed in the prompt as @Image1…@Image9',
+    strengths: 'BEST FOR: highest-detail shots and multi-character staging. Takes up to 9 references addressed as @Image1-@Image9, making it the strongest choice for RE-ANCHORING a cast from stills. Cinematic detail, native synced audio. WEAK AT: no end-frame control, so it cannot land a shot on a planned pose. REFUSES, AND THIS DECIDES ROUTING BEFORE QUALITY DOES: recognisable real people and owned franchise characters. The ByteDance filter judges the REFERENCE IMAGES, there is no override, and the job fails only after being accepted and paid for. If the cast is a real likeness or an owned character, this model is OUT.',
     guide: 'References by tag in prompt order: "@Image1 is the hero product… styled like @Image2" (up to 9; ref videos/audio are portal-only). Multi-shot: label cuts "Shot 1: … Shot 2: …" — ONE action + ONE camera move per shot; labels create cut points, unlabeled = continuous take. Prompt order: subject+action → camera (real cinematography terms) → explicit sound cues (audio is native + synced) → transitions. 2-4 sentences single shot, 4-8 multi-shot. Duration 4-15s or auto.',
     fields: [D(['auto', ...SECONDS(4, 15)], 'auto'), R(['480p', '720p'], '720p'), A('AR', ['auto', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'], 'auto'), AUDIO] },
   { id: 'seedance-2.0-fast', label: 'SeeDance 2.0 Fast',  kind: 'video', group: 'ByteDance', maxRefs: 9, ticketCost: 60,
-    strengths: 'near-flagship quality, faster and cheaper — strong default when 2.0 is overkill. Same reference behavior as 2.0 (up to 9 refs, @Image tags)',
+    strengths: 'BEST FOR: the same multi-reference staging as 2.0 when speed and cost matter more than the last tenth of the detail. A sensible default for mid-sequence coverage. WEAK AT: same lack of end-frame control. REFUSES: same ByteDance filter as 2.0 (real-person likeness, owned characters).',
     guide: 'Same prompting rules as seedance-2.0.',
     fields: [D(['auto', ...SECONDS(4, 15)], 'auto'), R(['480p', '720p'], '720p'), A('AR', ['auto', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'], 'auto'), AUDIO] },
+  { id: 'seedance-2.5',      label: 'SeeDance 2.5',      kind: 'video', group: 'ByteDance', maxRefs: 9, ticketCost: 90, admin: true,
+    strengths: 'BEST FOR: the highest-quality shot in the catalog — the one to spend on an establishing plate, a landscape, weather, water, an effect or any hero shot with NO restricted character in frame. Takes up to 9 references (@Image1-@Image9). WEAK AT: no end-frame control, and it is expensive. REFUSES: recognisable real people and owned franchise characters — but that only rules it out of the shots those characters APPEAR IN, not the rest of the film. ADMIN ONLY.',
+    guide: 'Same prompting rules as seedance-2.0. Reach for this on plates, environments and effects — especially animating a still you just generated.',
+    fields: [D(['auto', ...SECONDS(4, 12)], 'auto'), R(['480p', '720p', '1080p'], '1080p'), A('AR', ['auto', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'], 'auto'), AUDIO] },
   { id: 'gemini-omni-flash', label: 'Gemini Omni Flash',  kind: 'video', group: 'Google', maxRefs: 9, ticketCost: 120, admin: true,
-    strengths: 'Google multimodal video (ADMIN ONLY) — text-to-video, start-frame animation (exactly 1 ref), or multi-reference blending (2+ refs); native synced audio; 3-10s, 16:9 or 9:16',
+    strengths: 'BEST FOR: text-to-video with no plate at all, single-image animation, or blending several references into one look. Native synced audio. WEAK AT: locked to 3-10s and 16:9 or 9:16 only. Google screens inputs, so treat a real-person cast as risky here too. ADMIN ONLY.',
     guide: 'With 2+ refs, bind them inline as <IMAGE_REF_0>, <IMAGE_REF_1>… (0-INDEXED, unlike SeeDance\'s @Image1). One ref = true start frame. Keep prompts cinematic: subject+action → camera → sound cues. Duration is an integer 3-10s (no auto).',
     fields: [D(SECONDS(3, 10), '8'), A('AR', ['16:9', '9:16'], '16:9')] },
   { id: 'wan-2.5',           label: 'Wan 2.5',            kind: 'video', group: 'Wan', maxRefs: 1, ticketCost: 13, needsRef: true,
-    strengths: 'mid-cost image-to-video with prompt expansion — decent motion for product/scene animations',
+    strengths: 'BEST FOR: animating an existing plate at mid cost, with prompt expansion filling in motion detail. Landscapes, environments, products, atmosphere. WEAK AT: one reference only, no end frame, so it cannot chain or hold a multi-character scene. PERMISSIVE: the safety checker is honoured, making it a safe fallback when a strict provider refuses the cast.',
     fields: [D(['5', '10'], '5'), R(['480p', '720p', '1080p'], '720p')] },
   { id: 'lipsync-v3',        label: 'Lipsync v3',         kind: 'video', group: 'Lipsync', maxRefs: 0, ticketCost: 0, disabled: 'needs video + audio inputs' },
   { id: 'happy-horse',       label: 'Happy Horse',        kind: 'video', group: 'Alibaba', maxRefs: 1, ticketCost: 35, needsRef: true,
-    strengths: 'characterful, expressive animation from a single image — people and creatures',
+    strengths: 'BEST FOR: expressive character performance from ONE still, such as reactions, gestures, a face carrying a beat. WEAK AT: single reference, no end frame, not a camera-move model. Good cheap coverage between hero shots.',
     fields: [D(SECONDS(3, 15), '5'), R(['720p', '1080p'], '720p')] },
 ]
+
+// Every video model the SITE ships that the list above does not already
+// describe by hand. The hub used to carry nine entries against the studio's
+// thirty-one, so most of the roster was simply unreachable from chat and each
+// new model had to be remembered in two places. Video submits through
+// /api/video/generate, which owns the endpoints and the admin gate, so a
+// derived entry is enough to make a model usable. Hand-written entries win —
+// their strengths/guide text is better than anything generated.
+for (const v of CHAT_VIDEO_MODELS) {
+  if (!CHAT_CREATE_MODELS.some(m => m.id === v.id)) {
+    CHAT_CREATE_MODELS.push(v as ChatCreateModel)
+  }
+}
+
+// Same for images, now that they submit through /api/generate too. The
+// hand-written entries above keep their curated strengths/guide text; the rest
+// of the studio's roster is derived so a model added to the site shows up here
+// without being remembered twice.
+for (const i of CHAT_IMAGE_MODELS) {
+  if (!CHAT_CREATE_MODELS.some(m => m.id === i.id)) {
+    CHAT_CREATE_MODELS.push(i as ChatCreateModel)
+  }
+}
 
 // Ticket cost of the LLM's generate_image tool (NanoBanana Pro at 2K)
 export const CHAT_TOOL_IMAGE_COST = 7
@@ -383,6 +414,34 @@ export const AGENT_CAPABILITIES: AgentCapability[] = [
     id: 'create_media',
     name: 'Generate images & video (with chaining)',
     description: 'Uses the studio\'s media models (NanoBanana, SeeDream, FLUX, Kling, SeeDance…) with recommended or user-tweaked settings. Sees its own results afterwards and can iterate: regenerate with different settings/models, feed a generated or edited image into an image-to-video model, or edit outputs and reuse them as references. Every generation still pauses for approval.',
+    approval: 'always-ask',
+    cost: 'Tickets (shown before approval)',
+  },
+  {
+    id: 'render_shots',
+    name: 'Render a whole shot list (Movie Studio)',
+    description: 'Submits every shot of a film in one call, each with its own model, prompt, settings and references, so a sequence is not rendered one model step at a time. Renders continue on the server after the reply ends and are settled automatically.',
+    approval: 'always-ask',
+    cost: 'Tickets per shot (summed before approval)',
+  },
+  {
+    id: 'check_shots',
+    name: 'Check shots + extract frames (Movie Studio)',
+    description: 'Reports which submitted shots have landed and extracts the MID and LAST frame of each. The agent cannot watch video, so those frames are how it judges a shot — and a LAST frame becomes the start image of the next chained shot.',
+    approval: 'auto',
+    cost: 'Free',
+  },
+  {
+    id: 'assemble_film',
+    name: 'Cut and score the film (Movie Studio)',
+    description: 'Stitches approved shots into one MP4 (normalising size, frame rate and pixel aspect, and synthesising silence for shots with no audio track), and mixes a music bed or voiceover over the cut. ffmpeg only — no model runs.',
+    approval: 'auto',
+    cost: 'Free',
+  },
+  {
+    id: 'create_audio',
+    name: 'Music, voiceover and foley (Movie Studio)',
+    description: 'Generates a music bed, a spoken line, or sound scored to an existing clip, for mixing over the finished cut.',
     approval: 'always-ask',
     cost: 'Tickets (shown before approval)',
   },

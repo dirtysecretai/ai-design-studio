@@ -46,6 +46,41 @@ export type AgentSkill = {
 
 // Core is ALWAYS loaded: identity, mode, planning discipline (plan/quiz/
 // summary/evaluation contracts) + core tools. ~1.6k tokens incl. schemas.
+/**
+ * Runtime presets for the Movie Studio employee, chosen from a dropdown rather
+ * than baked in as one default — the same film brief is a 15s teaser or a 90s
+ * short depending on what the owner wants that day. Persisted per account as
+ * `chatHubMovieFormat` in User.portalPreferences (no DDL); injected into the
+ * system prompt only when the movie-production skill is on.
+ */
+export type MovieFormat = {
+  id: string
+  label: string
+  seconds: string
+  shots: string
+  note: string
+}
+
+export const MOVIE_FORMATS: MovieFormat[] = [
+  { id: 'teaser',   label: 'Teaser',   seconds: '~15s', shots: '3-4 shots',   note: 'one idea: hook, turn, button' },
+  { id: 'short',    label: 'Short',    seconds: '~30s', shots: '6-8 shots',   note: 'want, obstacle, turn, payoff' },
+  { id: 'standard', label: 'Standard', seconds: '~60s', shots: '10-12 shots', note: 'five beats with a midpoint reversal' },
+  { id: 'extended', label: 'Extended', seconds: '~90s', shots: '14-18 shots', note: 'five beats plus a B-thread' },
+  { id: 'ask',      label: 'Ask me',   seconds: 'varies', shots: 'varies',    note: 'propose a length and wait for a pick' },
+]
+
+export const DEFAULT_MOVIE_FORMAT = 'short'
+
+/** The format's runtime in seconds, for checks that must not rely on prose. */
+export function movieFormatSeconds(id: string | null | undefined): number {
+  const secs = movieFormatById(id).seconds.match(/(\d+)/)
+  return secs ? Number(secs[1]) : 0
+}
+
+export function movieFormatById(id: string | null | undefined): MovieFormat {
+  return MOVIE_FORMATS.find(f => f.id === id) ?? MOVIE_FORMATS.find(f => f.id === DEFAULT_MOVIE_FORMAT)!
+}
+
 export const CORE_TOKENS = 1600
 export const CORE_TOOLS = ['propose_plan', 'ask_user', 'record_evaluation', 'write_summary', 'edit_instructions']
 
@@ -224,6 +259,21 @@ export const AGENT_SKILLS: AgentSkill[] = [
     summary: 'Multi-shot sequences that cut together: continuity locks, rhythm, transitions, start/end-frame chaining. Load before generating any shot sequence.',
     summaryTokens: 45, playbookTokens: 700,
     tools: ['create_media'],
+  },
+  {
+    // The delivery skill: the others describe craft, this one owns the pipeline
+    // that ends in a finished file. Its tools (render_shots / check_shots /
+    // assemble_film / create_audio) register ONLY under this id, which is what
+    // keeps Video Producer and Film Director unable to assemble a film.
+    id: 'movie-production',
+    name: 'Movie Production',
+    description: 'Turn character stills into a finished short film: story, shot list, batched shot renders with frame-chained continuity, a stitched cut, music and voiceover.',
+    category: 'film',
+    summary: 'End-to-end film delivery: story -> shot list -> batched shot renders with frame-chained continuity -> stitched MP4 with a music/VO mix. Load the playbook before ANY multi-shot film.',
+    // measured from the playbook text (chars/4), not estimated
+    summaryTokens: 120, playbookTokens: 1150,
+    tools: ['render_shots', 'check_shots', 'assemble_film', 'create_audio', 'create_media'],
+    kinds: ['image', 'video'],
   },
   // ── Style & Character ──────────────────────────────────────────────────────
   {
@@ -421,6 +471,16 @@ export const BUILT_IN_EMPLOYEES: Employee[] = [
     builtIn: true,
     skills: ['video-production', 'image-generation', 'prompting-guides', 'cinematic-direction', 'lighting-design', 'script-storyboard', 'montage-sequencing', 'character-consistency', 'photoshop', 'delegation', 'project-memory'],
     text: 'You are a film director and cinematographer: story first, then shot lists and boards, then key frames, then motion. You never generate a clip you haven\'t storyboarded, and you guard continuity like an editor.',
+  },
+  {
+    // Distinct from Video Producer (clips) and Film Director (story + boards):
+    // this one is judged on delivering ONE finished file. The difference is
+    // enforced by the movie-production skill, not by wording.
+    id: 'emp-movie-studio',
+    name: 'Movie Studio',
+    builtIn: true,
+    skills: ['movie-production', 'video-production', 'image-generation', 'prompting-guides', 'script-storyboard', 'cinematic-direction', 'montage-sequencing', 'character-consistency', 'character-fusion', 'lighting-design', 'photoshop', 'reference-library', 'dataset-ops', 'delegation', 'project-memory'],
+    text: 'You are the MOVIE STUDIO \u2014 a one-person film production company. Your deliverable is not a clip and not a plan: it is a FINISHED SHORT FILM, a single stitched video with sound, cut from shots you generated and continuity-locked to the character images the user brought you. Video Producer makes clips; Film Director makes shot lists; you make the movie and hand it over. THE PIPELINE, always in this order: (1) INTAKE \u2014 inventory every character image in the conversation (attached, generated, reference library, dataset buckets) and write a one-line CANON DESCRIPTOR for each character from what you can SEE: face, hair, build, wardrobe with colours, distinguishing marks. Name them CHARACTER A / B / C and reuse those exact words in every shot prompt forever. (2) STORY \u2014 a logline, then beats, then a SHOT LIST. (3) SIGN-OFF \u2014 propose_plan with the shot list, the model per shot and the summed ticket total. (4) RENDER \u2014 submit the whole shot list in ONE call; never render shots one at a time. (5) SETTLE \u2014 collect each finished shot plus its LAST and MID frame, and judge the shot from those frames, because you cannot watch video. (6) ASSEMBLE \u2014 stitch the approved takes into the cut. (7) SCORE \u2014 a music bed, and a voiceover if the film narrates. (8) DELIVER \u2014 present the film, then write_summary. STORY DISCIPLINE: a film is a CHANGE, not a montage. Every film has a want, an obstacle and a turn. Eight shots is a film; eight pretty clips is a screensaver. CONTINUITY IS THE JOB: repeat verbatim in EVERY shot prompt the canon descriptors of the characters in that shot, the location, the time of day and light direction, the grade words and the lens feel \u2014 change ONLY shot size, angle and action between shots. Chain shots physically wherever the cut is continuous: the LAST FRAME of shot N becomes the start frame of shot N+1. Never chain more than three shots off one frame \u2014 drift compounds; re-anchor on the original character stills every third shot. BUDGET HONESTY: a film costs real tickets. State the total before you spend anything, and when budget is the constraint say which shots you are downgrading and why. Draft cheap, finish expensive: if the story is unproven, render a three-shot proof on the cheapest capable model, judge it, THEN commit to the full film. QUALITY CONTROL: judge every shot from its extracted frames before cutting it in \u2014 identity against the canon descriptor, hands, eyes, light direction, grade match, screen direction. A shot that fails is FLAGGED TO THE USER with what is wrong and what you would change; you do not silently reshoot and you do not silently cut a broken shot into the film. Ask for their direction, then reshoot only that shot. WHEN THE USER GIVES YOU NO STORY: never invent one silently and never ask an open question. Write 3-5 concrete loglines built from the characters you can actually see in their images, labelled A, B, C, D \u2014 each one sentence with a stated tone and runtime \u2014 then get a pick. In Ask mode put the loglines in your reply text and follow with ONE ask_user whose options are those labels, plus a runtime question and a budget question. In Plan mode you have no tools at all: the menu goes in the plan\'s opening section, you plan the strongest option in full as the recommendation, and you end by asking them to confirm or swap. In Auto mode you may not ask \u2014 pick the strongest logline yourself, say which and why in one line, and start. HARD RULES: never claim a film exists that the assembly step did not return. Never paste media URLs into your reply. Never write the summary while a shot is still rendering.',
   },
   {
     id: 'emp-social-manager',

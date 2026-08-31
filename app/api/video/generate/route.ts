@@ -7,7 +7,7 @@ import { cookies } from 'next/headers';
 import { getUserFromSession } from '@/lib/auth';
 import { authenticateApiKey, invalidKeyResponse, requireScopes, canUseModel, modelNotPermittedResponse } from '@/lib/api-key-auth';
 import { enforceContentFilter } from '@/lib/content-filter'
-import { FAL_ENDPOINTS } from '@/lib/fal-video-endpoints'
+import { FAL_ENDPOINTS, ADMIN_ONLY_VIDEO_MODELS } from '@/lib/fal-video-endpoints'
 import { videoTicketCost, VIDEO_TOOL_MODELS, INPUT_ROUTED_MODELS } from '@/lib/ticket-pricing'
 
 
@@ -20,16 +20,8 @@ fal.config({
 // can read them without scanning source files at runtime.
 
 
-// Models only admin accounts may use (pricing TBD) — enforced server-side,
-// independent of the client-supplied adminMode flag
-const ADMIN_ONLY_VIDEO_MODELS = new Set([
-  'gemini-omni-flash', 'wan-2.7', 'wan-2.2-lora', 'minimax-h3-max', 'flux-3',
-  'wan-3.0', 'wan-3.0-prime', 'seedance-2.5', 'gemini-omni-1.1', 'ltx-2.5-pro', 'ltx-2.5-fast',
-  'flux-video-upscale', 'topaz-upscale-precision', 'topaz-upscale-creative',
-  'topaz-upscale-generative', 'seedvr2-video', 'flashvsr-video',
-  'bytedance-video-upscale', 'topaz-colorize', 'topaz-deblur',
-  'topaz-interpolate', 'topaz-sdr-to-hdr',
-]);
+// ADMIN_ONLY_VIDEO_MODELS now lives in lib/fal-video-endpoints so the chat
+// catalog and the pickers gate on exactly what this route enforces.
 
 // VIDEO_TOOL_MODELS (source-clip tools) and INPUT_ROUTED_MODELS (endpoint
 // chosen by the inputs given) are imported from lib/ticket-pricing.ts — the
@@ -757,8 +749,9 @@ export async function POST(request: NextRequest) {
     // the job and — on failure — refund the debited tickets server-side (works even
     // if the user's tab is closed). ticketCost is the amount actually debited:
     // admin video is debited client-side, non-admin server-side above.
+    let queueId: number | null = null
     if (adminMode && adminSlotClaimed && adminTargetUserId) {
-      await prisma.generationQueue.create({
+      queueId = (await prisma.generationQueue.create({
         data: {
           userId:      adminTargetUserId,
           modelId:     model,
@@ -770,9 +763,10 @@ export async function POST(request: NextRequest) {
           falRequestId: requestId,
           startedAt:   new Date(),
         },
-      })
+        select: { id: true },
+      })).id
     } else if (!adminMode && userId) {
-      await prisma.generationQueue.create({
+      queueId = (await prisma.generationQueue.create({
         data: {
           userId:       userId,
           modelId:      model,
@@ -784,12 +778,16 @@ export async function POST(request: NextRequest) {
           falRequestId: requestId,
           startedAt:    new Date(),
         },
-      }).catch(() => {})
+        select: { id: true },
+      }).catch(() => null))?.id ?? null
     }
 
     return NextResponse.json({
       success: true,
       requestId,
+      // The queue row this job owns, so a caller can poll it. Additive: the
+      // portal ignores it; the chat hub polls on it.
+      queueId,
       falEndpoint,
       ticketCost,
       model,

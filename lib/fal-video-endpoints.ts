@@ -120,3 +120,18 @@ export const VIDEO_MODEL_IDS: string[] = [
 
 /** File extensions that mean "this row is a video" regardless of its model. */
 export const VIDEO_FILE_EXTS = ['.mp4', '.webm', '.mov', '.m4v', '.avi', '.mkv']
+
+/**
+ * Models only admin accounts may use. Lives here rather than in the route so
+ * client-safe code (the chat catalog, the model pickers) can gate on the SAME
+ * list the server enforces — two copies of this drift, and a drift here means
+ * a user is offered a model the server will refuse.
+ */
+export const ADMIN_ONLY_VIDEO_MODELS = new Set<string>([
+  'gemini-omni-flash', 'wan-2.7', 'wan-2.2-lora', 'minimax-h3-max', 'flux-3',
+  'wan-3.0', 'wan-3.0-prime', 'seedance-2.5', 'gemini-omni-1.1', 'ltx-2.5-pro', 'ltx-2.5-fast',
+  'flux-video-upscale', 'topaz-upscale-precision', 'topaz-upscale-creative',
+  'topaz-upscale-generative', 'seedvr2-video', 'flashvsr-video',
+  'bytedance-video-upscale', 'topaz-colorize', 'topaz-deblur',
+  'topaz-interpolate', 'topaz-sdr-to-hdr',
+])

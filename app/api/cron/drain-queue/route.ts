@@ -110,6 +110,65 @@ export async function GET(request: Request) {
       console.log(`[cron-drain] ${sparedAlive} long-running job(s) still alive at fal — left running`)
     }
 
+    // ── 1a-video. Settle finished video PROMPTLY, not after an hour ─────────
+    // The harvest below only sees jobs already past the stale threshold, which
+    // for video is 60 minutes. A shot submitted from the chat renders in a
+    // couple of minutes and then, with no tab open to poll it, sat untouched
+    // for the rest of that hour — the render was safe but the film could not
+    // continue. Anything past a short grace period (long enough not to race a
+    // live poller) gets settled here on the next cron tick instead.
+    const VIDEO_SETTLE_GRACE_MS = 2 * 60 * 1000
+    let videoSettled = 0
+    try {
+      const liveVideo = await prisma.generationQueue.findMany({
+        where: {
+          modelType: 'video',
+          status: 'processing',
+          startedAt: { lt: new Date(Date.now() - VIDEO_SETTLE_GRACE_MS) },
+        },
+        select: {
+          id: true, falRequestId: true, parameters: true, modelId: true,
+          prompt: true, ticketCost: true, createdAt: true,
+        },
+        orderBy: { startedAt: 'desc' },
+        take: 8,
+      })
+      for (const j of liveVideo) {
+        const vp = (j.parameters ?? {}) as { falEndpoint?: string; usePolling?: boolean }
+        if (!vp.usePolling || !j.falRequestId || !vp.falEndpoint) continue
+        // Someone already saved it — just settle the row
+        const already = await prisma.generatedImage.count({ where: { falRequestId: j.falRequestId } })
+        if (already > 0) {
+          await releaseQueueSlot(j.falRequestId, false).catch(() => {})
+          videoSettled++
+          continue
+        }
+        try {
+          const { NextRequest } = await import('next/server')
+          const { POST: videoStatus } = await import('@/app/api/video/status/route')
+          const res = await videoStatus(new NextRequest('http://internal/api/video/status', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              requestId: j.falRequestId,
+              falEndpoint: vp.falEndpoint,
+              prompt: j.prompt,
+              model: j.modelId,
+              ticketCost: j.ticketCost,
+              queuedAt: j.createdAt?.getTime(),
+            }),
+          }))
+          const data = (await res.json()) as { status?: string }
+          if (data?.status === 'completed' || data?.status === 'failed') videoSettled++
+        } catch (e) {
+          // Still rendering, or a transient fal error — next tick tries again
+        }
+      }
+      if (videoSettled > 0) console.log(`[cron-drain] settled ${videoSettled} video job(s)`)
+    } catch (e) {
+      console.error('[cron-drain] video settle pass failed:', e)
+    }
+
     // ── 1a-harvest. Save completed-at-fal jobs nobody is polling ─────────────
     // A job that fal COMPLETED but that is still 'processing' after the stale
     // threshold means the polling client is gone (tab closed mid-batch). We
@@ -132,7 +191,49 @@ export async function GET(request: Request) {
         permanentReferenceUrls?: string[]
         usePolling?: boolean
       } | null
-      if (j.modelType !== 'image' || !params?.usePolling || !j.falRequestId || !params.falEndpoint) continue
+      if (!params?.usePolling || !j.falRequestId || !params.falEndpoint) continue
+      if (j.modelType !== 'image' && j.modelType !== 'video') continue
+
+      // Video settles through /api/video/status's handler, which owns the R2
+      // re-host, the GeneratedImage row and releaseQueueSlot. Same trick as the
+      // chat submit path: call it as a function, no HTTP hop.
+      if (j.modelType === 'video') {
+        try {
+          const already = await prisma.generatedImage.count({ where: { falRequestId: j.falRequestId } })
+          if (already > 0) {
+            await releaseQueueSlot(j.falRequestId, false).catch(() => {})
+            harvested++
+            continue
+          }
+          const { NextRequest } = await import('next/server')
+          const { POST: videoStatus } = await import('@/app/api/video/status/route')
+          const res = await videoStatus(new NextRequest('http://internal/api/video/status', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              // No session here — settle as the job's owner.
+              ...(process.env.CRON_SECRET
+                ? { 'x-internal-key': process.env.CRON_SECRET, 'x-internal-user': String(j.userId) }
+                : {}),
+            },
+            body: JSON.stringify({
+              requestId: j.falRequestId,
+              falEndpoint: params.falEndpoint,
+              prompt: j.prompt,
+              model: j.modelId,
+              ticketCost: j.ticketCost,
+              queuedAt: j.createdAt?.getTime(),
+            }),
+          }))
+          const data = (await res.json()) as { status?: string }
+          if (data?.status === 'completed' || data?.status === 'failed') harvested++
+          console.log(`[cron] video harvest #${j.id} (${j.modelId}) → ${data?.status ?? 'unknown'}`)
+        } catch (e) {
+          console.error(`[cron] video harvest failed for #${j.id}:`, e)
+        }
+        continue
+      }
+
       try {
         // Idempotency: if images for this request were already saved (client
         // came back and harvested first), just settle the row.

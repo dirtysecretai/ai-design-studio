@@ -14,13 +14,37 @@ fal.config({
 // Body: { requestId, falEndpoint, prompt, model, duration, resolution, ticketCost, thumbnailUrl }
 export async function POST(request: NextRequest) {
   try {
-    // Authenticate — bearer API key (desktop app) or session cookie
-    const resolved = await resolveRequestUser(request);
-    if ('error' in resolved) return resolved.error;
-    const { user, apiAuth } = resolved;
-    if (apiAuth) {
-      const denied = requireScopes(apiAuth, 'jobs:read');
-      if (denied) return denied;
+    // Authenticate — bearer API key (desktop app), session cookie, or the
+    // server's own cron.
+    //
+    // The cron harvest calls this handler as a function to settle videos whose
+    // webhook never arrived. It has no session, so every harvest attempt was
+    // rejected and finished renders the user had already paid for sat at fal
+    // untouched. A shared secret the caller must already know closes that
+    // without opening the route: with CRON_SECRET unset nothing is trusted.
+    const cronSecret = process.env.CRON_SECRET
+    const internalKey = request.headers.get('x-internal-key')
+    const internalUserId = Number(request.headers.get('x-internal-user') ?? 0)
+    const trustedInternal =
+      !!cronSecret && internalKey === cronSecret && Number.isInteger(internalUserId) && internalUserId > 0
+
+    let user: { id: number; email: string }
+    if (trustedInternal) {
+      const found = await prisma.user.findUnique({
+        where: { id: internalUserId },
+        select: { id: true, email: true },
+      })
+      if (!found) return NextResponse.json({ error: 'Unknown user' }, { status: 400 })
+      user = found
+    } else {
+      const resolved = await resolveRequestUser(request);
+      if ('error' in resolved) return resolved.error;
+      const { user: sessionUser, apiAuth } = resolved;
+      if (apiAuth) {
+        const denied = requireScopes(apiAuth, 'jobs:read');
+        if (denied) return denied;
+      }
+      user = sessionUser
     }
 
     const {
@@ -43,8 +67,36 @@ export async function POST(request: NextRequest) {
     const status = await fal.queue.status(falEndpoint, { requestId, logs: false });
 
     if (status.status === 'COMPLETED') {
-      // Fetch the result
-      const result = await fal.queue.result<any>(falEndpoint, { requestId });
+      // Fetch the result.
+      //
+      // fal reports COMPLETED and then throws here when the job finished by
+      // REJECTING the input (a reference image over the model's 10MB limit is
+      // the common one). That throw used to propagate, so every poller read the
+      // shot as "still going" and waited on a job that was already dead. A
+      // validation error is a FAILED generation: say so, so the row fails, the
+      // tickets are refunded and the queue slot is released.
+      let result: any
+      try {
+        result = await fal.queue.result<any>(falEndpoint, { requestId });
+      } catch (err: any) {
+        const httpStatus = Number(err?.status ?? 0)
+        const detail = err?.body?.detail
+        const message = Array.isArray(detail)
+          ? detail.map((d: any) => d?.msg).filter(Boolean).join('; ')
+          : typeof detail === 'string' ? detail : String(err?.message || err)
+        // 4xx = the input was rejected and re-asking will never change that.
+        // 5xx / network = transient, so keep the job alive for the next poll.
+        if (httpStatus >= 400 && httpStatus < 500) {
+          const reason = message.slice(0, 500) || 'The model rejected this request'
+          // Close the row, refund and free the slot — the same bookkeeping the
+          // ERROR branch below does. Returning the verdict without it left the
+          // job 'processing' forever, still holding a concurrency slot.
+          const { releaseQueueSlot } = await import('@/lib/admin-queue-helpers')
+          await releaseQueueSlot(requestId, true, reason).catch(() => {})
+          return NextResponse.json({ status: 'failed', error: reason });
+        }
+        throw err
+      }
 
       const falVideoUrl = result.data?.video?.url;
       if (!falVideoUrl) {

@@ -5,14 +5,14 @@ import { requireChatHubAdmin } from '@/lib/chat-hub-auth'
 import { getChatModelForUser } from '@/lib/chat-hub-models'
 import {
   loadUserKeys, loadChatPrefs, resolveChatModel, buildRoster,
-  rosterInstructions, mediaInstructions, toolsInstructions, modeInstructions,
+  rosterInstructions, mediaInstructions, toolsInstructions, modeInstructions, movieFormatInstructions, providerFilterWarning,
   identityInstructions, coreDisciplineInstructions, skillOn,
   skillSummariesInstructions, loadGlobalMemory,
   sanitizeAgentMode, buildHistoryMessages, makeAgentTools, agentStreamResponse,
   maybeCompactChat, loadTicketBalance, persistFinalEdit, inlineWeakModelImages,
   type RoutingMap, type AgentStep, type SkillSet,
 } from '@/lib/chat-hub-agent'
-import { sanitizeSkillIds } from '@/lib/chat-hub-skills'
+import { sanitizeSkillIds, movieFormatSeconds } from '@/lib/chat-hub-skills'
 import { isChatCancelRequested, clearChatCancel } from '@/lib/chat-hub-cancel'
 import { generateChatTitle } from '@/lib/chat-hub-title'
 
@@ -157,7 +157,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     skillOn(skillSet, 'delegation') ? rosterInstructions(roster) : '',
     // Plan mode gets the catalog too — a thorough plan names real models,
     // settings and ticket costs (modeInstructions overrides the tool rules)
-    mediaInstructions(ticketBalance, prefs.modelPrefs, skillSet),
+    mediaInstructions(ticketBalance, prefs.modelPrefs, skillSet, true),
+    providerFilterWarning(content, skillSet),
+    movieFormatInstructions(skillSet, prefs.movieFormat),
     agentMode === 'plan' ? '' : toolsInstructions(chat.projectId !== null, skillSet),
     globalMemory,
     chat.project?.memory?.trim()
@@ -193,6 +195,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     allowedImages,
     projectId: chat.projectId,
     skills: skillSet,
+    // So assemble_film can object when the cut lands far under the runtime
+    // the user picked, rather than trusting the model to notice.
+    targetSeconds: movieFormatSeconds(prefs.movieFormat),
   })
 
   // Anthropic prompt caching (probe-verified on ai@7): a cache_control marker
@@ -368,7 +373,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
             role: 'assistant',
             content: text,
             model,
-            imageUrls: generatedUrls,
+            imageUrls: [...new Set(generatedUrls)].filter(Boolean),
             metadata: JSON.parse(JSON.stringify({
               usage, finishReason, routes,
               runMs: elapsedMs,

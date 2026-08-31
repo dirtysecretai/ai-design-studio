@@ -5,7 +5,7 @@ import { requireChatHubAdmin } from '@/lib/chat-hub-auth'
 import { getChatModelForUser } from '@/lib/chat-hub-models'
 import {
   loadUserKeys, loadChatPrefs, resolveChatModel, buildRoster,
-  rosterInstructions, mediaInstructions, toolsInstructions, modeInstructions,
+  rosterInstructions, mediaInstructions, toolsInstructions, modeInstructions, movieFormatInstructions,
   identityInstructions, coreDisciplineInstructions, skillOn,
   skillSummariesInstructions, loadGlobalMemory,
   sanitizeAgentMode, buildHistoryMessages, makeAgentTools, agentStreamResponse,
@@ -14,6 +14,8 @@ import {
   inlineWeakModelImages,
   type RoutingMap, type AgentStep, type PendingCall, type PlanBudget, type SkillSet,
 } from '@/lib/chat-hub-agent'
+import { executeRenderShots, executeCheckShots, executeAssembleFilm, executeCreateAudio, executeExtractFrames } from '@/lib/chat-film-tools'
+import { movieFormatSeconds } from '@/lib/chat-hub-skills'
 import { sanitizeSkillIds } from '@/lib/chat-hub-skills'
 import { isChatCancelRequested, clearChatCancel } from '@/lib/chat-hub-cancel'
 import { getPlaybook } from '@/lib/chat-hub-playbooks'
@@ -191,7 +193,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     chat.systemPrompt?.trim() || '',
     skillSummariesInstructions(skillSet, agentMode === 'plan'),
     skillOn(skillSet, 'delegation') ? rosterInstructions(roster) : '',
-    mediaInstructions(ticketBalance, prefs.modelPrefs, skillSet),
+    mediaInstructions(ticketBalance, prefs.modelPrefs, skillSet, true),
+    movieFormatInstructions(skillSet, prefs.movieFormat),
     toolsInstructions(chat.projectId !== null, skillSet),
     globalMemory,
     chat.project?.memory?.trim()
@@ -340,8 +343,13 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
                 { user: { id: user.id, email: user.email }, attachedImageUrls, allowedImages },
               )
               if (out && 'mediaUrl' in out) {
-                generatedUrls.push(out.mediaUrl)
-                allowedImages.add(out.mediaUrl) // usable by chained calls this turn
+                // A submitted-but-unrendered video has no URL yet — an empty
+                // string here becomes <img src=""> in the saved reply, which
+                // the browser resolves as the page and re-downloads.
+                if (out.mediaUrl) {
+                  generatedUrls.push(out.mediaUrl)
+                  allowedImages.add(out.mediaUrl) // usable by chained calls this turn
+                }
                 // Reflect what actually ran (user may have changed the config)
                 step.settings = out.settings
                 step.cost = out.ticketCost
@@ -419,6 +427,31 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
                 attachedImageUrls,
               })
               if (out && 'imageUrl' in out) generatedUrls.push(out.imageUrl)
+            } else if (
+              call.toolName === 'render_shots' || call.toolName === 'check_shots'
+              || call.toolName === 'assemble_film' || call.toolName === 'create_audio'
+              || call.toolName === 'extract_frames'
+            ) {
+              // The film tools pause for approval too (render_shots and
+              // create_audio spend tickets), so approving one used to answer
+              // "Unknown tool" and end the movie right there.
+              const filmCtx = {
+                user: { id: user.id, email: user.email },
+                attachedImageUrls,
+                allowedImages,
+                generatedUrls,
+                targetSeconds: movieFormatSeconds(prefs.movieFormat),
+              }
+              out =
+                call.toolName === 'render_shots' ? await executeRenderShots(call.input as any, filmCtx as any)
+                : call.toolName === 'check_shots' ? await executeCheckShots(call.input as any, filmCtx as any)
+                : call.toolName === 'assemble_film' ? await executeAssembleFilm(call.input as any, filmCtx as any)
+                : call.toolName === 'create_audio' ? await executeCreateAudio(call.input as any, filmCtx as any)
+                : await executeExtractFrames(call.input as any, filmCtx as any)
+              if (out && typeof out.mediaUrl === 'string' && out.mediaUrl) {
+                generatedUrls.push(out.mediaUrl)
+                allowedImages.add(out.mediaUrl)
+              }
             } else {
               out = { error: `Unknown tool ${call.toolName}` }
             }
@@ -429,11 +462,22 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           if (out?.error) {
             step.status = 'error'
             step.error = String(out.error).slice(0, 500)
+          } else if (Array.isArray(out?.queueIds) && out.queueIds.length > 0) {
+            // Shots submitted, not rendered: the step stays running and carries
+            // the ids so film-status can settle them after this turn ends.
+            step.status = 'running'
+            ;(step as any).queueIds = (out.queueIds as unknown[]).filter((n): n is number => typeof n === 'number')
+            step.resultPreview = String(out?.note ?? '').slice(0, 4000) || undefined
+          } else if (out?.pending === true && typeof out?.queueId === 'number') {
+            step.status = 'running'
+            ;(step as any).queueId = out.queueId
+            step.resultPreview = String(out?.note ?? '').slice(0, 4000) || undefined
           } else {
             step.status = 'done'
             step.resultPreview = String(out?.answer ?? out?.note ?? '').slice(0, 4000) || undefined
             if (typeof out?.imageUrl === 'string') step.imageUrl = out.imageUrl
-            if (typeof out?.mediaUrl === 'string') step.imageUrl = out.mediaUrl
+            // An empty mediaUrl is a video with no picture yet, not a result
+            if (typeof out?.mediaUrl === 'string' && out.mediaUrl) step.imageUrl = out.mediaUrl
           }
           step.ms = Date.now() - t0
           sendEvent({ t: 'step', s: { ...step } })
@@ -593,7 +637,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           where: { id: row.id },
           data: {
             content: newText ? (row.content ? `${row.content}\n\n${newText}` : newText) : row.content,
-            imageUrls: { set: [...row.imageUrls, ...generatedUrls] },
+            // Same reason: a shot may have settled into this row between the
+            // read above and this write, and an empty url is a pending video
+            // that has no picture yet.
+            imageUrls: { set: [...new Set([...row.imageUrls, ...generatedUrls])].filter(Boolean) },
             metadata: JSON.parse(JSON.stringify({
               ...meta,
               // Total-run stopwatch: accumulate this continuation's runtime
