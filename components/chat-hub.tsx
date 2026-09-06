@@ -641,6 +641,23 @@ function placeholderLabel(step: AgentStep): string {
  * talking \u2014 shown in their own bubble it looked like the app was writing
  * messages on their behalf.
  */
+/**
+ * Does this step still owe shots?
+ *
+ * Keyed on the RESULTS, not on `status`. A render_shots step written with
+ * status "done" while carrying nine queue ids used to be skipped by both the
+ * poller and the settler, so the shots rendered at fal and never reached the
+ * chat. A shot is outstanding until its own result lands.
+ */
+function shotsOutstanding(st: any): boolean {
+  if (!st || st.status === "error" || st.status === "denied" || st.status === "superseded") return false
+  if (Array.isArray(st.queueIds) && st.queueIds.length > 0) {
+    const done = st.shotResults ?? {}
+    return st.queueIds.some((q: number) => done[String(q)] === undefined)
+  }
+  return typeof st.queueId === "number" && !st.imageUrl
+}
+
 function isShotHandback(content: string | null | undefined): boolean {
   return typeof content === "string" && content.startsWith("[SHOTS SETTLED")
 }
@@ -655,7 +672,7 @@ function shotHandbackSummary(content: string): string {
     .trim() || "Shots settled."
 }
 
-const VideoTile = memo(function VideoTile({ src, className, onExpand }: { src: string; className?: string; onExpand?: () => void }) {
+const VideoTile = memo(function VideoTile({ src, className, onExpand, modelLabel }: { src: string; className?: string; onExpand?: () => void; modelLabel?: string | null }) {
   const ref = useRef<HTMLVideoElement>(null)
   useEffect(() => {
     const el = ref.current
@@ -704,6 +721,17 @@ const VideoTile = memo(function VideoTile({ src, className, onExpand }: { src: s
       >
         <Maximize2 size={13} />
       </button>
+      {/* Which engine shot this. A film mixes models per shot by design, so
+          "why does that one look different" is answerable at a glance. Sits
+          bottom-left, clear of the fullscreen button and the scrub bar. */}
+      {modelLabel && (
+        <span
+          className="absolute bottom-9 left-1.5 z-10 px-1.5 py-0.5 rounded-md bg-black/65 border border-white/10 text-[9px] font-medium tracking-wide text-white/85 pointer-events-none max-w-[calc(100%-1rem)] truncate"
+          title={`Rendered with ${modelLabel}`}
+        >
+          {modelLabel}
+        </span>
+      )}
     </div>
   )
 })
@@ -875,6 +903,111 @@ export default function ChatHub({
   // background — no card boxes, slim rows with expand chevrons
   const floating = layout.style === "floating"
 
+  // ── Composer drafts, per chat, on the account ────────────────────────────
+  // An unsent message is work the user did. Losing it to a refresh (or to
+  // opening the chat on another device) is the same class of bug as losing a
+  // generation: it lived only in React state. Drafts live in
+  // portalPreferences.chatHubDrafts, keyed by chat id, so they survive a
+  // reload and follow the account.
+  const draftsRef = useRef<Record<string, string>>({})
+  const draftsLoadedRef = useRef(false)
+  const draftSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  /** Key for the chat being composed into — "new" before a chat exists. */
+  const draftKey = useCallback(
+    (id: number | null) => (typeof id === "number" && id > 0 ? String(id) : "new"),
+    [],
+  )
+
+  /**
+   * Write the draft map back. Debounced, because this fires on every keystroke
+   * and portalPreferences is a whole-row JSON update. Empty drafts are dropped
+   * and the map is capped so a year of chats cannot grow the column unbounded.
+   */
+  const persistDrafts = useCallback((immediate = false) => {
+    if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current)
+    const write = () => {
+      const entries = Object.entries(draftsRef.current)
+        .filter(([, v]) => typeof v === "string" && v.trim().length > 0)
+        .slice(-40)
+      const next = Object.fromEntries(entries)
+      draftsRef.current = next
+      fetch("/api/user/preferences", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chatHubDrafts: next }),
+      }).catch(() => {})
+    }
+    if (immediate) write()
+    else draftSaveTimer.current = setTimeout(write, 900)
+  }, [])
+
+  /** The message left the composer — drop its draft immediately. */
+  const clearDraft = useCallback((id: number | null) => {
+    delete draftsRef.current[draftKey(id)]
+    persistDrafts(true)
+  }, [draftKey, persistDrafts])
+
+  /** Record what is in the composer for a chat, then schedule a save. */
+  const noteDraft = useCallback((id: number | null, text: string) => {
+    if (!draftsLoadedRef.current) return // don't overwrite before the load lands
+    const k = draftKey(id)
+    if (text.trim()) draftsRef.current[k] = text
+    else delete draftsRef.current[k]
+    persistDrafts()
+  }, [draftKey, persistDrafts])
+
+  // Two holes the debounce leaves open:
+  //  - a refresh inside the 900ms window loses the last keystrokes, which is
+  //    exactly the case this feature exists for, so flush on the way out;
+  //  - another device may have edited the draft since this tab loaded, so
+  //    re-read when the tab comes back rather than trusting stale state.
+  useEffect(() => {
+    const flush = () => {
+      if (!draftsLoadedRef.current) return
+      const typed = inputRef.current?.value ?? ""
+      const k = draftKey(activeChatIdRef.current)
+      if (typed.trim()) draftsRef.current[k] = typed
+      else delete draftsRef.current[k]
+      const body = JSON.stringify({ chatHubDrafts: draftsRef.current })
+      // keepalive: a normal fetch is cancelled when the page goes away
+      try {
+        fetch("/api/user/preferences", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body,
+          keepalive: true,
+        }).catch(() => {})
+      } catch {}
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") { flush(); return }
+      // Back in view — pick up a draft written on another device
+      fetch("/api/user/preferences", { cache: "no-store" })
+        .then(r => (r.ok ? r.json() : null))
+        .then(d => {
+          const drafts = d?.preferences?.chatHubDrafts
+          if (!drafts || typeof drafts !== "object" || Array.isArray(drafts)) return
+          draftsRef.current = Object.fromEntries(
+            Object.entries(drafts as Record<string, unknown>)
+              .filter(([, v]) => typeof v === "string" && (v as string).trim().length > 0)
+              .map(([k, v]) => [k, v as string]),
+          )
+          const mine = draftsRef.current[draftKey(activeChatIdRef.current)] ?? ""
+          // Only adopt the remote draft when this tab's box is empty — never
+          // overwrite something the user is in the middle of typing here.
+          setInput(prev => (prev.trim() ? prev : mine))
+        })
+        .catch(() => {})
+    }
+    window.addEventListener("pagehide", flush)
+    document.addEventListener("visibilitychange", onVisibility)
+    return () => {
+      window.removeEventListener("pagehide", flush)
+      document.removeEventListener("visibilitychange", onVisibility)
+    }
+  }, [draftKey])
+
   // Load saved personas + custom models from account preferences
   useEffect(() => {
     fetch("/api/user/preferences", { cache: "no-store" })
@@ -896,6 +1029,20 @@ export default function ChatHub({
         setDefaultEmployeeId(typeof de === "string" && de ? de : null)
         const mf = d?.preferences?.chatHubMovieFormat
         if (typeof mf === "string" && MOVIE_FORMATS.some(f => f.id === mf)) setMovieFormatState(mf)
+        // Unsent composer text, per chat. Restore the one for whatever chat is
+        // open (or the "new chat" draft when none is).
+        const drafts = d?.preferences?.chatHubDrafts
+        if (drafts && typeof drafts === "object" && !Array.isArray(drafts)) {
+          draftsRef.current = Object.fromEntries(
+            Object.entries(drafts as Record<string, unknown>)
+              .filter(([, v]) => typeof v === "string" && (v as string).trim().length > 0)
+              .map(([k, v]) => [k, v as string]),
+          )
+        }
+        draftsLoadedRef.current = true
+        const mine = draftsRef.current[draftKey(activeChatIdRef.current)]
+        // Never clobber something typed while this request was in flight
+        if (mine) setInput(prev => (prev.trim() ? prev : mine))
         const customs = d?.preferences?.chatHubCustomModels
         if (Array.isArray(customs)) {
           setCustomModels(customs.filter((m: any) =>
@@ -1098,6 +1245,54 @@ export default function ChatHub({
   // Batches already handed back, so a re-run of the poll cannot send twice.
   const continuedRef = useRef<Set<string>>(new Set())
 
+  // A film that has all its footage and no run in flight must be picked back
+  // up, whatever happened earlier.
+  //
+  // The hand-back used to be sent only on the exact poll tick where the last
+  // shot settled. Miss that tick \u2014 the page was closed, another poll marked
+  // the run finished first, the settle happened server-side \u2014 and the film
+  // sat there with every shot rendered and nothing to assemble it. This checks
+  // the STATE instead of the moment: shots all landed, nothing pending, no
+  // assembly yet, so resume.
+  useEffect(() => {
+    if (!activeChatId || streaming) return
+    if (messages.some(m => m.pendingApproval?.calls?.length)) return
+    const last = messages[messages.length - 1]
+    if (!last || last.role !== "assistant") return
+
+    // Every shot this film submitted, and whether its result has landed
+    let submitted = 0
+    let landed = 0
+    let assembled = false
+    for (const m of messages) {
+      for (const st of (m.agentSteps ?? []) as any[]) {
+        if (st?.tool === "assemble_film" && st.status === "done") assembled = true
+        if (Array.isArray(st?.queueIds)) {
+          const res = st.shotResults ?? {}
+          for (const q of st.queueIds) {
+            submitted++
+            if (res[String(q)] !== undefined) landed++
+          }
+        }
+      }
+    }
+    if (assembled || submitted === 0 || landed < submitted) return
+
+    const key = `resume:${activeChatId}:${last.id}:${landed}`
+    if (continuedRef.current.has(key)) return
+    continuedRef.current.add(key)
+    void sendMessage(
+      activeChatId,
+      "[SHOTS SETTLED \u2014 all " + landed + " rendered]"
+      + String.fromCharCode(10)
+      + "Every shot you submitted has finished and the footage is in this conversation. "
+      + "Continue the production: check the shots, judge them from their frames, then ASSEMBLE the film "
+      + "with assemble_film and score it. Do not stop here and do not re-submit shots that already rendered \u2014 "
+      + "the remaining work is the cut itself.",
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChatId, messages, streaming])
+
   // Shots submitted to the render queue outlive the turn that ordered them:
   // create_media returns a queue id and the reply finishes while fal is still
   // working. Poll until every shot in the newest reply has settled, then
@@ -1109,10 +1304,7 @@ export default function ChatHub({
     // queueId. Watching only the singular field meant a batch-rendered film
     // never started polling, so the shots never came back into the chat.
     const hasPendingShots = messages.some(m =>
-      (m.agentSteps ?? []).some((st: any) =>
-        st?.status === "running"
-        && ((typeof st.queueId === "number" && !st.imageUrl)
-          || (Array.isArray(st.queueIds) && st.queueIds.length > 0))))
+      (m.agentSteps ?? []).some((st: any) => shotsOutstanding(st)))
     if (!hasPendingShots) return
     // NEVER auto-continue while an approval is on screen. A reply that paused
     // for approval has emitted tool calls the model still owes results for;
@@ -1238,6 +1430,20 @@ export default function ChatHub({
   // Full view: the image takes the ENTIRE popup — all chrome hidden, toggled
   // back via the floating eye button (mirrors the portal feed modal)
   const [viewerFull, setViewerFull] = useState(false)
+
+  // Escape closes the media viewer. The header is a wrapping flex row, so on a
+  // narrow tablet the X can end up somewhere awkward, and a viewer that cannot
+  // be dismissed forces a page reload — which is how a mid-run generation got
+  // lost. A keyboard escape hatch costs nothing and always works.
+  useEffect(() => {
+    if (!mediaViewer) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { setMediaViewer(null); setViewerFull(false) }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [mediaViewer])
+
   const [viewerPanel, setViewerPanel] = useState<"left" | "right" | "bottom" | "hidden">("right")
   const [addRefState, setAddRefState] = useState<"idle" | "saving" | "done" | "error">("idle")
   // "Edit" from the media viewer arms the composer instead of an inline prompt:
@@ -1263,6 +1469,13 @@ export default function ChatHub({
   const [layerBusy, setLayerBusy] = useState(false)
   const [layerErr, setLayerErr] = useState<string | null>(null)
   const [layersOpen, setLayersOpen] = useState(false)
+
+  // A run starting while the layer editor is open would let an edit be applied
+  // into a reply the run is still writing. Shut it, leaving the image visible.
+  useEffect(() => {
+    if (streaming && layersOpen) setLayersOpen(false)
+  }, [streaming, layersOpen])
+
   // Cursor tool for the layer editor: select (move/resize), brush (paint color
   // onto the selected layer), erase (knock pixels out of the selected layer)
   const [cursorMode, setCursorMode] = useState<"select" | "brush" | "erase">("select")
@@ -2705,6 +2918,19 @@ export default function ChatHub({
   const openChat = useCallback(async (chatId: number) => {
     abortRef.current?.abort()
     stopAwaitPoll()
+    // Carry the composer with the chat it belongs to: bank what is in the box
+    // for the chat being left, then restore whatever was pending in the one
+    // being opened.
+    if (draftsLoadedRef.current) {
+      const leaving = draftKey(activeChatIdRef.current)
+      const typed = inputRef.current?.value ?? ""
+      if (typed.trim()) draftsRef.current[leaving] = typed
+      else delete draftsRef.current[leaving]
+      persistDrafts(true)
+      const incoming = draftsRef.current[draftKey(chatId)] ?? ""
+      setInput(incoming)
+      if (inputRef.current) inputRef.current.style.height = "auto"
+    }
     setActiveChatId(chatId)
     setChatLoading(true)
     setError(null)
@@ -3344,6 +3570,7 @@ export default function ChatHub({
       const url = pendingEdit.url
       setPendingEdit(null)
       setInput("")
+      clearDraft(activeChatId)
       if (inputRef.current) inputRef.current.style.height = "auto"
       sendMessage(activeChatId, msg, [url])
       return
@@ -3352,11 +3579,13 @@ export default function ChatHub({
     if (queueMode && !createMode && (pendingApprovalExists || streaming)) {
       setQueued(prev => [...prev, { content, extraImages: [] }])
       setInput("")
+      clearDraft(activeChatId)
       if (inputRef.current) inputRef.current.style.height = "auto"
       return
     }
     if (streaming) return
     setInput("")
+    clearDraft(activeChatId)
     if (inputRef.current) inputRef.current.style.height = "auto"
     if (createMode) sendCreate(activeChatId, content, createMode)
     else sendMessage(activeChatId, content)
@@ -3372,6 +3601,8 @@ export default function ChatHub({
     const chat = await createChat(null)
     if (!chat) return
     setInput("")
+    // The "new chat" draft became this chat's first message
+    clearDraft(null)
     if (inputRef.current) inputRef.current.style.height = "auto"
     setActiveChatId(chat.id)
     activeChatIdRef.current = chat.id
@@ -4628,7 +4859,7 @@ export default function ChatHub({
                   ref={inputRef}
                   rows={3}
                   value={input}
-                  onChange={e => { setInput(e.target.value); autoGrow(e.target); historyIndexRef.current = null }}
+                  onChange={e => { setInput(e.target.value); noteDraft(activeChatId, e.target.value); autoGrow(e.target); historyIndexRef.current = null }}
                   onKeyDown={handleComposerKey}
                   placeholder={composerPlaceholder}
                   className="w-full bg-transparent resize-none outline-none text-[13px] leading-relaxed text-white placeholder:text-slate-500 max-h-[320px]"
@@ -4664,17 +4895,11 @@ export default function ChatHub({
                 // needs it in that slot, but it is NOT something the user wrote.
                 // Showing it in their own bubble read as the app sending messages
                 // on their behalf, so it renders as the status line it actually is.
-                isShotHandback(m.content) ? (
-                  <div key={m.id} className="self-center w-full max-w-[85%] my-1">
-                    <div style={{ fontSize: Math.max(11, chatTextPx - 2) }}
-                      className="rounded-xl border border-slate-600/40 bg-slate-800/40 px-3 py-2 text-slate-400 whitespace-pre-wrap break-words">
-                      <span className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-slate-500 mb-1">
-                        <Clapperboard size={11} /> Render queue — automatic
-                      </span>
-                      {shotHandbackSummary(m.content ?? "")}
-                    </div>
-                  </div>
-                ) : (
+                // The render hand-back is how the run survives the 300s
+                // function limit — it is machinery, and showing it made one
+                // film read as a stop-start conversation in the user's own
+                // voice. Hidden: a film should look like a single run.
+                isShotHandback(m.content) ? null : (
                 <div key={m.id} className="self-end max-w-[85%] flex flex-col items-end gap-1">
                   {(m.imageUrls?.length ?? 0) > 0 && (
                     <div className="flex flex-wrap justify-end gap-1">
@@ -5133,19 +5358,59 @@ export default function ChatHub({
                     // A render_shots step is N shots in one step, so it gets N
                     // placeholder tiles — the film shows up as it renders
                     // instead of the reply looking empty until every shot lands.
+                    // A queue id belongs to ONE tile no matter how many steps
+                    // mention it. Two steps claiming the same shots (a retry, a
+                    // guarded re-submit) drew a placeholder each, so four shots
+                    // showed as eight.
+                    const claimedShots = new Set<number>()
                     const pendingMedia = mediaSteps.flatMap(s => {
                       if (s.status !== "running") return []
                       const ids = (s as any).queueIds
                       if (Array.isArray(ids) && ids.length) {
-                        const landed = Object.keys((s as any).shotResults ?? {}).length
+                        const results = (s as any).shotResults ?? {}
+                        const mine = ids.filter((id: number) => {
+                          if (claimedShots.has(id)) return false
+                          claimedShots.add(id)
+                          return results[String(id)] === undefined // not landed yet
+                        })
                         // Each placeholder needs its OWN key: the tiles are keyed
                         // on the step id, and repeating one object N times gave
                         // N tiles the same key.
-                        return Array.from({ length: Math.max(0, ids.length - landed) },
-                          (_, k) => ({ ...s, id: `${s.id}#${k}` }))
+                        //
+                        // A batch step has no single `model` — the shots mix
+                        // engines — so the video placeholders showed no model
+                        // while the image ones did. Give each tile the model
+                        // that is actually rendering it.
+                        const shotModels = (s as any).shotModels as Record<string, string> | undefined
+                        return mine.map((id: number) => ({
+                          ...s,
+                          id: `${s.id}#${id}`,
+                          model: shotModels?.[String(id)] ?? s.model,
+                        }))
                       }
                       return s.imageUrl ? [] : [s]
                     })
+                    // url -> the model that produced it. Two sources: a single
+                    // create_media step (its own model + imageUrl) and a
+                    // render_shots batch, which mixes models across shots and
+                    // records them per queue id.
+                    const modelByUrl = new Map<string, string>()
+                    for (const st of mediaSteps) {
+                      const shotResults = (st as any).shotResults as Record<string, string> | undefined
+                      const shotModels = (st as any).shotModels as Record<string, string> | undefined
+                      if (shotResults) {
+                        for (const [qid, url] of Object.entries(shotResults)) {
+                          const mid = shotModels?.[qid]
+                          if (mid && typeof url === "string" && !url.startsWith("ERROR:")) {
+                            modelByUrl.set(url, getCreateModel(mid)?.label ?? mid)
+                          }
+                        }
+                      }
+                      if (st.imageUrl && st.model) {
+                        modelByUrl.set(st.imageUrl, getCreateModel(st.model)?.label ?? st.model)
+                      }
+                    }
+
                     const firstMediaSeg = mediaSteps.length
                       ? Math.min(...mediaSteps.map(s => s.seg ?? 0))
                       : null
@@ -5170,6 +5435,7 @@ export default function ChatHub({
                               : "columns-2 sm:columns-3 md:columns-4 gap-2"}>
                           {urls.map((u, i) => isVideoUrl(u) ? (
                             <VideoTile key={i} src={u}
+                              modelLabel={modelByUrl.get(u) ?? null}
                               onExpand={() => openMediaViewer(m, u)}
                               className="w-full mb-2 break-inside-avoid rounded-lg border border-white/10" />
                           ) : (
@@ -5213,7 +5479,11 @@ export default function ChatHub({
                                     {placeholderLabel(s)}
                                   </span>
                                   {s.model && (
-                                    <span className="text-[8px] text-slate-600 truncate max-w-full">{labelFor(s.model)}</span>
+                                    <span className="text-[8px] text-slate-600 truncate max-w-full">
+                                      {/* these are MEDIA models, so resolve
+                                          against the create catalog first */}
+                                      {getCreateModel(s.model)?.label ?? labelFor(s.model)}
+                                    </span>
                                   )}
                                 </div>
                               </div>
@@ -5245,7 +5515,16 @@ export default function ChatHub({
                       for (const u of editUrls) if (revisedUrls.has(u)) draftEditUrls.add(u)
                       const latestEdit = editUrls[editUrls.length - 1]
                       if (latestEdit) draftEditUrls.delete(latestEdit)
-                      const mainUrls = (m.imageUrls ?? []).filter(u => !draftEditUrls.has(u))
+                      // Images a FINISHED step produced but the row has not
+                      // recorded yet. imageUrls is written when the reply is
+                      // finalized; mid-run (or after a reload mid-run) the only
+                      // record is the step itself, so a generated image
+                      // vanished from the chat until the whole run ended.
+                      const fromSteps = mediaSteps
+                        .filter(st => st.status === "done" && typeof st.imageUrl === "string" && st.imageUrl)
+                        .map(st => st.imageUrl as string)
+                      const mainUrls = [...new Set([...(m.imageUrls ?? []), ...fromSteps])]
+                        .filter(u => !draftEditUrls.has(u))
                       return (
                         <div className={floating ? "py-1" : "rounded-lg border border-white/10 bg-black/20 p-2"}>
                           <div className="flex items-center gap-1.5 pb-0.5">
@@ -5447,18 +5726,23 @@ export default function ChatHub({
                     // Shots that outlive the reply keep it unsettled: stamping
                     // "Done" on a run whose renders have not landed reads as a
                     // finished job that never happened.
-                    const shotsRendering = (m.agentSteps ?? []).some((st: any) =>
-                      st?.status === "running"
-                      && ((typeof st.queueId === "number" && !st.imageUrl)
-                        || (Array.isArray(st.queueIds) && st.queueIds.length > 0)))
+                    const shotsRendering = (m.agentSteps ?? []).some((st: any) => shotsOutstanding(st))
                     // A film runs across several replies: shots settle, the
                     // queue hands them back, the run picks up again. Stamping
                     // "Done" on the reply that happens to end first says the job
                     // is finished when the next pass has not even started.
                     const lastRow = messages[messages.length - 1]
+                    // Shots submitted in an EARLIER reply are still this film's
+                    // work. A later reply that only re-checked them (or was
+                    // blocked by the in-flight guard) has no running step of its
+                    // own, so it used to stamp "Done - no media" while four
+                    // shots were still on the render farm.
+                    const filmStillRunning = messages.some(mm =>
+                      (mm.agentSteps ?? []).some((st: any) => shotsOutstanding(st)))
                     const continuationPending =
                       m.id === lastMsgId
-                      && !!lastRow && lastRow.role === "user" && isShotHandback(lastRow.content)
+                      && ((!!lastRow && lastRow.role === "user" && isShotHandback(lastRow.content))
+                        || filmStillRunning)
                     const settled = !m.pendingApproval && !shotsRendering && !continuationPending
                       && !((streaming || awaitingReply) && m.id === lastMsgId)
                     // "Done" requires SUBSTANTIVE work — playbook loads and
@@ -5479,7 +5763,9 @@ export default function ChatHub({
                           <span className="text-[9px] text-slate-600">
                             {shotsRendering
                               ? "they land here on their own, then the run continues"
-                              : "the render queue reported back — picking the film up again"}
+                              : filmStillRunning
+                                ? "shots from this film are still rendering — the run continues when they land"
+                                : "the render queue reported back — picking the film up again"}
                           </span>
                         </div>
                       )
@@ -5999,7 +6285,7 @@ export default function ChatHub({
                 ref={inputRef}
                 rows={1}
                 value={input}
-                onChange={e => { setInput(e.target.value); autoGrow(e.target); historyIndexRef.current = null }}
+                onChange={e => { setInput(e.target.value); noteDraft(activeChatId, e.target.value); autoGrow(e.target); historyIndexRef.current = null }}
                 onKeyDown={handleComposerKey}
                 placeholder={composerPlaceholder}
                 style={{ fontSize: chatTextPx, minHeight: 72 }}
@@ -6100,7 +6386,20 @@ export default function ChatHub({
       {/* ── Media viewer popup — zoomable preview, movable info panel,
              Add-to-refs / Edit actions (portal-v2 session-feed style) ── */}
       {mediaViewer && typeof document !== "undefined" && createPortal(
-        <div className={`fixed inset-0 z-[99999] flex items-center justify-center ${viewerFull ? "p-0" : "p-3 sm:p-6"}`} onClick={() => setMediaViewer(null)}>
+        <div
+          className={`fixed inset-0 z-[99999] flex items-center justify-center ${viewerFull ? "p-0" : "p-3 sm:p-6"}`}
+          onClick={() => setMediaViewer(null)}
+          onPointerUp={e => {
+            // Touch: close on pointerup and swallow the ghost click, the same
+            // way the header's X does — a tap on the backdrop that only fired
+            // `click` could be eaten by the element underneath.
+            if (e.pointerType !== "touch" || e.target !== e.currentTarget) return
+            setMediaViewer(null)
+            const swallow = (ev: MouseEvent) => { ev.preventDefault(); ev.stopPropagation() }
+            window.addEventListener("click", swallow, { capture: true, once: true })
+            setTimeout(() => window.removeEventListener("click", swallow, { capture: true } as any), 400)
+          }}
+        >
           <div className="absolute inset-0 bg-black/85 backdrop-blur-sm" />
           <div
             className={viewerFull
@@ -6124,7 +6423,7 @@ export default function ChatHub({
             )}
             {/* Header: identity + zoom + layout controls */}
             {!viewerFull && (
-            <div className="flex items-center gap-2 px-3 sm:px-4 py-2 border-b border-white/5 shrink-0 flex-wrap">
+            <div className="relative z-20 flex items-center gap-2 px-3 sm:px-4 py-2 border-b border-white/5 shrink-0 flex-wrap">
               {mediaViewer.isRef ? (
                 <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Reference image</span>
               ) : (
@@ -6164,7 +6463,11 @@ export default function ChatHub({
                   </button>
                 </div>
               )}
-              {mediaViewer.recipe && (
+              {/* Editing is disabled while the model is working: re-rendering a
+                  layer mid-run competes with the run for the same conversation
+                  and the result lands in a reply that has already moved on.
+                  The viewer stays open as display-only. */}
+              {mediaViewer.recipe && !streaming && (
                 <button
                   onClick={() => {
                     setLayersOpen(o => {
@@ -6219,7 +6522,7 @@ export default function ChatHub({
                   setTimeout(() => document.removeEventListener("click", swallow, true), 400)
                   setMediaViewer(null)
                 }}
-                className="relative z-10 p-2.5 -m-1 rounded-md text-slate-400 hover:text-white hover:bg-white/10">
+                className="relative z-30 shrink-0 p-2.5 rounded-md text-slate-400 hover:text-white hover:bg-white/10">
                 <X size={15} />
               </button>
             </div>

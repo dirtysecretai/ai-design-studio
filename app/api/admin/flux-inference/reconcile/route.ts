@@ -4,6 +4,7 @@ import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/clien
 import { getUserFromSession } from '@/lib/auth'
 import { checkIsAdmin } from '@/lib/admin-check'
 import prisma from '@/lib/prisma'
+import { jsonPrivate } from '@/lib/api-json'
 
 const PUBLIC_URL = (process.env.R2_PUBLIC_URL || '').replace(/\/$/, '')
 
@@ -21,12 +22,12 @@ const PUBLIC_URL = (process.env.R2_PUBLIC_URL || '').replace(/\/$/, '')
 export async function POST(req: Request) {
   const token = (await cookies()).get('session')?.value
   const sessionUser = token ? await getUserFromSession(token) : null
-  if (!sessionUser) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!sessionUser) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
   if (!await checkIsAdmin(sessionUser.email ?? '')) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!process.env.R2_ENDPOINT || !process.env.R2_BUCKET_NAME) {
-    return NextResponse.json({ error: 'R2 not configured' }, { status: 500 })
+    return jsonPrivate({ error: 'R2 not configured' }, { status: 500 })
   }
 
   const hours = Math.min(168, Math.max(1, Number(new URL(req.url).searchParams.get('hours')) || 48))
@@ -103,9 +104,9 @@ export async function POST(req: Request) {
       recovered++
     }
 
-    return NextResponse.json({ ok: true, scanned: outputs.length, recovered })
+    return jsonPrivate({ ok: true, scanned: outputs.length, recovered })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    return NextResponse.json({ error: msg }, { status: 500 })
+    return jsonPrivate({ error: msg }, { status: 500 })
   }
 }

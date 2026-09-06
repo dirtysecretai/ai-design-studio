@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { after } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { fal } from '@fal-ai/client'
+import { fal } from '@/lib/fal-client'
 import { getTrainerFamily } from '@/lib/trainer-families'
 
 function authOk(req: NextRequest) {

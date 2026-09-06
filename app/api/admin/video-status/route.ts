@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server'
-import { fal } from '@fal-ai/client'
+import { fal } from '@/lib/fal-client'
 import prisma from '@/lib/prisma'
 import { releaseQueueSlot } from '@/lib/admin-queue-helpers'
 import { getUserFromSession } from '@/lib/auth'
 import { cookies } from 'next/headers'
 import { uploadToR2 } from '@/lib/r2'
+import { jsonPrivate } from '@/lib/api-json'
 
 fal.config({ credentials: process.env.FAL_KEY! })
 
@@ -19,14 +20,14 @@ export async function POST(req: Request) {
     const token = cookieStore.get('session')?.value
     const sessionUser = token ? await getUserFromSession(token) : null
     if (!sessionUser) {
-      return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+      return jsonPrivate({ error: 'Not authenticated' }, { status: 401 })
     }
 
     const body = await req.json()
     requestId = body.requestId
     const { falEndpoint, prompt, model, duration, resolution, ticketCost, aspectRatio, audioEnabled, startFrameUrl, endFrameUrl, motionVideoUrl, keepOriginalSound, characterOrientation } = body
     if (!requestId || !falEndpoint) {
-      return NextResponse.json({ error: 'Missing requestId or falEndpoint' }, { status: 400 })
+      return jsonPrivate({ error: 'Missing requestId or falEndpoint' }, { status: 400 })
     }
 
     const status = await fal.queue.status(falEndpoint, { requestId, logs: false })
@@ -42,7 +43,7 @@ export async function POST(req: Request) {
       const result = await fal.queue.result<any>(falEndpoint, { requestId })
       const falVideoUrl = result.data?.video?.url
       if (!falVideoUrl) {
-        return NextResponse.json({ status: 'failed', error: 'No video URL in FAL result' })
+        return jsonPrivate({ status: 'failed', error: 'No video URL in FAL result' })
       }
 
       if (existingJob) {
@@ -58,7 +59,7 @@ export async function POST(req: Request) {
           })
           if (saved) { cachedVideoId = saved.id; cachedVideoUrl = saved.imageUrl }
         } catch {}
-        return NextResponse.json({ status: 'completed', videoUrl: cachedVideoUrl, videoId: cachedVideoId })
+        return jsonPrivate({ status: 'completed', videoUrl: cachedVideoUrl, videoId: cachedVideoId })
       }
 
       console.log(`✓ Video generation completed [${requestId}] model=${model} duration=${duration} url=${falVideoUrl}`)
@@ -127,14 +128,14 @@ export async function POST(req: Request) {
       }
 
       await releaseQueueSlot(requestId, false)
-      return NextResponse.json({ status: 'completed', videoUrl: permanentVideoUrl, videoId: savedVideoId })
+      return jsonPrivate({ status: 'completed', videoUrl: permanentVideoUrl, videoId: savedVideoId })
 
     } else if ((status as any).status === 'ERROR' || (status as any).status === 'FAILED') {
       await releaseQueueSlot(requestId, true, 'Video generation failed on FAL servers')
-      return NextResponse.json({ status: 'failed', error: 'Video generation failed on FAL servers' })
+      return jsonPrivate({ status: 'failed', error: 'Video generation failed on FAL servers' })
     } else {
       // IN_QUEUE or IN_PROGRESS — keep polling
-      return NextResponse.json({ status: 'in_progress', falStatus: status.status })
+      return jsonPrivate({ status: 'in_progress', falStatus: status.status })
     }
 
   } catch (error: any) {
@@ -148,9 +149,9 @@ export async function POST(req: Request) {
       const { friendlyFalVideoError } = await import('@/lib/fal-friendly-errors')
       const detail = friendlyFalVideoError(rawDetail)
       if (requestId) await releaseQueueSlot(requestId, true, `Generation failed: ${detail}`)
-      return NextResponse.json({ status: 'failed', error: `Generation failed: ${detail}` })
+      return jsonPrivate({ status: 'failed', error: `Generation failed: ${detail}` })
     }
     // Return in_progress on transient network/server errors so the client keeps polling
-    return NextResponse.json({ status: 'in_progress', error: error.message })
+    return jsonPrivate({ status: 'in_progress', error: error.message })
   }
 }

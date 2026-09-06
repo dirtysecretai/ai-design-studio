@@ -1,4 +1,4 @@
-import { fal } from '@fal-ai/client'
+import { fal } from '@/lib/fal-client'
 import { uploadToR2 } from '@/lib/r2'
 import type { ChatCreateSettings } from '@/lib/chat-hub-models'
 

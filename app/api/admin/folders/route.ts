@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { checkAuth } from '@/lib/admin-auth'
+import { jsonPrivate } from '@/lib/api-json'
 
 const VIDEO_RE = /\.(mp4|webm|mov|avi|mkv)$/i
 
@@ -8,7 +9,7 @@ const VIDEO_RE = /\.(mp4|webm|mov|avi|mkv)$/i
 // ?fast=1 skips the per-folder preview queries — instant catalog, previews
 // hydrated by a follow-up full GET.
 export async function GET(req: Request) {
-  if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!checkAuth(req)) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
   const fast = new URL(req.url).searchParams.get('fast') === '1'
   const folders = await prisma.datasetBucketFolder.findMany({ orderBy: { createdAt: 'asc' } })
 
@@ -35,16 +36,16 @@ export async function GET(req: Request) {
     }))
   }
 
-  return NextResponse.json(
+  return jsonPrivate(
     folders.map(f => ({ ...f, previewUrls: previewMap.get(f.id) ?? [] })),
     { headers: { 'Cache-Control': 'no-store' } }
   )
 }
 
 export async function POST(req: Request) {
-  if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!checkAuth(req)) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
   const { name, parentId } = await req.json() as { name: string; parentId?: number | null }
-  if (!name?.trim()) return NextResponse.json({ error: 'name required' }, { status: 400 })
+  if (!name?.trim()) return jsonPrivate({ error: 'name required' }, { status: 400 })
   const folder = await prisma.datasetBucketFolder.create({ data: { name: name.trim(), parentId: parentId ?? null } })
-  return NextResponse.json(folder, { status: 201 })
+  return jsonPrivate(folder, { status: 201 })
 }

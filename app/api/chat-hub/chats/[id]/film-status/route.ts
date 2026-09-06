@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { requireChatHubAdmin } from '@/lib/chat-hub-auth'
 import type { AgentStep } from '@/lib/chat-hub-agent'
+import { jsonPrivate } from '@/lib/api-json'
 
 // GET /api/chat-hub/chats/[id]/film-status
 //
@@ -45,13 +46,13 @@ function markSettled(step: AgentStep, queueId: number, url: string | null, error
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }): Promise<Response> {
   const user = await requireChatHubAdmin()
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!user) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
 
   const chatId = Number((await params).id)
-  if (!Number.isInteger(chatId)) return NextResponse.json({ error: 'Bad chat id' }, { status: 400 })
+  if (!Number.isInteger(chatId)) return jsonPrivate({ error: 'Bad chat id' }, { status: 400 })
 
   const chat = await prisma.chat.findFirst({ where: { id: chatId, userId: user.id }, select: { id: true } })
-  if (!chat) return NextResponse.json({ error: 'Chat not found' }, { status: 404 })
+  if (!chat) return jsonPrivate({ error: 'Chat not found' }, { status: 404 })
 
   // Only the newest assistant reply can still be waiting on shots
   const row = await prisma.chatMessage.findFirst({
@@ -59,7 +60,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     orderBy: { id: 'desc' },
     select: { id: true, imageUrls: true, metadata: true },
   })
-  if (!row) return NextResponse.json({ shots: [], done: true })
+  if (!row) return jsonPrivate({ shots: [], done: true })
 
   const meta = (row.metadata ?? {}) as { agentSteps?: AgentStep[] }
   const steps = Array.isArray(meta.agentSteps) ? meta.agentSteps : []
@@ -67,21 +68,31 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   // Two shapes reach here: a single create_media video (queueId) and a whole
   // shot list from render_shots (queueIds). Handling only the first is why a
   // batch-rendered film reported "no media" — nothing ever settled it.
+  // A shot is pending because its RESULT is missing, not because a status flag
+  // says so. Keying off status === 'running' orphaned whole shot lists: a step
+  // written by a route that marked it 'done' while carrying nine queue ids was
+  // skipped by the settler forever, so the film never continued and the user
+  // saw "done" with no footage. The ids and the results are the truth.
   const pending: PendingShot[] = []
   for (const step of steps) {
-    if (step.status !== 'running') continue
+    if (step.status === 'error' || step.status === 'denied' || step.status === 'superseded') continue
     const one = (step as AgentStep & { queueId?: number }).queueId
     if (typeof one === 'number' && one > 0 && !step.imageUrl) {
       pending.push({ step, queueId: one })
     }
     const many = (step as AgentStep & { queueIds?: number[] }).queueIds
     if (Array.isArray(many)) {
-      for (const q of many) if (typeof q === 'number' && q > 0) pending.push({ step, queueId: q })
+      const settledIds = (step as AgentStep & { shotResults?: Record<string, string> }).shotResults ?? {}
+      for (const q of many) {
+        if (typeof q === 'number' && q > 0 && settledIds[String(q)] === undefined) {
+          pending.push({ step, queueId: q })
+        }
+      }
     }
   }
 
   if (pending.length === 0) {
-    return NextResponse.json({ shots: [], done: true })
+    return jsonPrivate({ shots: [], done: true })
   }
 
   const jobs = await prisma.generationQueue.findMany({
@@ -215,9 +226,54 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   }
 
   const stillRunning = settled.some(s => s.status === 'in_progress')
-  return NextResponse.json({
+
+  // WHAT THIS FILM HAS ACTUALLY COST SO FAR.
+  //
+  // The plan states a budget and then nothing reports against it, so the first
+  // time anyone sees the real number is on the ticket balance. This is already
+  // the poll that walks every step of the run, so the queue ids are in hand
+  // and the sum is one more query.
+  let spent = 0
+  let spentJobs = 0
+  try {
+    const ids = new Set<number>()
+    // Every assistant message in the film, not just the one being settled:
+    // spend accumulates across the whole production, including earlier runs.
+    const allRows = await prisma.chatMessage.findMany({
+      where: { chatId, role: 'assistant' },
+      orderBy: { id: 'desc' },
+      take: 60,
+      select: { metadata: true },
+    })
+    for (const m of allRows) {
+      const st = (m.metadata as { agentSteps?: unknown } | null)?.agentSteps
+      if (!Array.isArray(st)) continue
+      for (const s of st as any[]) {
+        if (typeof s?.queueId === 'number') ids.add(s.queueId)
+        if (Array.isArray(s?.queueIds)) for (const q of s.queueIds) if (typeof q === 'number') ids.add(q)
+      }
+    }
+    if (ids.size > 0) {
+      const jobs = await prisma.generationQueue.findMany({
+        where: { id: { in: [...ids] }, userId: user.id },
+        select: { ticketCost: true, status: true },
+      })
+      for (const j of jobs) {
+        // Refunded work is not spend. A failed row has already given the
+        // tickets back, so counting it would over-report every run with a
+        // dead shot in it.
+        if (j.status === 'failed' || j.status === 'cancelled') continue
+        spent += j.ticketCost ?? 0
+        spentJobs++
+      }
+    }
+  } catch { /* the meter is not worth failing a settle over */ }
+
+  return jsonPrivate({
     messageId: row.id,
     shots: settled,
     done: !stillRunning,
+    spent,
+    spentJobs,
   })
 }

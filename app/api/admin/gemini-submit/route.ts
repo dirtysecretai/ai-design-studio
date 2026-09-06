@@ -7,6 +7,7 @@ import prisma from '@/lib/prisma'
 import { getTicketCost, getModelById } from '@/config/ai-models.config'
 import { isGenerationBlocked } from '@/lib/generation-guard'
 import { enforceContentFilter } from '@/lib/content-filter'
+import { jsonPrivate } from '@/lib/api-json'
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 const GEMINI_IMAGE_MODELS = ['gemini-3-pro-image', 'gemini-2.5-flash-image']
@@ -19,18 +20,18 @@ export async function POST(req: Request) {
   try {
     const cookieStore = await cookies()
     const token = cookieStore.get('session')?.value
-    if (!token) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+    if (!token) return jsonPrivate({ error: 'Not authenticated' }, { status: 401 })
 
     const user = await getUserFromSession(token)
-    if (!user) return NextResponse.json({ error: 'Invalid session' }, { status: 401 })
+    if (!user) return jsonPrivate({ error: 'Invalid session' }, { status: 401 })
 
     if (await isGenerationBlocked(user.email)) {
-      return NextResponse.json({ error: 'Generation is temporarily disabled for maintenance. Please check back soon.' }, { status: 503 })
+      return jsonPrivate({ error: 'Generation is temporarily disabled for maintenance. Please check back soon.' }, { status: 503 })
     }
 
     const { allowed, activeCount, limit } = await checkUserConcurrency(user.id)
     if (!allowed) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: `Queue full (${activeCount}/${limit} active). Wait for a generation to finish.` },
         { status: 429 }
       )
@@ -46,12 +47,12 @@ export async function POST(req: Request) {
       referenceImageUrls = [],   // permanent Blob URLs (for DB record)
     } = body
 
-    if (!prompt?.trim()) return NextResponse.json({ error: 'Prompt is required' }, { status: 400 })
-    if (!GEMINI_IMAGE_MODELS.includes(model)) return NextResponse.json({ error: 'Invalid model' }, { status: 400 })
+    if (!prompt?.trim()) return jsonPrivate({ error: 'Prompt is required' }, { status: 400 })
+    if (!GEMINI_IMAGE_MODELS.includes(model)) return jsonPrivate({ error: 'Invalid model' }, { status: 400 })
 
     const modelConfig = getModelById(model)
     if (!modelConfig?.isAvailable) {
-      return NextResponse.json({ error: `Model ${model} is not available` }, { status: 400 })
+      return jsonPrivate({ error: `Model ${model} is not available` }, { status: 400 })
     }
 
     const ticketCost = getTicketCost(model, quality)
@@ -61,11 +62,11 @@ export async function POST(req: Request) {
     // CCBill content filter — must pass BEFORE any charge or provider submit
     {
       const _cf = await enforceContentFilter(prompt, user.email)
-      if (!_cf.ok) return NextResponse.json({ error: _cf.reason }, { status: 400 })
+      if (!_cf.ok) return jsonPrivate({ error: _cf.reason }, { status: 400 })
     }
     const availableBalance = (ticket?.balance ?? 0) - (ticket?.reserved ?? 0)
     if (availableBalance < ticketCost) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: `Insufficient tickets. Need ${ticketCost}, have ${availableBalance}.` },
         { status: 402 }
       )
@@ -228,9 +229,9 @@ export async function POST(req: Request) {
       }
     })
 
-    return NextResponse.json({ success: true, queueId, newBalance })
+    return jsonPrivate({ success: true, queueId, newBalance })
   } catch (err: any) {
     console.error('Gemini submit error:', err)
-    return NextResponse.json({ error: err.message || 'Submission failed' }, { status: 500 })
+    return jsonPrivate({ error: err.message || 'Submission failed' }, { status: 500 })
   }
 }

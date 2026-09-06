@@ -1,0 +1,11 @@
+name = "prompt-protocol-media"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+
+# The PRIVATE bucket. Public r2.dev access on it must be switched OFF in the
+# Cloudflare dashboard — this Worker is the only door.
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "REPLACE_WITH_YOUR_PRIVATE_BUCKET_NAME"
+
+# MEDIA_SIGNING_SECRET is set with `wrangler secret put`, never committed.

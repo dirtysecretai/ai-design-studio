@@ -10,7 +10,7 @@ import ffmpegPath from 'ffmpeg-static'
 import prisma from '@/lib/prisma'
 import { getUserFromSession } from '@/lib/auth'
 import { checkIsAdmin } from '@/lib/admin-check'
-import { uploadToR2, deleteFromR2 } from '@/lib/r2'
+import { uploadToR2, uploadPublicAsset, deleteFromR2 } from '@/lib/r2'
 
 const pExecFile = promisify(execFile)
 
@@ -140,7 +140,7 @@ export async function POST(req: Request) {
       // Transcode HEVC (and other non-web codecs) → H.264 so it plays in every browser.
       if (isVid) buffer = await ensureH264(buffer)
       const r2Key = `home-cards/${safeKeyOf(key)}-${randomUUID()}.${isVid ? 'mp4' : extFor(ct)}`
-      const mediaUrl = await uploadToR2(r2Key, buffer, ct)
+      const mediaUrl = await uploadPublicAsset(r2Key, buffer, ct)
       const card = await saveCard(key, mediaUrl, isVid ? 'video' : 'image')
       return NextResponse.json({ card })
     }
@@ -157,7 +157,7 @@ export async function POST(req: Request) {
     if (buffer.length === 0) return NextResponse.json({ error: 'Empty image' }, { status: 400 })
     if (buffer.length > 12 * 1024 * 1024) return NextResponse.json({ error: 'Image too large' }, { status: 413 })
     const r2Key = `home-cards/${safeKeyOf(key)}-${randomUUID()}.${extFor(ct)}`
-    const mediaUrl = await uploadToR2(r2Key, buffer, ct)
+    const mediaUrl = await uploadPublicAsset(r2Key, buffer, ct)
     const card = await saveCard(key, mediaUrl, 'image')
     return NextResponse.json({ card })
   } catch (error) {

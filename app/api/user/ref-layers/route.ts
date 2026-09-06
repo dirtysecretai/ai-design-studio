@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { cookies } from 'next/headers'
 import prisma from '@/lib/prisma'
 import { getUserFromSession } from '@/lib/auth'
+import { jsonPrivate } from '@/lib/api-json'
 
 // Dev-Tier multi-layer reference canvases. The layer stack lives in
 // UserReference.layers (TEXT, added via out-of-band DDL — add-ref-layers.js),
@@ -25,7 +26,7 @@ async function getAuthUser() {
 export async function GET() {
   try {
     const user = await getAuthUser()
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!user) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
 
     const rows = await prisma.$queryRaw<{ id: number; layers: string | null }[]>`
       SELECT "id", "layers" FROM "UserReference"
@@ -36,10 +37,10 @@ export async function GET() {
       if (!r.layers) continue
       try { stacks[String(r.id)] = JSON.parse(r.layers) } catch {}
     }
-    return NextResponse.json({ stacks })
+    return jsonPrivate({ stacks })
   } catch (error) {
     console.error('ref-layers GET error:', error)
-    return NextResponse.json({ error: 'Server error' }, { status: 500 })
+    return jsonPrivate({ error: 'Server error' }, { status: 500 })
   }
 }
 
@@ -47,18 +48,18 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const user = await getAuthUser()
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!user) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
 
     const body = await req.json().catch(() => null)
     const refId = typeof body?.refId === 'number' ? body.refId : parseInt(body?.refId)
-    if (!refId || isNaN(refId)) return NextResponse.json({ error: 'refId required' }, { status: 400 })
+    if (!refId || isNaN(refId)) return jsonPrivate({ error: 'refId required' }, { status: 400 })
 
     let serialized: string | null = null
     if (body.stack !== null && body.stack !== undefined) {
       const enabled = body.stack.enabled === true
       const rawLayers: unknown[] = Array.isArray(body.stack.layers) ? body.stack.layers : []
       if (rawLayers.length > MAX_LAYERS) {
-        return NextResponse.json({ error: `Max ${MAX_LAYERS} layers` }, { status: 400 })
+        return jsonPrivate({ error: `Max ${MAX_LAYERS} layers` }, { status: 400 })
       }
       let totalItems = 0
       const layers = []
@@ -69,7 +70,7 @@ export async function POST(req: Request) {
         const items = []
         for (const it of rawItems) {
           if (typeof it?.url !== 'string' || !it.url.startsWith('https://')) {
-            return NextResponse.json({ error: 'Each layer image needs an https url' }, { status: 400 })
+            return jsonPrivate({ error: 'Each layer image needs an https url' }, { status: 400 })
           }
           totalItems++
           const hasRect = [it.x, it.y, it.w, it.h].every((v: unknown) => typeof v === 'number' && isFinite(v as number))
@@ -97,7 +98,7 @@ export async function POST(req: Request) {
         })
       }
       if (totalItems > 60) {
-        return NextResponse.json({ error: 'Max 60 layer images total' }, { status: 400 })
+        return jsonPrivate({ error: 'Max 60 layer images total' }, { status: 400 })
       }
       serialized = JSON.stringify({
         enabled,
@@ -107,18 +108,18 @@ export async function POST(req: Request) {
         ...(typeof body.stack.baseH === 'number' && isFinite(body.stack.baseH) ? { baseH: Math.round(Math.max(1, Math.min(8192, body.stack.baseH))) } : {}),
       })
       if (serialized.length > 100_000) {
-        return NextResponse.json({ error: 'Layer stack too large' }, { status: 413 })
+        return jsonPrivate({ error: 'Layer stack too large' }, { status: 413 })
       }
     }
 
     const updated = await prisma.$executeRaw`
       UPDATE "UserReference" SET "layers" = ${serialized}, "updatedAt" = NOW()
       WHERE "id" = ${refId} AND "userId" = ${user.id} AND "isCleared" = false`
-    if (updated === 0) return NextResponse.json({ error: 'Reference not found' }, { status: 404 })
+    if (updated === 0) return jsonPrivate({ error: 'Reference not found' }, { status: 404 })
 
-    return NextResponse.json({ ok: true })
+    return jsonPrivate({ ok: true })
   } catch (error) {
     console.error('ref-layers POST error:', error)
-    return NextResponse.json({ error: 'Server error' }, { status: 500 })
+    return jsonPrivate({ error: 'Server error' }, { status: 500 })
   }
 }

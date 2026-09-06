@@ -126,6 +126,16 @@ export async function POST(req: NextRequest) {
 
     // ── stitch ────────────────────────────────────────────────────────────
     if (op === 'stitch') {
+      // xfade knows dozens of wipes; most of them look like a 1998 slideshow.
+      // These are the ones an editor actually reaches for, and refusing the
+      // rest is part of the job.
+      const TRANSITIONS = new Set([
+        'fade', 'fadeblack', 'fadewhite', 'dissolve', 'radial', 'pixelize',
+        'wipeleft', 'wiperight', 'wipeup', 'wipedown',
+        'slideleft', 'slideright', 'slideup', 'slidedown',
+        'smoothleft', 'smoothright', 'smoothup', 'smoothdown',
+        'circleopen', 'circleclose', 'zoomin',
+      ])
       const raw: any[] = Array.isArray(body.clips) ? body.clips : []
       const clips = raw
         .map(c => (typeof c === 'string' ? { url: c } : c))
@@ -207,19 +217,78 @@ export async function POST(req: NextRequest) {
 
       const parts: string[] = []
       const labels: string[] = []
+      const used: number[] = []
       files.forEach((f, i) => {
         // Shots come from different models: different sizes, fps and pixel
         // aspect. Normalise every one, or concat refuses / output stretches.
         parts.push(
           `[${i}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
-          `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p[v${i}]`
+          `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p,setpts=PTS-STARTPTS[v${i}]`
         )
         const dur = Math.max(0.1, (f.trimEnd || f.seconds) - (f.trimStart || 0))
+        used.push(dur)
         if (f.hasAudio) parts.push(`[${i}:a]aresample=48000,asetpts=PTS-STARTPTS[a${i}]`)
         else parts.push(`[${silentIdx}:a]atrim=0:${dur.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`)
         labels.push(`[v${i}][a${i}]`)
       })
-      parts.push(`${labels.join('')}concat=n=${files.length}:v=1:a=1[v][a]`)
+
+      // THE JOIN BETWEEN TWO SHOTS, when it is not a straight cut.
+      //
+      // A transition is declared on the clip it leads INTO, so clips[0] never
+      // carries one; a top-level `transition` sets the default for every join.
+      // Each is clamped to half of the shorter neighbour, because a 1s
+      // dissolve across a 0.8s shot is not a dissolve, it is a mistake ffmpeg
+      // reports as a graph error.
+      const defT = body.transition && typeof body.transition === 'object' ? body.transition : null
+      const joins = files.map((_, i) => {
+        if (i === 0) return null
+        const own = clips[i]?.transition
+        const t = (own && typeof own === 'object' ? own : defT) as { type?: string; durationSec?: number } | null
+        if (!t) return null
+        const type = TRANSITIONS.has(String(t.type)) ? String(t.type) : 'fade'
+        const want = Number(t.durationSec)
+        const secs = Number.isFinite(want) && want > 0 ? want : 0.5
+        const cap = Math.min(used[i - 1], used[i]) / 2
+        const d = Math.max(1 / fps, Math.min(secs, cap))
+        return { type, d }
+      })
+      const anyTransition = joins.some(Boolean)
+
+      let outDur = used.reduce((n, d) => n + d, 0)
+
+      if (!anyTransition) {
+        parts.push(`${labels.join('')}concat=n=${files.length}:v=1:a=1[v][a]`)
+      } else {
+        // xfade takes an OFFSET into the running timeline, not a position in
+        // the incoming clip, and every transition steals its own length from
+        // the total \u2014 so the offsets have to be accumulated as we go rather
+        // than derived from the clip list. Getting this wrong is why the
+        // feature was deferred the first time.
+        let vPrev = '[v0]'
+        let aPrev = '[a0]'
+        let acc = used[0]
+        for (let i = 1; i < files.length; i++) {
+          // A join with no transition still goes through xfade, at one frame,
+          // which is a hard cut to the eye and keeps ONE graph rather than
+          // splicing concat and xfade together.
+          const j = joins[i] ?? { type: 'fade', d: 1 / fps }
+          const offset = Math.max(0, acc - j.d)
+          const vOut = `[vx${i}]`
+          const aOut = `[ax${i}]`
+          parts.push(
+            `${vPrev}[v${i}]xfade=transition=${j.type}:duration=${j.d.toFixed(3)}:offset=${offset.toFixed(3)}${vOut}`
+          )
+          // acrossfade joins sequentially and has no offset of its own; it
+          // lines up because the video timeline is shortened by the same d.
+          parts.push(`${aPrev}[a${i}]acrossfade=d=${j.d.toFixed(3)}:c1=tri:c2=tri${aOut}`)
+          vPrev = vOut
+          aPrev = aOut
+          acc = acc + used[i] - j.d
+          outDur -= j.d
+        }
+        parts.push(`${vPrev}null[v]`)
+        parts.push(`${aPrev}anull[a]`)
+      }
 
       const out = path.join(dir, 'film.mp4')
       await exec(ffmpegPath as string, [
@@ -236,9 +305,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         url,
         clips: files.length,
-        durationSec: Math.round(total * 100) / 100,
+        // Every transition overlaps two shots, so the film is SHORTER than the
+        // sum of its clips. Reporting the sum would make the runtime check
+        // downstream believe in seconds that are not there.
+        durationSec: Math.round(outDur * 100) / 100,
         width,
         height,
+        transitions: joins.filter(Boolean).length,
       })
     }
 
@@ -248,13 +321,28 @@ export async function POST(req: NextRequest) {
       if (!allowedSource(videoUrl)) {
         return NextResponse.json({ error: 'videoUrl must be an R2 or fal URL' }, { status: 400 })
       }
-      const music = body.music && typeof body.music.url === 'string' && allowedSource(body.music.url)
-        ? body.music : null
+      // MUSIC IS A LIST, AND IT HAS A START AND AN END.
+      //
+      // This used to be one bed, trimmed 0..duration, which is the whole
+      // reason a film came back with a single track playing wall to wall over
+      // every scene. Real scoring is cues: a piece under the opening, silence
+      // through the dialogue, something else under the last beat. Accepting an
+      // array with in/out points is what makes that expressible at all.
+      const asMusic = (m: any) => (m && typeof m.url === 'string' && allowedSource(m.url) ? m : null)
+      const music: any[] = (Array.isArray(body.music) ? body.music : [body.music])
+        .map(asMusic).filter(Boolean).slice(0, 6)
       const voices: any[] = Array.isArray(body.voice)
         ? body.voice.filter((v: any) => v && typeof v.url === 'string' && allowedSource(v.url)).slice(0, 8)
         : []
-      if (!music && voices.length === 0) {
-        return NextResponse.json({ error: 'Nothing to mux — pass music and/or voice' }, { status: 400 })
+      // Sound effects are mechanically the same as voice — a clip dropped at a
+      // timestamp — but they are a different creative act and default to a
+      // different level, so they get their own field rather than being smuggled
+      // through 'voice'.
+      const sfx: any[] = Array.isArray(body.sfx)
+        ? body.sfx.filter((v: any) => v && typeof v.url === 'string' && allowedSource(v.url)).slice(0, 16)
+        : []
+      if (music.length === 0 && voices.length === 0 && sfx.length === 0) {
+        return NextResponse.json({ error: 'Nothing to mux — pass music, voice and/or sfx' }, { status: 400 })
       }
 
       const vid = path.join(dir, 'in.mp4')
@@ -262,24 +350,63 @@ export async function POST(req: NextRequest) {
       const { seconds, hasAudio } = await probe(vid)
 
       const inputs: string[] = ['-hide_banner', '-y', '-i', vid]
+      // Total seconds of picture that end up with a music bed under them.
+      let musicCovered = 0
       const chains: string[] = []
       const mixLabels: string[] = []
       let idx = 1
 
       if (hasAudio) mixLabels.push('[0:a]')
 
-      if (music) {
-        const mf = path.join(dir, 'music.mp3')
-        await fetchTo(mf, music.url)
+      for (let i = 0; i < music.length; i++) {
+        const cue = music[i]
+        const mf = path.join(dir, `music${i}.mp3`)
+        await fetchTo(mf, cue.url)
         inputs.push('-i', mf)
-        const gain = Number.isFinite(Number(music.gainDb)) ? Number(music.gainDb) : -14
-        const fade = Math.max(0, Number(music.fadeOutSec) || 2)
-        // Trimmed to picture and faded out, so the bed never outlives the cut
+        const gain = Number.isFinite(Number(cue.gainDb)) ? Number(cue.gainDb) : -14
+        // Where the cue sits in the film. Defaults reproduce the old
+        // behaviour exactly — a single bed under the whole thing — so a caller
+        // that passes one object with no times gets what it always got.
+        const from = Math.max(0, Math.min(seconds, Number(cue.startSec) || 0))
+        const toRaw = Number(cue.endSec)
+        const to = Number.isFinite(toRaw) && toRaw > from ? Math.min(seconds, toRaw) : seconds
+        // CLAMP THE CUE TO THE AUDIO THAT ACTUALLY EXISTS.
+        //
+        // A music model returns whatever length it returns, and asking for a
+        // 30s window over a 20s file gave 20s of music followed by a cliff:
+        // atrim stopped at the end of the file while the fade-out was placed
+        // at 28s, where there was nothing left to fade. That is exactly the
+        // "music cuts out halfway and then silence" failure — the bed was
+        // never as long as the cue that asked for it.
+        const cueAudio = await probe(mf)
+        const have = cueAudio.seconds > 0 ? cueAudio.seconds : (to - from)
+        const len = Math.max(0.1, Math.min(to - from, have))
+        const fadeIn = Math.max(0, Math.min(len / 2, Number(cue.fadeInSec) ?? 0.5))
+        const fadeOut = Math.max(0, Math.min(len / 2, Number(cue.fadeOutSec) ?? 2))
+        const delayMs = Math.round(from * 1000)
         chains.push(
-          `[${idx}:a]atrim=0:${seconds.toFixed(3)},asetpts=PTS-STARTPTS,volume=${gain}dB,` +
-          `afade=t=out:st=${Math.max(0, seconds - fade).toFixed(3)}:d=${fade}[music]`
+          `[${idx}:a]atrim=0:${len.toFixed(3)},asetpts=PTS-STARTPTS,volume=${gain}dB`
+          + (fadeIn > 0 ? `,afade=t=in:st=0:d=${fadeIn.toFixed(3)}` : '')
+          + (fadeOut > 0 ? `,afade=t=out:st=${Math.max(0, len - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}` : '')
+          + `,adelay=${delayMs}|${delayMs}[music${i}]`
         )
-        mixLabels.push('[music]')
+        musicCovered += len
+        mixLabels.push(`[music${i}]`)
+        idx++
+      }
+
+      for (let i = 0; i < sfx.length; i++) {
+        const cue = sfx[i]
+        const ef = path.join(dir, `sfx${i}.mp3`)
+        await fetchTo(ef, cue.url)
+        inputs.push('-i', ef)
+        const at = Math.max(0, Number(cue.atSec) || 0)
+        // Effects sit AT the picture, not under it, so they default to unity
+        // rather than to the music bed's duck.
+        const gain = Number.isFinite(Number(cue.gainDb)) ? Number(cue.gainDb) : 0
+        const delayMs = Math.round(at * 1000)
+        chains.push(`[${idx}:a]volume=${gain}dB,adelay=${delayMs}|${delayMs}[sfx${i}]`)
+        mixLabels.push(`[sfx${i}]`)
         idx++
       }
 
@@ -295,7 +422,10 @@ export async function POST(req: NextRequest) {
         idx++
       }
 
-      chains.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=first:normalize=0[a]`)
+      // duration=longest with an explicit -shortest against the video: a cue
+      // delayed to the last second must not be truncated by a shorter first
+      // input, and the picture still decides where the file ends.
+      chains.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:normalize=0[a]`)
 
       const out = path.join(dir, 'mixed.mp4')
       await exec(ffmpegPath as string, [
@@ -309,7 +439,15 @@ export async function POST(req: NextRequest) {
 
       const buf = await readFile(out)
       const url = await uploadToR2(`films/film-${crypto.randomUUID()}.mp4`, buf, 'video/mp4')
-      return NextResponse.json({ url, durationSec: Math.round(seconds * 100) / 100 })
+      return NextResponse.json({
+        url,
+        durationSec: Math.round(seconds * 100) / 100,
+        // How much of the film actually has music under it. A caller that
+        // asked for a 30s cue and got 18s of audio needs to know.
+        musicCoverSec: Math.round(musicCovered * 100) / 100,
+        cues: music.length,
+        sfx: sfx.length,
+      })
     }
 
     // ── captions ──────────────────────────────────────────────────────────

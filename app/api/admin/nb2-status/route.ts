@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { fal } from '@fal-ai/client'
+import { fal } from '@/lib/fal-client'
 import { uploadToR2 } from '@/lib/r2'
 import prisma from '@/lib/prisma'
 import { releaseQueueSlot } from '@/lib/admin-queue-helpers'
@@ -85,8 +85,42 @@ export async function POST(req: Request) {
           console.error('nb2-status: no session user — skipping DB save')
         }
         if (targetUserId) {
-          const created = await Promise.all(hostedImages.map(img =>
-            prisma.generatedImage.create({
+          // QUEUE TIME, EVEN WHEN THE CLIENT FORGETS IT.
+          //
+          // createdAt is the feed's ordering key, so a row saved at COMPLETION
+          // time sorts by how fast the model happened to be rather than by the
+          // order the user asked for. The client sends queuedAt from its slot,
+          // but a slot restored after a reload often no longer carries one \u2014
+          // which is why tiles rearranged themselves on refresh. The queue row
+          // knows, so ask it.
+          let queuedMs = typeof queuedAt === 'number' ? queuedAt : 0
+          if (!queuedMs) {
+            try {
+              const q = await prisma.generationQueue.findFirst({
+                where: { falRequestId: requestId },
+                select: { createdAt: true },
+              })
+              if (q?.createdAt) queuedMs = q.createdAt.getTime()
+            } catch { /* ordering is worth a try, not a failure */ }
+          }
+
+          const created = await prisma.$transaction(async (tx) => {
+            // ONE WRITER PER REQUEST ID.
+            //
+            // The idempotency check above is read-then-act: two pollers for the
+            // same job \u2014 a restored one and a re-armed one, say \u2014 both saw no
+            // rows and both inserted, which is how seven finished generations
+            // became fourteen tiles after a reload. The lock is transaction
+            // scoped, so it is released even if this throws.
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'nb2-save-' + requestId}))`
+            const already = await tx.generatedImage.findMany({
+              where: { falRequestId: requestId },
+              select: { id: true },
+              orderBy: { id: 'asc' },
+            })
+            if (already.length > 0) return already
+            return Promise.all(hostedImages.map(img =>
+            tx.generatedImage.create({
               data: {
                 userId:             targetUserId!,
                 prompt:             prompt || '',
@@ -101,15 +135,16 @@ export async function POST(req: Request) {
                 // createdAt = when the user QUEUED the generation (the feed's
                 // ordering key), not when it completed — keeps queue order
                 // stable across refresh. Sanity-capped to the last 24h.
-                ...(typeof queuedAt === 'number' && queuedAt > Date.now() - 24 * 3600 * 1000 && queuedAt <= Date.now() + 60_000
-                  ? { createdAt: new Date(queuedAt) } : {}),
+                ...(queuedMs > Date.now() - 24 * 3600 * 1000 && queuedMs <= Date.now() + 60_000
+                  ? { createdAt: new Date(queuedMs) } : {}),
                 // Full generation settings for the info panel
                 ...(videoMetadata && typeof videoMetadata === 'object'
                   ? { videoMetadata: videoMetadata as object } : {}),
               },
               select: { id: true },
             })
-          ))
+            ))
+          })
           created.forEach(r => savedIds.push(r.id))
         }
       } catch (dbErr) {

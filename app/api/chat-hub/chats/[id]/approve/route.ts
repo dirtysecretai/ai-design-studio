@@ -2,10 +2,10 @@ import { NextResponse } from 'next/server'
 import { streamText, stepCountIs, type LanguageModel, type ModelMessage, type ToolContent } from 'ai'
 import prisma from '@/lib/prisma'
 import { requireChatHubAdmin } from '@/lib/chat-hub-auth'
-import { getChatModelForUser } from '@/lib/chat-hub-models'
+import { getChatModelForUser, DEFAULT_CHAT_MODEL } from '@/lib/chat-hub-models'
 import {
   loadUserKeys, loadChatPrefs, resolveChatModel, buildRoster,
-  rosterInstructions, mediaInstructions, toolsInstructions, modeInstructions, movieFormatInstructions,
+  rosterInstructions, mediaInstructions, toolsInstructions, modeInstructions, movieFormatInstructions, audioPlanInstructions,
   identityInstructions, coreDisciplineInstructions, skillOn,
   skillSummariesInstructions, loadGlobalMemory,
   sanitizeAgentMode, buildHistoryMessages, makeAgentTools, agentStreamResponse,
@@ -14,7 +14,7 @@ import {
   inlineWeakModelImages,
   type RoutingMap, type AgentStep, type PendingCall, type PlanBudget, type SkillSet,
 } from '@/lib/chat-hub-agent'
-import { executeRenderShots, executeCheckShots, executeAssembleFilm, executeCreateAudio, executeExtractFrames } from '@/lib/chat-film-tools'
+import { executeRenderShots, executeRenderPlates, executeCheckShots, executeAssembleFilm, executeCreateAudio, executeExtractFrames } from '@/lib/chat-film-tools'
 import { movieFormatSeconds } from '@/lib/chat-hub-skills'
 import { sanitizeSkillIds } from '@/lib/chat-hub-skills'
 import { isChatCancelRequested, clearChatCancel } from '@/lib/chat-hub-cancel'
@@ -111,6 +111,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const agentMode = sanitizeAgentMode(chat.agentMode)
   const skillIds = sanitizeSkillIds(chat.skills)
   const skillSet: SkillSet = skillIds === null ? null : new Set(skillIds)
+  // A film needs far more steps than a chat reply: intake alone spends
+  // reasoning, ask_user, four or five playbook loads and propose_plan, and the
+  // production has not started. At 16 the run ran out mid-shoot and simply
+  // stopped, which reads to the user as "it broke".
+  const STEP_CAP = skillOn(skillSet, 'movie-production') || skillOn(skillSet, 'character-design') ? 30 : 16
+
 
   const row = await prisma.chatMessage.findFirst({
     where: { id: messageId, chatId, role: 'assistant' },
@@ -136,10 +142,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   }
 
   const prefs = await loadChatPrefs(user.id)
+  // A chat whose model is missing or retired should not become unusable: fall
+  // back to the default rather than stranding the user's work behind an error
+  // they cannot act on.
   const modelSpec = getChatModelForUser(chat.model, prefs.customModels)
+    ?? getChatModelForUser(DEFAULT_CHAT_MODEL, prefs.customModels)
   if (!modelSpec) return NextResponse.json({ error: 'Chat model no longer available' }, { status: 400 })
   const userKeys = await loadUserKeys(user.id)
-  const routes = sanitizeRoutes(body.routes)
+  const bodyRoutes = sanitizeRoutes(body.routes)
+  // Same fallback as the send route: a caller without a routing UI still gets
+  // the account's saved provider routing instead of defaulting to the gateway.
+  const routes = Object.keys(bodyRoutes).length > 0 ? bodyRoutes : prefs.routing
   const resolved = resolveChatModel(modelSpec, routes, userKeys)
   if (typeof resolved === 'object' && resolved !== null && 'error' in resolved) {
     return NextResponse.json({ error: resolved.error }, { status: 500 })
@@ -195,6 +208,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     skillOn(skillSet, 'delegation') ? rosterInstructions(roster) : '',
     mediaInstructions(ticketBalance, prefs.modelPrefs, skillSet, true),
     movieFormatInstructions(skillSet, prefs.movieFormat),
+    audioPlanInstructions(skillSet, prefs.audioPlan),
     toolsInstructions(chat.projectId !== null, skillSet),
     globalMemory,
     chat.project?.memory?.trim()
@@ -428,7 +442,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
               })
               if (out && 'imageUrl' in out) generatedUrls.push(out.imageUrl)
             } else if (
-              call.toolName === 'render_shots' || call.toolName === 'check_shots'
+              call.toolName === 'render_shots' || call.toolName === 'render_plates' || call.toolName === 'check_shots'
               || call.toolName === 'assemble_film' || call.toolName === 'create_audio'
               || call.toolName === 'extract_frames'
             ) {
@@ -437,13 +451,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
               // "Unknown tool" and end the movie right there.
               const filmCtx = {
                 user: { id: user.id, email: user.email },
+                chatId,
                 attachedImageUrls,
                 allowedImages,
                 generatedUrls,
                 targetSeconds: movieFormatSeconds(prefs.movieFormat),
+                budgetCap: prefs.budgetCap,
               }
               out =
                 call.toolName === 'render_shots' ? await executeRenderShots(call.input as any, filmCtx as any)
+                : call.toolName === 'render_plates' ? await executeRenderPlates(call.input as any, filmCtx as any)
                 : call.toolName === 'check_shots' ? await executeCheckShots(call.input as any, filmCtx as any)
                 : call.toolName === 'assemble_film' ? await executeAssembleFilm(call.input as any, filmCtx as any)
                 : call.toolName === 'create_audio' ? await executeCreateAudio(call.input as any, filmCtx as any)
@@ -451,6 +468,24 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
               if (out && typeof out.mediaUrl === 'string' && out.mediaUrl) {
                 generatedUrls.push(out.mediaUrl)
                 allowedImages.add(out.mediaUrl)
+              }
+            } else if (call.toolName === 'present_storyboard') {
+              // APPROVING THE BOARD IS THE GO-AHEAD, NOTHING MORE.
+              //
+              // This route dispatches each paused tool by name, and anything it
+              // does not recognise comes back as "Unknown tool" \u2014 so pressing
+              // "Shoot it" handed the studio an error, which it read as the board
+              // having failed. It replanned, re-rendered the plates, and asked for
+              // the plan again. The tool itself does no work; the approval IS the
+              // result, and the gate in render_shots reads this step being done.
+              const n = Array.isArray((call.input as any)?.frames) ? (call.input as any).frames.length : 0
+              out = {
+                approved: true,
+                frames: n,
+                note:
+                  `The user approved the board (${n} shot(s)). Shoot it now: submit the WHOLE shot list in one `
+                  + `render_shots call, exactly as boarded. Do not re-render the plates, do not re-plan, and do not `
+                  + `ask for the plan again \u2014 this approval is the go-ahead.`,
               }
             } else {
               out = { error: `Unknown tool ${call.toolName}` }
@@ -564,6 +599,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           generatedUrls,
           allowedImages,
           projectId: chat.projectId,
+          chatId,
           planBudget,
           autoApproveEdits,
           skills: skillSet,
@@ -575,7 +611,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           instructions,
           messages,
           tools,
-          stopWhen: stepCountIs(16),
+          stopWhen: stepCountIs(STEP_CAP),
           providerOptions: { google: { thinkingConfig: { includeThoughts: true } } },
           onError: ({ error }) => { console.error('chat-hub approve stream error:', error) },
         })
@@ -611,7 +647,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
               },
             ],
             tools: continuationTools,
-            stopWhen: stepCountIs(16),
+            stopWhen: stepCountIs(STEP_CAP),
             providerOptions: { google: { thinkingConfig: { includeThoughts: true } } },
             onError: ({ error }) => { console.error('chat-hub plan-completion stream error:', error) },
           })

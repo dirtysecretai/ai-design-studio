@@ -7,6 +7,7 @@ import { NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getUserFromSession } from '@/lib/auth'
 import { cookies } from 'next/headers'
+import { jsonPrivate } from '@/lib/api-json'
 
 
 export const dynamic = 'force-dynamic'
@@ -28,12 +29,12 @@ export async function GET(request: Request) {
     const cookieStore = await cookies()
     const token = cookieStore.get('session')?.value
     if (!token) {
-      return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+      return jsonPrivate({ error: 'Not authenticated' }, { status: 401 })
     }
 
     const user = await getUserFromSession(token)
     if (!user) {
-      return NextResponse.json({ error: 'Invalid session' }, { status: 401 })
+      return jsonPrivate({ error: 'Invalid session' }, { status: 401 })
     }
 
     // Auto-fail PROVABLY-DEAD stuck jobs only. The old version force-failed
@@ -128,9 +129,9 @@ export async function GET(request: Request) {
       j => j.status === 'processing' || j.status === 'queued'
     ).length
 
-    return NextResponse.json({ jobs, activeCount })
+    return jsonPrivate({ jobs, activeCount })
   } catch (error: any) {
     console.error('Jobs fetch error:', error)
-    return NextResponse.json({ error: 'Failed to fetch jobs' }, { status: 500 })
+    return jsonPrivate({ error: 'Failed to fetch jobs' }, { status: 500 })
   }
 }

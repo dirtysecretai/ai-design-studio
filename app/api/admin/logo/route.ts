@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto'
 import prisma from '@/lib/prisma'
 import { getUserFromSession } from '@/lib/auth'
 import { checkIsAdmin } from '@/lib/admin-check'
-import { uploadToR2, deleteFromR2 } from '@/lib/r2'
+import { uploadToR2, uploadPublicAsset, deleteFromR2 } from '@/lib/r2'
 
 // Site logo upload. ADMIN ONLY. The client frames the image in the crop modal,
 // then POSTs a PNG data URL here (PNG keeps logo transparency). Stored on public
@@ -41,7 +41,7 @@ export async function POST(req: Request) {
 
     const ext = contentType === 'image/jpeg' ? 'jpg' : contentType === 'image/webp' ? 'webp' : 'png'
     const key = `branding/logo-${randomUUID()}.${ext}`
-    const logoUrl = await uploadToR2(key, buffer, contentType)
+    const logoUrl = await uploadPublicAsset(key, buffer, contentType)
 
     const existing = await prisma.systemState.findFirst()
     const prev = existing?.logoUrl ?? null

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { fal } from '@fal-ai/client'
+import { fal } from '@/lib/fal-client'
 import prisma from '@/lib/prisma'
 import { syncAndClaimFalSlot } from '@/lib/admin-queue-helpers'
 import { getUserFromSession } from '@/lib/auth'

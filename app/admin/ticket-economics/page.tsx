@@ -18,6 +18,7 @@ import {
 } from "lucide-react"
 import { SiteLogoBox } from "@/components/SitePageHeader"
 import { AI_MODELS, getTicketCost } from "@/config/ai-models.config"
+import { FAL_TOOL_MODELS, TOOL_CATEGORY_LABEL } from "@/lib/fal-tool-models"
 import {
   DEV_TIER_PRICING_NOTES, TICKET_PACKAGES, VIDEO_MODEL_SPECS,
   usdPerTicket, videoTicketCost, videoTicketCostDev,
@@ -52,7 +53,7 @@ const ah = (): Record<string, string> => (pw() ? { "x-admin-password": pw() } : 
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-type Kind = "image" | "video"
+type Kind = "image" | "video" | "tool"
 type CostUnit = "gen" | "sec"
 
 /** What the owner typed for one model. */
@@ -158,6 +159,10 @@ interface ModelRow {
   /** Image only: quality choices that actually change the ticket price. */
   qualities: string[]
   note?: string
+  /** Tool only: what calls it, so an unbilled row can be traced to a feature. */
+  usedBy?: string
+  /** Tool only: tickets charged today. These are all 0 — that is the point. */
+  toolTickets?: number
 }
 
 /**
@@ -191,6 +196,19 @@ const MODEL_ROWS: ModelRow[] = [
     kind: "image",
     label: m.displayName,
     qualities: imageQualities(m.id),
+  })),
+  // Everything else this site calls at fal: audio, masking, relight, face
+  // swap, transcription, LoRA training. Every one of them is FREE to the user
+  // today, which is precisely why they belong on a page about margin.
+  ...FAL_TOOL_MODELS.map<ModelRow>(t => ({
+    key: `tool:${t.id}`,
+    id: t.id,
+    kind: "tool",
+    label: `${TOOL_CATEGORY_LABEL[t.category]} · ${t.label}`,
+    qualities: [],
+    note: t.notes,
+    usedBy: t.usedBy,
+    toolTickets: t.ticketCost,
   })),
 ]
 
@@ -371,6 +389,11 @@ export default function TicketEconomicsPage() {
         ticketsRegular = videoTicketCost(input)
         ticketsDev = videoTicketCostDev(input)
         seconds = billedSeconds(row.spec, k)
+      } else if (row.kind === "tool") {
+        // No pricing function to consult: these have never been billed. The
+        // row exists to show fal's cost against a revenue of zero.
+        ticketsRegular = row.toolTickets ?? 0
+        ticketsDev = ticketsRegular
       } else {
         const q = row.qualities.length > 0 ? (k.duration || row.qualities[0]) : undefined
         ticketsRegular = getTicketCost(row.id, row.qualities.includes(q ?? "") ? q : row.qualities[0])
@@ -590,7 +613,7 @@ export default function TicketEconomicsPage() {
         <div className="relative isolate rounded-2xl border border-white/[0.08] bg-[#0a101d] p-4 space-y-3">
           <SilverRim />
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <Stat label="models" value={String(computed.length)} sub={`${VIDEO_MODEL_SPECS.length} video · ${AI_MODELS.length} image`} />
+            <Stat label="models" value={String(computed.length)} sub={`${VIDEO_MODEL_SPECS.length} video · ${AI_MODELS.length} image · ${FAL_TOOL_MODELS.length} tools`} />
             <Stat label="no fal cost" value={String(summary.missing)}
               sub={costSource === "synced" ? `${summary.synced} synced · ${summary.manual} typed` : `${summary.manual} typed · ${summary.syncable} syncable`}
               tone={summary.missing > 0 ? "warn" : "ok"} />
@@ -771,6 +794,10 @@ export default function TicketEconomicsPage() {
                         <span className={`px-1.5 py-0.5 rounded border text-[9px] font-mono uppercase ${
                           c.row.kind === "video"
                             ? "bg-violet-500/15 text-violet-300 border-violet-400/25"
+                            : c.row.kind === "tool"
+                            // Amber, because every tool row is a cost with no
+                            // revenue against it until it is priced.
+                            ? "bg-amber-500/15 text-amber-300 border-amber-400/25"
                             : "bg-sky-500/15 text-sky-300 border-sky-400/25"}`}>
                           {c.row.kind}
                         </span>
@@ -818,6 +845,9 @@ export default function TicketEconomicsPage() {
                         </div>
                         {c.row.kind === "video" && (
                           <p className="text-[9px] font-mono text-slate-600 mt-1">{c.seconds}s billed</p>
+                        )}
+                        {c.row.kind === "tool" && c.row.usedBy && (
+                          <p className="text-[9px] text-slate-600 mt-1">{c.row.usedBy}</p>
                         )}
                       </td>
                       {/* tickets */}

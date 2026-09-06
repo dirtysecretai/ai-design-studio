@@ -3,11 +3,12 @@ import { prisma } from '@/lib/prisma'
 import { Prisma } from '@prisma/client'
 import { checkAuth } from '@/lib/admin-auth'
 import { normalizeCaptionSections } from '@/lib/caption-compose'
+import { jsonPrivate } from '@/lib/api-json'
 
 
 // GET — paginated dataset browser + optional ?export=true for full JSON download
 export async function GET(req: Request) {
-  if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!checkAuth(req)) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
 
   const { searchParams } = new URL(req.url)
 
@@ -17,13 +18,13 @@ export async function GET(req: Request) {
   const idsParam = searchParams.get('ids')
   if (idsParam) {
     const ids = idsParam.split(',').map(Number).filter(n => !isNaN(n) && n > 0).slice(0, 500)
-    if (ids.length === 0) return NextResponse.json({ images: [] })
+    if (ids.length === 0) return jsonPrivate({ images: [] })
     const rows = await prisma.generatedImage.findMany({
       where: { id: { in: ids }, isDeleted: false },
       // prompt + captionSections ride along for the composable-caption system
       select: { id: true, adminCaption: true, adminTags: true, imageUrl: true, thumbnailUrl: true, aspectRatio: true, prompt: true, captionSections: true },
     })
-    return NextResponse.json({ images: rows })
+    return jsonPrivate({ images: rows })
   }
 
   // ?slim=1&bucketId=&mediaType=motion → the whole bucket, minimal fields.
@@ -43,7 +44,7 @@ export async function GET(req: Request) {
       orderBy: { createdAt: 'desc' },
       take: 5000,
     })
-    return NextResponse.json({
+    return jsonPrivate({
       items: rows.map(r => {
         const m = (r.videoMetadata as Record<string, unknown> | null) ?? {}
         const segs = [1, 2].filter(n => typeof m[`previewAnimUrl${n}`] === 'string').length + 1
@@ -192,7 +193,7 @@ export async function GET(req: Request) {
       prisma.generatedImage.count({ where: { ...bw, adminCaption: { not: null } } }),
       prisma.generatedImage.count({ where: bw }),
     ])
-    return NextResponse.json({ bucketStats: { marked, tagged, captioned, total } }, { headers: { 'Cache-Control': 'no-store' } })
+    return jsonPrivate({ bucketStats: { marked, tagged, captioned, total } }, { headers: { 'Cache-Control': 'no-store' } })
   }
 
   // ── IDs-only (for select-all across all pages) ─────────────────────────────
@@ -202,7 +203,7 @@ export async function GET(req: Request) {
       select: { id: true },
       orderBy,
     })
-    return NextResponse.json({ ids: rows.map(r => r.id) }, { headers: { 'Cache-Control': 'no-store' } })
+    return jsonPrivate({ ids: rows.map(r => r.id) }, { headers: { 'Cache-Control': 'no-store' } })
   }
 
   // ── Paginated list ──────────────────────────────────────────────────────────
@@ -280,7 +281,7 @@ export async function GET(req: Request) {
     overallStatsPayload = { marked: overallMarked, tagged: overallTagged, captioned: overallCaptioned }
   }
 
-  return NextResponse.json({
+  return jsonPrivate({
     images,
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     ...(facetsPayload ? { facets: facetsPayload } : {}),
@@ -297,7 +298,7 @@ export async function GET(req: Request) {
 //   { ids, caption }             → set/clear adminCaption (null to clear)
 //   Any combination of the above is applied together.
 export async function PATCH(req: Request) {
-  if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!checkAuth(req)) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
 
   try {
     const body = await req.json() as {
@@ -326,12 +327,12 @@ export async function PATCH(req: Request) {
           data: { adminCaption: typeof c.caption === 'string' && c.caption.length > 0 ? c.caption : null },
         })
       ))
-      return NextResponse.json({ updated: rows.length })
+      return jsonPrivate({ updated: rows.length })
     }
 
     const { ids, marked, tags, addTags, removeTags, caption } = body
     if (!Array.isArray(ids) || ids.length === 0) {
-      return NextResponse.json({ error: 'ids must be a non-empty array' }, { status: 400 })
+      return jsonPrivate({ error: 'ids must be a non-empty array' }, { status: 400 })
     }
 
     // Fields that can be applied via updateMany (no per-row read needed)
@@ -375,8 +376,8 @@ export async function PATCH(req: Request) {
       updated = result.count
     }
 
-    return NextResponse.json({ updated })
+    return jsonPrivate({ updated })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return jsonPrivate({ error: err.message }, { status: 500 })
   }
 }

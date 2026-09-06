@@ -22,7 +22,7 @@
  * free slot — the retry loop inside handles concurrent races between calls.
  */
 
-import { fal } from '@fal-ai/client'
+import { fal } from '@/lib/fal-client'
 import prisma from '@/lib/prisma'
 
 fal.config({ credentials: process.env.FAL_KEY })

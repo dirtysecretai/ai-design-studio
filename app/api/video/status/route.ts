@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
-import { fal } from "@fal-ai/client";
+import { fal } from "@/lib/fal-client";
 import { uploadToR2 } from '@/lib/r2';
 import { resolveRequestUser, requireScopes } from '@/lib/api-key-auth';
 

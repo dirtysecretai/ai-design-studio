@@ -140,6 +140,7 @@ const AR_GROK_T2I = ['2:1', '20:9', '19.5:9', '16:9', '4:3', '3:2', '1:1', '2:3'
 const AR_GROK_EDIT = ['auto', ...AR_GROK_T2I] as const
 const AR_MUSE = ['21:9', '16:9', '4:3', '3:2', '1:1', '2:3', '3:4', '9:16', '9:21'] as const
 const AR_BRIA = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9'] as const
+const AR_NB2 = ['auto', '1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '4:5', '5:4', '21:9'] as const
 const AR_NB2_LITE = ['auto', '21:9', '16:9', '3:2', '4:3', '5:4', '1:1', '4:5', '3:4', '2:3', '9:16', '4:1', '1:4', '8:1', '1:8'] as const
 
 const TOPAZ_PRECISION_MODELS = ['Standard V2', 'High Fidelity V3', 'High Fidelity V2', 'Low Resolution V2', 'CGI', 'Text Refine'] as const
@@ -463,6 +464,59 @@ export const FAL_IMAGE_MODELS: Record<string, FalImageModelSpec> = {
       expansion_model: pickEnum(ctx.options.ideogramExpansionModel, ['None', 'Medium'] as const, 'Medium'),
       rendering_speed: pickEnum(ctx.options.ideogramRenderingSpeed, ['TURBO', 'BALANCED', 'QUALITY'] as const, 'BALANCED'),
     }),
+  },
+
+  // ── Google NanoBanana Pro 2 ───────────────────────────────────────────────
+  // A real spec rather than a hand-rolled branch, so everything that speaks
+  // "fal image model" can drive it: server-side batches, /api/generate's own
+  // fal path, and the chat hub. resolution is a STRING enum, and so is
+  // safety_tolerance (verified against fal's OpenAPI for this endpoint).
+  'nano-banana-pro-2': {
+    id: 'nano-banana-pro-2',
+    editVariant: 'nano-banana-pro-2-edit',
+    promptMin: 1,
+    promptMax: 50000,
+    endpoint: 'fal-ai/nano-banana-2',
+    needsImage: false,
+    imageParam: null,
+    maxInputImages: 0,
+    promptRequired: true,
+    aspectRatios: [...AR_NB2],
+    usesImageSize: false,
+    notes: 'resolution and safety_tolerance are STRING enums',
+    build: (ctx) =>
+      compact({
+        prompt: ctx.prompt,
+        aspect_ratio: pickEnum(ctx.aspectRatio, AR_NB2, 'auto'),
+        resolution: ctx.quality === '4k' ? '4K' : ctx.quality === '1k' ? '1K' : '2K',
+        output_format: 'png',
+        num_images: 1,
+        safety_tolerance: '6',
+        enable_web_search: true,
+      }),
+  },
+  'nano-banana-pro-2-edit': {
+    id: 'nano-banana-pro-2-edit',
+    promptMin: 1,
+    promptMax: 50000,
+    endpoint: 'fal-ai/nano-banana-2/edit',
+    needsImage: true,
+    imageParam: 'image_urls',
+    maxInputImages: 14,
+    promptRequired: true,
+    aspectRatios: [...AR_NB2],
+    usesImageSize: false,
+    build: (ctx) =>
+      compact({
+        prompt: ctx.prompt,
+        image_urls: ctx.imageUrls,
+        aspect_ratio: pickEnum(ctx.aspectRatio, AR_NB2, 'auto'),
+        resolution: ctx.quality === '4k' ? '4K' : ctx.quality === '1k' ? '1K' : '2K',
+        output_format: 'png',
+        num_images: 1,
+        safety_tolerance: '6',
+        enable_web_search: true,
+      }),
   },
 
   // ── Google NanoBanana 2 Lite ───────────────────────────────────────────────

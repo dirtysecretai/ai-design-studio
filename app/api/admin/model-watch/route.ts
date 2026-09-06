@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { FAL_APPS_IN_USE, FAL_IMAGE_APPS_IN_USE } from '@/lib/fal-video-endpoints'
+import { FAL_TOOL_MODELS } from '@/lib/fal-tool-models'
 import { cookies } from 'next/headers'
 import { getUserFromSession } from '@/lib/auth'
 import { checkIsAdmin } from '@/lib/admin-check'
@@ -35,6 +36,36 @@ const KEYWORDS = [
   'lora',
   'audio',
   'edit',
+  // The generation keywords only ever surfaced things that MAKE a picture, so
+  // whole families the site already depends on — speech, sound effects,
+  // segmentation, relighting, camera control, training — never appeared here
+  // at all. These are also the families most likely to hold a feature worth
+  // building a manual tool around.
+  'text-to-audio',
+  'speech',
+  'music',
+  'sound-effects',
+  'segmentation',
+  'relight',
+  'camera',
+  'training',
+  'face-swap',
+  'video-to-video',
+  'audio-to-video',
+  'text-to-speech',
+  // 3D is a whole ecosystem on fal — seventy-odd models across text-to-3d,
+  // image-to-3d, retexturing, remeshing, rigging and scene reconstruction —
+  // and none of the generation keywords above surfaced a single one of them.
+  '3d',
+  'image-to-3d',
+  'text-to-3d',
+  '3d-to-3d',
+  'mesh',
+  'rigging',
+  'gaussian-splatting',
+  'point-cloud',
+  'panorama',
+  'depth',
 ]
 
 // Where our model ids live. Anything referenced in these files counts as
@@ -108,7 +139,13 @@ function categoryOf(raw: string): string {
 // Which fal apps we already use, straight from our own endpoint table. Reading
 // source files here instead made the bundler trace the whole repo.
 function inUseApps(): Set<string> {
-  return new Set([...FAL_APPS_IN_USE, ...FAL_IMAGE_APPS_IN_USE].map(a => a.toLowerCase()))
+  // FAL_TOOL_MODELS is the third catalog: audio, masking, relight, face swap,
+  // transcription and training all live outside the two generation lists, so
+  // without it every one of them showed up here as a model we do not have.
+  return new Set(
+    [...FAL_APPS_IN_USE, ...FAL_IMAGE_APPS_IN_USE, ...FAL_TOOL_MODELS.map(t => t.endpoint)]
+      .map(a => a.toLowerCase()),
+  )
 }
 
 async function buildCatalog(): Promise<CatalogPayload> {

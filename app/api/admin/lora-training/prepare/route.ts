@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { fal } from '@fal-ai/client'
+import { fal } from '@/lib/fal-client'
 import archiver from 'archiver'
 import fs from 'fs'
 import os from 'os'

@@ -5,12 +5,12 @@ import { requireChatHubAdmin } from '@/lib/chat-hub-auth'
 import { getChatModelForUser } from '@/lib/chat-hub-models'
 import {
   loadUserKeys, loadChatPrefs, resolveChatModel, buildRoster,
-  rosterInstructions, mediaInstructions, toolsInstructions, modeInstructions, movieFormatInstructions, providerFilterWarning,
+  rosterInstructions, mediaInstructions, toolsInstructions, modeInstructions, movieFormatInstructions, audioPlanInstructions, providerFilterWarning,
   identityInstructions, coreDisciplineInstructions, skillOn,
   skillSummariesInstructions, loadGlobalMemory,
   sanitizeAgentMode, buildHistoryMessages, makeAgentTools, agentStreamResponse,
   maybeCompactChat, loadTicketBalance, persistFinalEdit, inlineWeakModelImages,
-  type RoutingMap, type AgentStep, type SkillSet,
+  type RoutingMap, type AgentStep, type SkillSet, type PlanBudget,
 } from '@/lib/chat-hub-agent'
 import { sanitizeSkillIds, movieFormatSeconds } from '@/lib/chat-hub-skills'
 import { isChatCancelRequested, clearChatCancel } from '@/lib/chat-hub-cancel'
@@ -54,7 +54,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (!content) return NextResponse.json({ error: 'Message is empty' }, { status: 400 })
 
   const prefs = await loadChatPrefs(user.id)
-  const modelSpec = getChatModelForUser(model, prefs.customModels)
+  // A chat already knows which model it runs on, so an omitted `model` is not
+  // an error — it means "the one this chat was created with". The hub always
+  // sends it; the Employees workspaces have no model picker and should not
+  // have to invent one. Without this fallback their sends 400'd before the
+  // user's message was ever written.
+  const chatRow = await prisma.chat.findFirst({
+    where: { id: chatId, userId: user.id },
+    select: { model: true },
+  })
+  if (!chatRow) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  const modelSpec = getChatModelForUser(model || chatRow.model, prefs.customModels)
   if (!modelSpec) return NextResponse.json({ error: 'Unknown model' }, { status: 400 })
 
   // Attached reference images: https URLs only, clamped to the model's input cap
@@ -65,7 +75,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     : []
 
   const userKeys = await loadUserKeys(user.id)
-  const routes = sanitizeRoutes(body.routes, body.route, modelSpec.provider)
+  // The hub sends its routing with every message; the Employees workspaces have
+  // no routing UI. Without a fallback they always resolved to the Vercel
+  // gateway and failed with "No Vercel AI Hub key" even when the account is set
+  // up to call Google directly.
+  const bodyRoutes = sanitizeRoutes(body.routes, body.route, modelSpec.provider)
+  const routes = Object.keys(bodyRoutes).length > 0 ? bodyRoutes : prefs.routing
   const resolved = resolveChatModel(modelSpec, routes, userKeys)
   if (typeof resolved === 'object' && resolved !== null && 'error' in resolved) {
     return NextResponse.json({ error: resolved.error }, { status: 500 })
@@ -74,7 +89,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const chat = await prisma.chat.findFirst({
     where: { id: chatId, userId: user.id },
     select: {
-      id: true, title: true, systemPrompt: true, agentMode: true, skills: true,
+      id: true, title: true, systemPrompt: true, agentMode: true, skills: true, source: true,
       projectId: true, memorySummary: true, summaryUpToId: true,
       project: { select: { memory: true } },
     },
@@ -84,6 +99,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // Enabled skills (null = all = legacy behavior)
   const skillIds = sanitizeSkillIds(chat.skills)
   const skillSet: SkillSet = skillIds === null ? null : new Set(skillIds)
+  // A film needs far more steps than a chat reply: intake alone spends
+  // reasoning, ask_user, four or five playbook loads and propose_plan, and the
+  // production has not started. At 16 the run ran out mid-shoot and simply
+  // stopped, which reads to the user as "it broke".
+  const STEP_CAP = skillOn(skillSet, 'movie-production') || skillOn(skillSet, 'character-design') ? 30 : 16
+
   const mediaEnabled = skillOn(skillSet, 'image-generation') || skillOn(skillSet, 'video-production')
   const editEnabled = skillOn(skillSet, 'photoshop') || skillOn(skillSet, 'sketching')
 
@@ -107,12 +128,22 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const userRow = await prisma.chatMessage.create({ data: { chatId, role: 'user', content, imageUrls } })
   // First exchange: the first message stands in as the title until the run
   // finishes, then a one-shot auto-title replaces it (see onFinish)
-  const firstExchange = chat.title === 'New chat'
-  const placeholderTitle = content.slice(0, 60)
+  // Films start life as 'Untitled film', chats as 'New chat' — either is the
+  // placeholder that says "nobody has named this yet".
+  const isFilm = chat.source === 'movie-studio'
+  const firstExchange = chat.title === 'New chat' || chat.title === 'Untitled film'
+  // A chat borrows its first message as a stand-in title; a film keeps
+  // "Untitled film" until the user names it, so the tab never shows a title
+  // nobody chose.
+  const placeholderTitle = isFilm ? chat.title : content.slice(0, 60)
   await prisma.chat.update({
     where: { id: chatId },
     data: {
-      model,
+      // The RESOLVED model, never the raw body value. A caller with no model
+      // picker sends none, and writing that empty string wiped the chat's
+      // model — every later request then failed with "Chat model no longer
+      // available", which is what happened to the film workspaces.
+      model: modelSpec.id,
       ...(firstExchange ? { title: placeholderTitle } : {}),
     },
   })
@@ -160,6 +191,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     mediaInstructions(ticketBalance, prefs.modelPrefs, skillSet, true),
     providerFilterWarning(content, skillSet),
     movieFormatInstructions(skillSet, prefs.movieFormat),
+    audioPlanInstructions(skillSet, prefs.audioPlan),
     agentMode === 'plan' ? '' : toolsInstructions(chat.projectId !== null, skillSet),
     globalMemory,
     chat.project?.memory?.trim()
@@ -182,6 +214,24 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const lastAttachedRow = [...historyRows].reverse().find(r => r.role === 'user' && r.imageUrls.length > 0)
   const effectiveAttachedRefs = imageUrls.length ? imageUrls : (lastAttachedRow?.imageUrls ?? [])
 
+  // An approved plan budget belongs to the CHAT, not to the single reply that
+  // happened to collect the approval. A film runs across several replies — the
+  // render queue hands shots back and the run continues in a fresh send — and
+  // this route never looked the budget up, so pass 2 asked the user to approve
+  // a plan they had already approved and paid for.
+  //
+  // Take the most recent budget in the window that still has money in it. A
+  // 0-total plan is a FREE plan and stays active; a spent one does not.
+  let planBudget: PlanBudget | null = null
+  for (let i = historyRows.length - 1; i >= 0; i--) {
+    const pb = (historyRows[i].metadata as { planBudget?: { total?: unknown; spent?: unknown } } | null)?.planBudget
+    if (!pb || typeof pb.total !== 'number') continue
+    const total = pb.total
+    const spent = typeof pb.spent === 'number' ? pb.spent : 0
+    if (total === 0 || total > spent) planBudget = { total, spent }
+    break // only the newest one counts — an older, exhausted plan is finished
+  }
+
   const generatedUrls: string[] = []
   // Live-progress writes run serialized on this chain (see onProgress)
   let progressChain: Promise<unknown> = Promise.resolve()
@@ -195,9 +245,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     allowedImages,
     projectId: chat.projectId,
     skills: skillSet,
+    // Carried from the approved plan so a continuation does not re-ask
+    planBudget,
+    // Scopes the shot-list duplicate guard to this film
+    chatId,
     // So assemble_film can object when the cut lands far under the runtime
     // the user picked, rather than trusting the model to notice.
     targetSeconds: movieFormatSeconds(prefs.movieFormat),
+    budgetCap: prefs.budgetCap,
   })
 
   // Anthropic prompt caching (probe-verified on ai@7): a cache_control marker
@@ -228,7 +283,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       instructions,
       messages,
       tools,
-      stopWhen: stepCountIs(16),
+      stopWhen: stepCountIs(STEP_CAP),
       // Anthropic hard-requires max_tokens > thinking budget — the provider's
       // default output cap is 4096, equal to the budget, which 400s instantly
       maxOutputTokens: 16384,
@@ -248,6 +303,41 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return agentStreamResponse({
       agentMode,
       isCanceled: () => isChatCancelRequested(chatId),
+      // A film continues across replies, so this route now runs mid-plan work
+      // that only the approve route used to. Same safety net: if the model
+      // stops while the approved plan still has real money and nothing is
+      // pending, push it once to do the next step or say it is finished.
+      // Without this, a turn that got refused or lost its footing ended with
+      // the user's approved budget silently unspent.
+      retryIfIncomplete: async (assistantText) => {
+        if (!planBudget) return null
+        const remaining = planBudget.total - planBudget.spent
+        if (remaining < 5 || !assistantText.trim()) return null
+        try {
+          const cont = streamText({
+            model: resolved as LanguageModel,
+            instructions,
+            messages: [
+              ...messages,
+              { role: 'assistant', content: assistantText },
+              {
+                role: 'user',
+                content:
+                  `SYSTEM CHECK: the approved plan still has ${remaining} of ${planBudget.total} tickets unspent and you ended your turn with nothing pending. `
+                  + `If a PLANNED step genuinely remains undone, CONTINUE NOW — one short progress sentence, then call the next tool. `
+                  + `If a tool refused your call, read WHY and act on it rather than stopping: a guard that reports work already in flight means WAIT for it, not finish. `
+                  + `UNSPENT BUDGET IS SAVINGS, NOT A TO-DO: never create assets beyond the plan's step list. `
+                  + `If every planned step is complete or genuinely blocked, say so in one sentence and call write_summary. Do not repeat earlier text.`,
+              },
+            ],
+            tools,
+            stopWhen: stepCountIs(STEP_CAP),
+            maxOutputTokens: 16384,
+            onError: ({ error }) => { console.error('chat-hub send continuation error:', error) },
+          })
+          return cont.fullStream
+        } catch { return null }
+      },
       // 24B-class local models can sit silent for minutes on cold load /
       // long prompt eval — don't watchdog them at cloud pace
       idleMs: modelSpec.ollama || modelSpec.runpod ? 600_000 : undefined,
@@ -288,7 +378,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
               },
             ],
             tools,
-            stopWhen: stepCountIs(16),
+            stopWhen: stepCountIs(STEP_CAP),
             maxOutputTokens: 16384,
             providerOptions: {
               google: { thinkingConfig: { includeThoughts: true } },
@@ -317,7 +407,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
               },
             ],
             tools,
-            stopWhen: stepCountIs(16),
+            stopWhen: stepCountIs(STEP_CAP),
             maxOutputTokens: 16384,
             providerOptions: {
               google: { thinkingConfig: { includeThoughts: true } },
@@ -389,6 +479,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
               // post-approval continuations…)
               textSegments: text.trim() ? [text] : [],
               ...(steps.length ? { agentSteps: steps } : {}),
+              // Carry the budget forward with what this reply actually spent,
+              // so the NEXT continuation reads accurate remaining money instead
+              // of re-reading the pre-spend figure from an older reply.
+              ...(planBudget ? { planBudget } : {}),
               ...(pending.length ? { pendingApproval: { calls: pending, round: 1 } } : {}),
             })),
           },
@@ -396,7 +490,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         await prisma.chat.update({ where: { id: chatId }, data: { updatedAt: new Date() } })
         // One-shot auto-title after the first exchange. Conditional on the
         // placeholder still being in place, so a manual rename mid-run wins.
-        if (firstExchange) {
+        // Films are NOT auto-titled: the employee offers titles in its intake
+        // questions and the user picks or writes one, which the workspace then
+        // applies. Naming it here would decide that before they were asked.
+        if (firstExchange && !isFilm) {
           void generateChatTitle(content, text).then(async (title) => {
             if (!title || title === placeholderTitle) return
             await prisma.chat.updateMany({ where: { id: chatId, title: placeholderTitle }, data: { title } })

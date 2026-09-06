@@ -3,6 +3,7 @@ import prisma from '@/lib/prisma'
 import { getUserFromSession } from '@/lib/auth'
 import { cookies } from 'next/headers'
 import { uploadToR2 } from '@/lib/r2'
+import { signMediaUrl } from '@/lib/media-url'
 import sharp from 'sharp'
 
 
@@ -41,7 +42,9 @@ export async function GET(
       // feed normally uses that URL directly, but if this route is hit, redirect to it
       // (no full-image download, no resize).
       if (image.thumbnailUrl) {
-        return NextResponse.redirect(image.thumbnailUrl, 302)
+        // Signed, not raw: the stored URL points at a bucket that no longer
+        // answers to anonymous callers. Ownership was checked above.
+        return NextResponse.redirect(signMediaUrl(image.thumbnailUrl), 302)
       }
       // First view of this image — generate the thumbnail once, store it on R2 so
       // every future request (this route or the direct URL) is a cheap CDN-served file.

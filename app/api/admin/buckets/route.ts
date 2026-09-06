@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { checkAuth } from '@/lib/admin-auth'
+import { jsonPrivate } from '@/lib/api-json'
 
 const VIDEO_RE = /\.(mp4|webm|mov|avi|mkv)$/i
 
@@ -9,7 +10,7 @@ const VIDEO_RE = /\.(mp4|webm|mov|avi|mkv)$/i
 // ?fast=1 skips the per-bucket preview queries (one findMany total) so the
 // catalog renders instantly; callers hydrate previews with a follow-up full GET.
 export async function GET(req: Request) {
-  if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!checkAuth(req)) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
   const fast = new URL(req.url).searchParams.get('fast') === '1'
 
   const buckets = await prisma.datasetBucket.findMany({
@@ -38,7 +39,7 @@ export async function GET(req: Request) {
     }))
   }
 
-  return NextResponse.json(
+  return jsonPrivate(
     buckets.map(b => ({
       id: b.id, name: b.name, description: b.description, color: b.color,
       folderId: b.folderId ?? null, count: b._count.images, createdAt: b.createdAt,
@@ -51,11 +52,11 @@ export async function GET(req: Request) {
 // POST — create a new bucket
 // Body: { name, description?, color?, folderId? }
 export async function POST(req: Request) {
-  if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!checkAuth(req)) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
 
   const { name, description, color, folderId } = await req.json() as { name: string; description?: string; color?: string; folderId?: number }
-  if (!name?.trim()) return NextResponse.json({ error: 'name required' }, { status: 400 })
+  if (!name?.trim()) return jsonPrivate({ error: 'name required' }, { status: 400 })
 
   const bucket = await prisma.datasetBucket.create({ data: { name: name.trim(), description, color, folderId: folderId ?? null } })
-  return NextResponse.json(bucket, { status: 201 })
+  return jsonPrivate(bucket, { status: 201 })
 }

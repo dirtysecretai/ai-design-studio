@@ -3,7 +3,7 @@
 // Full-quality originals (jpeg/png/webp ≤10MB) arrive untouched; larger or
 // exotic formats are re-encoded to a 4096px JPEG client-side first.
 
-import { uploadToR2 } from '@/lib/r2';
+import { uploadToR2, userKey } from '@/lib/r2';
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { getUserFromSession } from '@/lib/auth';
@@ -36,7 +36,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     const ext = type === 'image/png' ? 'png' : type === 'image/webp' ? 'webp' : 'jpg';
     const filename = `reference-${Date.now()}-${Math.random().toString(36).substr(2, 9)}.${ext}`;
 
-    const url = await uploadToR2(filename, buffer, type);
+    const url = await uploadToR2(userKey(sessionUser.id, filename), buffer, type);
 
     return NextResponse.json({ url });
   } catch (error) {

@@ -6,6 +6,7 @@ import { checkAuth } from '@/lib/admin-auth'
 import { FAL_ENDPOINTS } from '@/lib/fal-video-endpoints'
 import { VIDEO_MODEL_SPECS } from '@/lib/ticket-pricing'
 import { AI_MODELS } from '@/config/ai-models.config'
+import { FAL_TOOL_MODELS } from '@/lib/fal-tool-models'
 
 // GET /api/admin/ticket-economics  → fal's own pricing blurb for every model we
 // ship, keyed by OUR model id.
@@ -33,8 +34,34 @@ async function isAdmin(req: Request): Promise<boolean> {
 const KEYWORDS = [
   'video', 'image-to-video', 'text-to-video', 'text-to-image',
   'image-to-image', 'upscale', 'edit', 'lora', 'audio',
+  // Added for the tool catalog: audio, masking, relight, transcription and
+  // training all sit in fal categories the original sweep never asked for, so
+  // their blurbs were simply absent rather than unmatched.
+  'text-to-audio', 'speech', 'music', 'sound-effects',
+  'segmentation', 'training', 'relight', 'face-swap',
 ]
 const PAGES_PER_KEYWORD = 3
+
+/**
+ * The tool catalog needs its models found BY NAME.
+ *
+ * fal's keyword index is a search, not a listing: sweeping 'audio' and
+ * 'segmentation' returned six of nineteen tool endpoints, because the rest
+ * simply do not rank for their own category. Searching the distinctive part of
+ * each endpoint ('lyria', 'sam2', 'iclight') finds every one of them on the
+ * first page. Deduped, so two models in the same family cost one request.
+ *
+ * NOTE: matching is not the same as pricing. Most of these come back with an
+ * EMPTY pricing blurb because fal does not publish one for them, which the row
+ * reports honestly rather than pretending it found nothing at all.
+ */
+const TOOL_KEYWORDS = [...new Set(
+  FAL_TOOL_MODELS.map(t => {
+    const parts = t.endpoint.split('/')
+    // 'fal-ai/elevenlabs/sound-effects' → 'elevenlabs'; 'fal-ai/lyria2' → 'lyria2'
+    return (parts[1] ?? '').replace(/-v\d+$/, '')
+  }).filter(Boolean),
+)]
 
 export type PricingUnit = 'sec' | 'gen'
 
@@ -61,7 +88,13 @@ export interface ParsedFalPrice {
 export interface FalPricingRow {
   /** Our model id, e.g. 'kling-v3' or 'nano-banana-pro'. */
   id: string
-  kind: 'video' | 'image'
+  kind: 'video' | 'image' | 'tool'
+  /** tool rows only: which kind of tool, for grouping. */
+  category?: string
+  /** tool rows only: what calls it, so an unbilled row can be traced. */
+  usedBy?: string
+  /** tool rows only: tickets charged today. 0 means we are eating the bill. */
+  ticketCost?: number
   /** The fal endpoint the blurb was read off. */
   endpoint: string | null
   /** Every fal endpoint this model of ours can hit. */
@@ -381,6 +414,16 @@ function lookup(
 async function build(): Promise<Payload> {
   const errors: string[] = []
   const jobs: Promise<{ id?: unknown; pricingInfoOverride?: unknown }[]>[] = []
+  // Tool names are searched one page deep: they are exact-ish terms, so the
+  // model is on page one or it is not there at all.
+  for (const kw of TOOL_KEYWORDS) {
+    jobs.push(
+      fetchPage(kw, 1).catch(e => {
+        errors.push(e instanceof Error ? e.message : `${kw} p1: failed`)
+        return []
+      }),
+    )
+  }
   for (const kw of KEYWORDS) {
     for (let p = 1; p <= PAGES_PER_KEYWORD; p++) {
       jobs.push(
@@ -429,6 +472,24 @@ async function build(): Promise<Payload> {
       : { parsed: null, candidates: [], tiers: { resolution: {}, audio: {} }, skipReason: null }
     rows.push({
       id: m.id, kind: 'image',
+      endpoint: hit.endpoint, endpoints, match: hit.match,
+      pricingText: hit.text, suggested: parse.parsed, candidates: parse.candidates, tiers: parse.tiers,
+      suggestSkipReason: parse.skipReason,
+    })
+  }
+
+  // EVERY fal call the site makes that is neither an image nor a video model.
+  // These are all free to the user today, which is exactly why they need to be
+  // on the page: an invisible cost is one that never gets priced.
+  for (const t of FAL_TOOL_MODELS) {
+    const endpoints = [t.endpoint]
+    const hit = lookup(catalog, endpoints)
+    const parse = hit.text
+      ? parseFalPricing(hit.text)
+      : { parsed: null, candidates: [], tiers: { resolution: {}, audio: {} }, skipReason: null }
+    rows.push({
+      id: t.id, kind: 'tool',
+      category: t.category, usedBy: t.usedBy, ticketCost: t.ticketCost,
       endpoint: hit.endpoint, endpoints, match: hit.match,
       pricingText: hit.text, suggested: parse.parsed, candidates: parse.candidates, tiers: parse.tiers,
       suggestSkipReason: parse.skipReason,

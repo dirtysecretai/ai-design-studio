@@ -6,6 +6,7 @@ import { cookies } from 'next/headers';
 import prisma from '@/lib/prisma';
 import { getUserFromSession } from '@/lib/auth';
 import { checkIsAdmin } from '@/lib/admin-check';
+import { jsonPrivate } from '@/lib/api-json'
 
 export async function POST(req: NextRequest) {
   try {
@@ -16,14 +17,14 @@ export async function POST(req: NextRequest) {
     const token = (await cookies()).get('session')?.value;
     const user = token ? await getUserFromSession(token) : null;
     if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return jsonPrivate({ error: 'Unauthorized' }, { status: 401 });
     }
     const isAdmin = await checkIsAdmin(user.email);
 
     const { imageIds } = await req.json();
 
     if (!Array.isArray(imageIds)) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: 'imageIds must be an array' },
         { status: 400 }
       );
@@ -52,13 +53,13 @@ export async function POST(req: NextRequest) {
       }
     });
 
-    return NextResponse.json({
+    return jsonPrivate({
       success: true,
       images
     });
   } catch (error) {
     console.error('Failed to fetch images by IDs:', error);
-    return NextResponse.json(
+    return jsonPrivate(
       { error: 'Failed to fetch images' },
       { status: 500 }
     );

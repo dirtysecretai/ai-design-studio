@@ -8,6 +8,7 @@ import { writeFile, readFile, readdir, rm, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import path from 'path'
 import os from 'os'
+import { jsonPrivate } from '@/lib/api-json'
 
 const FALLBACK_ADMIN_EMAILS = ['promptandprotocol@gmail.com', 'dirtysecretai@gmail.com']
 
@@ -141,11 +142,11 @@ async function runInferenceBackground(
 // POST — submit job, return jobId immediately
 export async function POST(req: Request) {
   const user = await getAdminUser()
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!user) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
 
   const { imageUrl, modelPath, scale = 4, prompt = 'Local ESRGAN upscale' } = await req.json()
-  if (!imageUrl || !modelPath) return NextResponse.json({ error: 'imageUrl and modelPath required' }, { status: 400 })
-  if (!existsSync(modelPath)) return NextResponse.json({ error: `Model not found: ${modelPath}` }, { status: 400 })
+  if (!imageUrl || !modelPath) return jsonPrivate({ error: 'imageUrl and modelPath required' }, { status: 400 })
+  if (!existsSync(modelPath)) return jsonPrivate({ error: `Model not found: ${modelPath}` }, { status: 400 })
 
   pruneJobs()
   const jobId = `esrgan-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
@@ -154,19 +155,19 @@ export async function POST(req: Request) {
   // Fire and forget — job runs in background
   runInferenceBackground(jobId, user.id, prompt, imageUrl, modelPath, scale)
 
-  return NextResponse.json({ jobId })
+  return jsonPrivate({ jobId })
 }
 
 // GET — poll job status
 export async function GET(req: Request) {
   const user = await getAdminUser()
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!user) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
 
   const jobId = new URL(req.url).searchParams.get('jobId')
-  if (!jobId) return NextResponse.json({ error: 'jobId required' }, { status: 400 })
+  if (!jobId) return jsonPrivate({ error: 'jobId required' }, { status: 400 })
 
   const job = jobs.get(jobId)
-  if (!job) return NextResponse.json({ status: 'not_found' }, { status: 404 })
+  if (!job) return jsonPrivate({ status: 'not_found' }, { status: 404 })
 
-  return NextResponse.json({ status: job.status, imageUrl: job.imageUrl, dbId: job.dbId, error: job.error })
+  return jsonPrivate({ status: job.status, imageUrl: job.imageUrl, dbId: job.dbId, error: job.error })
 }

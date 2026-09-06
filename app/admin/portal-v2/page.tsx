@@ -6,10 +6,15 @@ import { createPortal } from "react-dom"
 import Link from "next/link"
 import ChatWidget from "@/components/ChatWidget"
 import ChatHub, { ChatProviderSettings, ChatLayoutSettings, ChatAgentSettings, ChatAgentCapabilities, ChatApiKeysSettings } from "@/components/chat-hub"
-import { Image, Video, Type, ChevronDown, ChevronLeft, ChevronRight, Ticket, User, BookMarked, ImagePlus, X, Plus, Check, Copy, Download, RotateCcw, ShoppingBag, SlidersHorizontal, Bell, AlertTriangle, CheckCircle, Info, Sparkles, Music, BookOpen, Star, Trash2, Loader2, Eye, RefreshCw, Upload, Pencil, Eraser, Crop, Undo2, Redo2, Square, Circle, Droplets, Lock, FolderPlus, Layers, Search, PanelLeft, PanelRight, PanelTop, PanelBottom, EyeOff, Folder, Maximize2, Minimize2, FolderInput, Zap, MessagesSquare, ArrowUpRight, Wand2, Scissors, List, LayoutGrid, Unlock, MousePointer2, ClipboardPaste, Play, Film, Mic, MicOff, Shield } from "lucide-react"
+import { Image, Video, Type, ChevronDown, ChevronLeft, ChevronRight, Ticket, User, BookMarked, ImagePlus, X, Plus, Check, Copy, Download, RotateCcw, ShoppingBag, SlidersHorizontal, Bell, AlertTriangle, CheckCircle, Info, Sparkles, Music, BookOpen, Star, Trash2, Loader2, Eye, RefreshCw, Upload, Pencil, Eraser, Crop, Undo2, Redo2, Square, Circle, Droplets, Lock, FolderPlus, Layers, Search, PanelLeft, PanelRight, PanelTop, PanelBottom, EyeOff, Folder, Maximize2, Minimize2, FolderInput, Zap, MessagesSquare, ArrowUpRight, Wand2, Scissors, List, LayoutGrid, Unlock, MousePointer2, ClipboardPaste, Play, Film, Mic, MicOff, Shield, UsersRound, Box, ImageOff } from "lucide-react"
 import { AddToBucketModal, type Bucket, type BucketFolder } from "@/components/AddToBucketModal"
 import { NewsManager } from "@/components/NewsManager"
 import { HomeView } from "@/components/home/HomeView"
+import { EmployeesView, type EmployeeId } from "@/components/employees/EmployeesView"
+import { MovieStudioWorkspace } from "@/components/employees/MovieStudioWorkspace"
+import { ThreeDStudioWorkspace } from "@/components/employees/ThreeDStudioWorkspace"
+import { FaceSwapWorkspace } from "@/components/employees/FaceSwapWorkspace"
+import { CharacterStudioWorkspace } from "@/components/employees/CharacterStudioWorkspace"
 import { SiteBrandHero, SiteLogoBox } from "@/components/SitePageHeader"
 import { SilverRimOverlay } from "@/components/home/SilverRimOverlay"
 
@@ -2171,13 +2176,7 @@ function GroupedTaskbarDropdown({
       >
         {/* Animated silver-shimmer title — the flagship Image/Video dropdowns */}
         <span
-          className="font-extrabold tracking-wide bg-clip-text text-transparent"
-          style={{
-            backgroundImage: "linear-gradient(90deg,#94a3b8,#f8fafc,#e2e8f0,#64748b,#f8fafc,#94a3b8)",
-            backgroundSize: "200% 100%",
-            animation: "silver-shimmer 3.5s linear infinite",
-            filter: "drop-shadow(0 0 5px rgba(248,250,252,0.28))",
-          }}
+          className="font-extrabold tracking-wide silver-shimmer-text"
         >
           {label}
         </span>
@@ -2440,6 +2439,79 @@ function refTileThumb(url: string, w: 128 | 256 = 256): string {
   // w must be one of Next's configured image sizes and q must be 75 — Vercel's
   // optimizer 400s anything else (verified against prod)
   return url.startsWith("https://") ? `/_next/image?url=${encodeURIComponent(url)}&w=${w}&q=75` : url
+}
+
+/**
+ * The src for a reference tile.
+ *
+ * NOT the Next optimizer. References in this library average 5.8MB and go up
+ * to 22MB, so pointing `/_next/image` at the originals meant the Refs dropdown
+ * downloaded and re-encoded hundreds of megabytes before the grid painted —
+ * which is exactly the "takes ages to render" the tiles were showing. The
+ * thumb route makes a 512px webp once, stores it on R2 under a key derived
+ * from the reference id, and redirects to the CDN from then on.
+ *
+ * Anything without a numeric id is transient (a data URL, a not-yet-uploaded
+ * file) and has no server-side thumbnail to point at, so it renders directly.
+ */
+function refThumbSrc(img: { id: string; url: string }): string {
+  return /^\d+$/.test(img.id) && img.url.startsWith("https://")
+    ? `/api/user/references/thumb/${img.id}`
+    : img.url
+}
+
+/**
+ * A reference tile that admits when its image is gone.
+ *
+ * Twenty references in this library still point at a Vercel Blob store that
+ * was torn down; every one of them 404s. The browser's own broken-image glyph
+ * gives no clue whether that is a dead file, a slow network or a bug, so the
+ * tile says which and offers the only useful action.
+ */
+function RefThumb({
+  img,
+  className = "",
+  fit = "cover",
+}: {
+  img: { id: string; url: string }
+  className?: string
+  fit?: "cover" | "contain"
+}) {
+  const [dead, setDead] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+
+  if (dead) {
+    return (
+      <span className="flex h-full w-full flex-col items-center justify-center gap-0.5 bg-black/60 px-1 text-center">
+        <ImageOff size={13} className="text-slate-600" />
+        <span className="text-[7px] uppercase leading-tight tracking-wide text-slate-600">
+          Unavailable
+        </span>
+      </span>
+    )
+  }
+
+  return (
+    // Its own positioned box: the tiles this drops into are not all relative,
+    // and the placeholder has to sit exactly over the image.
+    <span className="relative block h-full w-full">
+      {/* Holds the tile's shape while the thumbnail is still being made — the
+          first view of a reference has to generate one. */}
+      {!loaded && <span className="absolute inset-0 animate-pulse bg-white/[0.04]" />}
+      {/* The fit class is written out rather than interpolated: Tailwind only
+          ships classes it can see as literal text, so `object-${fit}` would
+          compile to no class at all. */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={refThumbSrc(img)}
+        alt=""
+        decoding="async"
+        onLoad={() => setLoaded(true)}
+        onError={() => setDead(true)}
+        className={`relative h-full w-full ${fit === "contain" ? "object-contain" : "object-cover"} transition-opacity ${loaded ? "opacity-100" : "opacity-0"} ${className}`}
+      />
+    </span>
+  )
 }
 
 // ── Reference VIDEOS in the account library ──
@@ -5684,7 +5756,9 @@ function RefDropdown({
   library,
   activeIds,
   modelMaxRefs,
+  modelMaxVideos,
   onUploadFiles,
+  onUploadUrls,
   onDelete,
   onDeleteMultiple,
   onClearAll,
@@ -5710,8 +5784,12 @@ function RefDropdown({
   library: RefImage[]
   activeIds: string[]
   modelMaxRefs: number
+  /** Set when the consumer counts CLIPS separately from stills (Movie Studio). */
+  modelMaxVideos?: number
   // Raw files — page-level helper compresses, uploads to R2 and creates account rows
   onUploadFiles: (files: File[], folderId: number | null) => Promise<{ added: number; failed: number; limitHit: boolean }>
+  /** Register already-uploaded assets (meshes) as library rows. */
+  onUploadUrls?: (items: { url: string }[], folderId: number | null) => Promise<unknown>
   onDelete: (id: string) => void
   onDeleteMultiple: (ids: string[]) => void
   onClearAll: () => void
@@ -5825,10 +5903,38 @@ function RefDropdown({
   const [renamingFolderId, setRenamingFolderId] = useState<number | null>(null)
   const [renameValue, setRenameValue] = useState("")
   const [movePicker, setMovePicker] = useState<{ path: RefFolder[] } | null>(null)
+  /**
+   * 2D or 3D. The library holds both now, and they are not browsable together:
+   * a mesh has no thumbnail worth putting in a picture grid, and a photograph
+   * is noise when you are looking for a model to remesh. The reference library
+   * has no kind column and cannot get one without a migration, so \u2014 as with
+   * video refs \u2014 the file extension is the marker.
+   */
+  const [kindFilter, setKindFilter] = useState<"2d" | "3d">("2d")
+  const meshUploadRef = useRef<HTMLInputElement>(null)
+  const [meshUploading, setMeshUploading] = useState(false)
   const activeCount = disabled ? 0 : activeIds.filter((id) => library.some((img) => img.id === id)).length
+  // Movie Studio takes the user's own clips as well as stills, and they are
+  // different budgets \u2014 a shared "3/16" said nothing about which was full.
+  // The library has no kind column, so the file extension is the marker.
+  const splitRefs = typeof modelMaxVideos === "number"
+  const activeVideos = !splitRefs || disabled ? 0 : activeIds.filter((id) => {
+    const item = library.find((img) => img.id === id)
+    return !!item && /\.(mp4|webm|mov|m4v)(\?|$)/i.test(item.url ?? "")
+  }).length
+  const activeImages = activeCount - activeVideos
   // modelMaxRefs === 0 (model takes no refs) blocks activation entirely —
   // previously the `> 0` guard let refs activate despite the no-support notice
-  const atLimit = !disabled && activeCount >= modelMaxRefs
+  const atLimit = !disabled && (
+    typeof modelMaxVideos === "number"
+      // Full only when BOTH budgets are full; one being spent must not lock
+      // the other out.
+      ? activeCount - activeIds.filter((id) => {
+          const item = library.find((img) => img.id === id)
+          return !!item && /\.(mp4|webm|mov|m4v)(\?|$)/i.test(item.url ?? "")
+        }).length >= modelMaxRefs
+      : activeCount >= modelMaxRefs
+  )
 
   const currentFolderId = folderPath.length > 0 ? folderPath[folderPath.length - 1].id : null
   // Drop path segments whose folders were deleted (e.g. from another device)
@@ -5838,7 +5944,11 @@ function RefDropdown({
     }
   }, [folders, folderPath])
   const visibleFolders = folders.filter(f => (f.parentId ?? null) === currentFolderId)
-  const visibleRefs = library.filter(i => (i.folderId ?? null) === currentFolderId)
+  const is3D = (u: string) => /\.(glb|gltf|obj|stl|fbx|ply|usdz|3mf)(\?|$)/i.test(u ?? "")
+  const visibleRefs = library
+    .filter(i => (i.folderId ?? null) === currentFolderId)
+    .filter(i => (kindFilter === "3d" ? is3D(i.url) : !is3D(i.url)))
+  const count3D = library.filter(i => is3D(i.url)).length
   const refCountIn = (folderId: number) => library.filter(i => i.folderId === folderId).length
 
   useEffect(() => {
@@ -6003,6 +6113,68 @@ function RefDropdown({
               >
                 {wide ? <Minimize2 size={11} /> : <Maximize2 size={11} />}
               </button>
+
+              {/* 2D / 3D. Meshes and photographs do not browse together: a mesh
+                  has no thumbnail worth putting in a picture grid, and a photo
+                  is noise when you are hunting for a model to remesh. */}
+              <div className="ml-1 flex items-center gap-0.5 rounded-md border border-white/10 p-0.5">
+                {(["2d", "3d"] as const).map(k => (
+                  <button
+                    key={k}
+                    onClick={() => setKindFilter(k)}
+                    title={k === "3d" ? "3D assets \u2014 meshes, rigs and printables" : "Images and clips"}
+                    className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider transition-colors ${
+                      kindFilter === k ? "bg-white/15 text-white" : "text-slate-500 hover:text-slate-300"
+                    }`}
+                  >
+                    {k}
+                    {k === "3d" && count3D > 0 && (
+                      <span className="ml-1 font-mono text-slate-500">{count3D}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+
+              {kindFilter === "3d" && (
+                <button
+                  onClick={() => meshUploadRef.current?.click()}
+                  disabled={meshUploading}
+                  title="Upload a .glb, .gltf, .obj, .stl, .fbx, .ply, .usdz or .3mf"
+                  className="flex items-center gap-1 rounded-md border border-white/10 px-1.5 py-1 text-[9px] uppercase tracking-wider text-slate-400 transition-colors hover:border-white/30 hover:text-white"
+                >
+                  {meshUploading ? <Loader2 size={10} className="animate-spin" /> : <Upload size={10} />} 3D
+                </button>
+              )}
+              <input
+                ref={meshUploadRef}
+                type="file"
+                accept=".glb,.gltf,.obj,.stl,.fbx,.ply,.usdz,.3mf"
+                multiple
+                hidden
+                onChange={async e => {
+                  const files = [...(e.target.files ?? [])]
+                  e.currentTarget.value = ""
+                  if (files.length === 0) return
+                  setMeshUploading(true)
+                  try {
+                    // Meshes go to their own endpoint: the image path gates on
+                    // MIME type, and browsers disagree wildly about what a .glb
+                    // or an .fbx is. Uploaded urls are then registered as
+                    // ordinary library rows, so folders and deletion just work.
+                    const urls: { url: string }[] = []
+                    for (const f of files) {
+                      const fd = new FormData()
+                      fd.append("file", f)
+                      const r = await fetch("/api/upload-mesh", { method: "POST", body: fd })
+                      const d = await r.json().catch(() => ({}))
+                      if (r.ok && d?.url) urls.push({ url: d.url })
+                    }
+                    if (urls.length > 0) await onUploadUrls?.(urls, currentFolderId)
+                  } finally {
+                    setMeshUploading(false)
+                  }
+                }}
+              />
             </div>
             <div className="flex items-center gap-2">
               {/* Stacked Total / Active pills */}
@@ -6021,10 +6193,27 @@ function RefDropdown({
                     : activeCount > 0
                     ? "border-white/25 bg-black/60"
                     : "border-white/8 bg-black/40"
-                }`} title={modelMaxRefs > 0 ? `Images currently sent with your generation — max ${modelMaxRefs} for this model` : "Images currently sent with your generation"}>
+                }`} title={
+                  splitRefs
+                    ? `Sent with this film — up to ${modelMaxRefs} images and ${modelMaxVideos} of your own clips`
+                    : modelMaxRefs > 0
+                      ? `Images currently sent with your generation — max ${modelMaxRefs} for this model`
+                      : "Images currently sent with your generation"
+                }>
                   <span className="text-[10px] text-slate-500 uppercase tracking-wide font-medium">Active</span>
                   <span className={`text-xs font-mono font-bold ${atLimit ? "text-amber-400" : activeCount > 0 ? "text-white" : "text-slate-500"}`}>
-                    {activeCount}{modelMaxRefs > 0 ? `/${modelMaxRefs}` : ""}
+                    {splitRefs ? (
+                      <>
+                        {activeImages}/{modelMaxRefs}<span className="text-slate-500 font-normal"> img</span>
+                        <span className="text-slate-600 font-normal"> · </span>
+                        <span className={activeVideos > 0 ? "text-fuchsia-300" : "text-slate-500"}>
+                          {activeVideos}/{modelMaxVideos}
+                        </span>
+                        <span className="text-slate-500 font-normal"> vid</span>
+                      </>
+                    ) : (
+                      <>{activeCount}{modelMaxRefs > 0 ? `/${modelMaxRefs}` : ""}</>
+                    )}
                   </span>
                 </div>
               </div>
@@ -6347,7 +6536,7 @@ function RefDropdown({
                         onClick={() =>
                           batchMode
                             ? setStaged(prev => { const n = new Set(prev); n.has(img.id) ? n.delete(img.id) : n.add(img.id); return n })
-                            : (editMode && !isVideoRefUrl(img.url)) ? setEditingImage(img) : selectMode ? toggleSelectForDelete(img.id) : handleToggle(img)}
+                            : (editMode && !isVideoRefUrl(img.url) && !is3D(img.url)) ? setEditingImage(img) : selectMode ? toggleSelectForDelete(img.id) : handleToggle(img)}
                         disabled={!batchMode && !selectMode && !editMode && (isDisabled || disabled)}
                         title={
                           batchMode ? (isStaged ? "Staged — click to unstage" : "Click to stage for a batch")
@@ -6378,15 +6567,25 @@ function RefDropdown({
                             : "border-transparent hover:border-white/30"
                         }`}
                       >
-                        {/* Eager small thumbs: loading="lazy" never fires in this nested
-                            scroller on iPad Safari, and the optimizer keeps them tiny */}
-                        {isVideoRefUrl(img.url) ? (
+                        {/* Eager: loading="lazy" never fires in this nested
+                            scroller on iPad Safari, and the thumbs are ~15KB */}
+                        {is3D(img.url) ? (
+                          // A mesh has no thumbnail. Showing its format and
+                          // name is more use than a broken image icon, and the
+                          // 3D Studio is where it gets looked at properly.
+                          <span className="flex h-full w-full flex-col items-center justify-center gap-1 bg-black/50">
+                            <Box size={16} className="text-red-400/70" />
+                            <span className="font-mono text-[8px] uppercase text-slate-500">
+                              {(img.url.split(".").pop() ?? "3d").split("?")[0]}
+                            </span>
+                          </span>
+                        ) : isVideoRefUrl(img.url) ? (
                           <RefVideoTile url={img.url} dim={isSelectedForDelete} />
                         ) : (
-                          <img src={refTileThumb(img.url)} alt="" decoding="async" className={`w-full h-full object-cover transition-opacity ${isSelectedForDelete ? "opacity-60" : ""}`} />
+                          <RefThumb img={img} className={isSelectedForDelete ? "opacity-60" : ""} />
                         )}
                         {/* Edit hint overlay (edit mode) */}
-                        {editMode && !isVideoRefUrl(img.url) && (
+                        {editMode && !isVideoRefUrl(img.url) && !is3D(img.url) && (
                           <div className="absolute inset-0 rounded-md bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
                             <Pencil size={12} className="text-white" />
                           </div>
@@ -6957,7 +7156,17 @@ function QueueDisplay({ active, max, label = "queue" }: { active: number; max: n
   const busy = active > 0
 
   return (
-    <div className={`flex items-center gap-1 px-1.5 py-1.5 rounded-lg border text-[10px] font-mono transition-colors ${
+    <div
+      // What this counts is not obvious: it is EVERY unfinished job on the
+      // account of this kind — queued and processing, every tab, every device,
+      // and the employees too. A batch of 69 that reads 70 usually means one
+      // other generation was already in flight, not that the batch miscounted.
+      title={
+        `${active} unfinished ${label === "vid" ? "video" : "image"} job(s) on this account right now `
+        + `— queued and running, across every tab, device and tool. `
+        + (unlimited ? "No concurrency limit on this account." : `Limit ${max} at a time.`)
+      }
+      className={`flex items-center gap-1 px-1.5 py-1.5 rounded-lg border text-[10px] font-mono transition-colors ${
       full
         ? "border-red-500/30 bg-red-500/10 text-red-400"
         : busy
@@ -8068,12 +8277,7 @@ function PendingDetailModal({
               <p className="text-[11px] font-mono tracking-widest uppercase text-amber-400/70">Queued</p>
             ) : (
               <p
-                className="text-[11px] font-mono tracking-widest uppercase bg-clip-text text-transparent"
-                style={{
-                  backgroundImage: "linear-gradient(90deg,#94a3b8,#f8fafc,#e2e8f0,#64748b,#f8fafc,#94a3b8)",
-                  backgroundSize: "200% 100%",
-                  animation: "silver-shimmer 3.5s linear infinite",
-                }}
+                className="text-[11px] font-mono tracking-widest uppercase silver-shimmer-text"
               >
                 Generating...
               </p>
@@ -9640,6 +9844,12 @@ function VideoDetailModal({
   )
 }
 
+// Stable empty arrays for feeds that have no pending slots or failures of
+// their own — a literal [] would be a new identity on every render.
+const EMPTY_PENDING: PendingSlot[] = []
+const EMPTY_FAILS: ImageItem[] = []
+const EMPTY_FRESH: ImageItem[] = []
+
 // --- IMAGE GRID ---
 function ImageGrid({
   signedIn,
@@ -9664,6 +9874,7 @@ function ImageGrid({
   onRetryPending,
   tileBorders = false,
   modelFilter = null,
+  typeFilter = "image",
 }: {
   signedIn: boolean
   pendingSlots: PendingSlot[]
@@ -9688,6 +9899,9 @@ function ImageGrid({
   tileBorders?: false | "slim" | "fill" | "smart"
   // Feed dropdown's per-model filter: explicit DB model ids, or null for all
   modelFilter?: string[] | null
+  // Which half of the feed to show. The Employees workspaces render two of
+  // these side by side; the portal itself only ever wants images.
+  typeFilter?: "image" | "video"
 }) {
   const fullRes = tileRes === "full"
   // Responsive column count for JS "Rows" masonry (auto = 2 on mobile, 4 on desktop)
@@ -9755,7 +9969,7 @@ function ImageGrid({
         const c = cursorRef.current
         const cursorQs = c ? `&before=${encodeURIComponent(c.before)}&beforeId=${c.beforeId}` : ""
         const modelQs = modelFilter && modelFilter.length > 0 ? `&models=${encodeURIComponent(modelFilter.join(","))}` : ""
-        res = await fetch(`/api/my-images?limit=${pageLimitRef.current}&type=image&cursor=1${showHidden ? "&hidden=true" : ""}${cursorQs}${modelQs}`)
+        res = await fetch(`/api/my-images?limit=${pageLimitRef.current}&type=${typeFilter}&cursor=1${showHidden ? "&hidden=true" : ""}${cursorQs}${modelQs}`)
       }
       if (!res.ok) { hasMoreRef.current = false; return }
       const data = await res.json()
@@ -9763,8 +9977,16 @@ function ImageGrid({
       if (epoch !== epochRef.current) return // filters changed mid-flight — discard
       setImages((prev) => {
         const existingIds = new Set(prev.map(i => i.id))
+        const seenUrls = new Set(prev.map(i => i.imageUrl))
         const newItems = data.images
-          .filter((img: any) => !existingIds.has(img.id))
+          // By id AND by url: a page boundary that repeats a row, or two rows
+          // pointing at the same file, must not become two tiles.
+          .filter((img: any) => {
+            if (existingIds.has(img.id) || seenUrls.has(img.imageUrl)) return false
+            existingIds.add(img.id)
+            seenUrls.add(img.imageUrl)
+            return true
+          })
           .map((img: any) => ({
             id: img.id,
             imageUrl: img.imageUrl,
@@ -9975,7 +10197,13 @@ function ImageGrid({
           })
           // Strict queue order, newest first. Entries without a timestamp keep
           // their relative insertion order (stable sort) at the front.
-          headNodes.sort((a, b) => (b.t ?? Infinity) - (a.t ?? Infinity))
+          headNodes.sort((a, b) => {
+            const d = (b.t ?? Infinity) - (a.t ?? Infinity)
+            // A batch queued in one press shares a timestamp to the
+            // millisecond, so a pure time sort left their order to chance
+            // and the feed reshuffled on every render. The key is stable.
+            return d !== 0 ? d : String(a.key).localeCompare(String(b.key))
+          })
         }
 
         if (adminFilters) {
@@ -10029,7 +10257,9 @@ function ImageGrid({
           merged.forEach((img) => {
             const node = img.failed
               ? <FailedSlot key={`sf-${img.id}`} prompt={img.prompt} error={img.failError || "Generation failed"} aspectRatio={img.aspectRatio} onRetry={onRetryFail ? () => onRetryFail(img) : undefined} onClick={selectMode ? undefined : () => onImageClick(img)} onDismiss={onDismissFail ? () => onDismissFail(img) : undefined} />
-              : <GridImage key={`db-${img.id}`} src={img.imageUrl} alt={img.prompt} onClick={selectMode ? undefined : () => onImageClick(img)} imageId={img.id} thumbUrl={img.thumbnailUrl} aspectRatio={img.aspectRatio} fullRes={fullRes} selectMode={selectMode} selected={selectedIds?.has(img.id)} onSelect={onSelectToggle} fullWidth={fullSize} letterbox={fullSize && fullSizeLayout === "grid"} silverRim={tileBorders} />
+              // isVideo: without it a video renders through <img src="...mp4">,
+              // which cannot decode — that is the broken metallic placeholder.
+              : <GridImage key={`db-${img.id}`} src={img.imageUrl} alt={img.prompt} onClick={selectMode ? undefined : () => onImageClick(img)} imageId={img.id} thumbUrl={img.thumbnailUrl} aspectRatio={img.aspectRatio} fullRes={fullRes} selectMode={selectMode} selected={selectedIds?.has(img.id)} onSelect={onSelectToggle} fullWidth={fullSize} letterbox={fullSize && fullSizeLayout === "grid"} isVideo={!!img.videoMetadata || isVideoUrl(img.imageUrl)} silverRim={tileBorders} />
             if (layoutCols.has(img.id) && (img.createdAt ? new Date(img.createdAt).getTime() : 0) >= cutoffT) {
               restoredById.set(img.id, { weight: arHeightWeight(img.aspectRatio), node, key: `db-${img.id}`, presetCol: layoutCols.get(img.id), t: img.createdAt ? Date.parse(img.createdAt) : undefined })
             } else {
@@ -10044,7 +10274,13 @@ function ImageGrid({
           // time, newest first. DB rows are backdated to queue time on save,
           // so live tiles and reloaded tiles sort identically — a page refresh
           // reproduces exactly the order you watched happen.
-          headNodes.sort((a, b) => (b.t ?? Infinity) - (a.t ?? Infinity))
+          headNodes.sort((a, b) => {
+            const d = (b.t ?? Infinity) - (a.t ?? Infinity)
+            // A batch queued in one press shares a timestamp to the
+            // millisecond, so a pure time sort left their order to chance
+            // and the feed reshuffled on every render. The key is stable.
+            return d !== 0 ? d : String(a.key).localeCompare(String(b.key))
+          })
         }
 
         // Masonry "Rows": JS shortest-column packing — left-to-right, and tiles never
@@ -16963,7 +17199,7 @@ function CustomFluxPanel({
                 {activeRefImages.slice(0, 3).map((img, i) => (
                   <div key={img.id} className="relative w-14 h-14 rounded-md overflow-hidden border border-teal-500/30">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={refTileThumb(img.url, 128)} alt="" className="w-full h-full object-cover" />
+                    <RefThumb img={img} />
                     {i === 0 && activeRefImages.length > 3 && (
                       <span className="absolute bottom-0 right-0 text-[9px] bg-black/70 text-teal-300 px-1">+{activeRefImages.length - 3}</span>
                     )}
@@ -19313,7 +19549,7 @@ function PromptBox({
                           onCancelNb2Polling(reqId)
                           try {
                             const done = JSON.parse(localStorage.getItem("pv2-nb2-done") || "[]") as string[]
-                            if (!done.includes(reqId)) localStorage.setItem("pv2-nb2-done", JSON.stringify([...done.slice(-20), reqId]))
+                            if (!done.includes(reqId)) localStorage.setItem("pv2-nb2-done", JSON.stringify([...done.slice(-400), reqId]))
                           } catch {}
                         }
                         const imgs = (event.images || []) as { url: string; dbId?: number | null }[]
@@ -19482,6 +19718,26 @@ function PromptBox({
           return
         }
         setBatchProgress({ done: data.queued ?? refBatchUrls.length, total: refBatchUrls.length })
+        // DRAW THE CARDS NOW.
+        //
+        // This path used to enqueue and return, leaving the tab with nothing
+        // on screen: the only thing that ever produced tiles was the 10s
+        // recovery poll, and that poll ignores rows without a fal request id \u2014
+        // which every freshly queued batch is. So 69 batches showed a handful
+        // of cards that trickled in as the promoter submitted them, and a
+        // reload was the fastest way to see the rest. The server now hands
+        // back the row ids, so each one gets its placeholder immediately and
+        // the poller's job is reduced to resolving them.
+        for (const job of (data.jobs ?? []) as { id: number; refs?: string[] }[]) {
+          if (typeof job?.id !== "number") continue
+          onAddPending({
+            slotId: `batch-${job.id}`,
+            status: "loading",
+            prompt,
+            queueId: job.id,
+            referenceImageUrls: Array.isArray(job.refs) ? job.refs : [],
+          } as PendingSlot)
+        }
       } catch (err: any) {
         setBatchProgress(null)
         alert(err?.message || "Network error while queueing batches.")
@@ -19794,7 +20050,7 @@ function PromptBox({
                   style={{ background: SILVER_RIM_CONIC, animationDuration: "5s" }}
                 />
                 <div className="relative w-14 h-14 rounded-[7px] overflow-hidden bg-black">
-                  <img src={refTileThumb(img.url, 128)} alt="reference" className="w-full h-full object-contain" />
+                  <RefThumb img={img} fit="contain" />
                   {/* Edit hint overlay */}
                   <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                     <Pencil size={14} className="text-white" />
@@ -24497,6 +24753,10 @@ export default function PortalV2Page() {
   // Layer stack for the chat-media editor canvas — in-memory only (chat media
   // has no UserReference row to persist onto); reset whenever a new image opens
   const [chatMediaLayers, setChatMediaLayers] = useState<RefLayerStack | null>(null)
+  // A library reference opened for editing from an employee workspace. Distinct
+  // from chatMediaItem because Apply must UPDATE that reference rather than
+  // filing a new one — the film points at this exact image.
+  const [editingRef, setEditingRef] = useState<{ id: string; url: string } | null>(null)
   // Open a chat-hub media item in the Edit Reference canvas. When the image
   // was produced by an edit_image chain, DECOMPOSE the recipe instead of
   // showing the flattened result: the recipe's source image becomes the base
@@ -25058,8 +25318,10 @@ export default function PortalV2Page() {
   // current view persists across refreshes via sessionStorage, and every view switch
   // pushes a history entry so the browser Back button walks view history (Home →
   // Image → Back lands on Home, not on whatever page preceded the portal).
-  const [scannerMode, setScannerMode] = useState<"image" | "video" | "chat" | "home">("home")
-  const VALID_MODES = ["image", "video", "chat", "home"] as const
+  const [scannerMode, setScannerMode] = useState<"image" | "video" | "chat" | "home" | "employees" | "threed">("home")
+  // Which employee workspace is open inside the Employees section
+  const [activeEmployee, setActiveEmployee] = useState<EmployeeId | null>(null)
+  const VALID_MODES = ["image", "video", "chat", "home", "employees", "threed"] as const
   type ScannerMode = (typeof VALID_MODES)[number]
   // Set when a mode change came from restore/popstate — those must not push a new entry.
   const modeFromHistoryRef = useRef(false)
@@ -25100,10 +25362,28 @@ export default function PortalV2Page() {
     lastPushedModeRef.current = scannerMode
   }, [scannerMode])
 
+  // Which employee workspace was open, restored with the mode. Without this a
+  // refresh inside a workspace dropped the user back at the picker (or home).
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem("pv2-employee")
+      if (saved === "movie-studio" || saved === "face-swap" || saved === "character-design") setActiveEmployee(saved)
+    } catch {}
+  }, [])
+  useEffect(() => {
+    try {
+      if (activeEmployee) sessionStorage.setItem("pv2-employee", activeEmployee)
+      else sessionStorage.removeItem("pv2-employee")
+    } catch {}
+  }, [activeEmployee])
+
   // Chat hub is admin-only (in development) — kick non-admins back to the feed,
   // but only once the admin check has actually resolved (it's async on load)
   useEffect(() => {
     if (scannerMode === "chat" && adminChecked && !isAdminAccount) setScannerMode("image")
+    // Employees is admin-only for now (the work is not priced yet)
+    if (scannerMode === "employees" && adminChecked && !isAdminAccount) setScannerMode("image")
+    if (scannerMode === "threed" && adminChecked && !isAdminAccount) setScannerMode("image")
   }, [scannerMode, adminChecked, isAdminAccount])
   const [selectedVideoModel, setSelectedVideoModel] = useState<VideoModelConfig>(() => VIDEO_MODEL_CONFIGS[0])
   const [videoDuration, setVideoDuration] = useState("5")
@@ -26293,7 +26573,7 @@ export default function PortalV2Page() {
           try {
             const done = JSON.parse(localStorage.getItem("pv2-nb2-done") || "[]") as string[]
             if (!done.includes(requestId)) {
-              localStorage.setItem("pv2-nb2-done", JSON.stringify([...done.slice(-20), requestId]))
+              localStorage.setItem("pv2-nb2-done", JSON.stringify([...done.slice(-400), requestId]))
             }
           } catch {}
           // Remove slots from sessionStorage immediately before any async/unmount risk
@@ -26790,8 +27070,37 @@ export default function PortalV2Page() {
         // spinning (its poller died — VPN drop, network blip, suspended tab, dev
         // reload), resolve the tile NOW. This is exactly what a page refresh
         // does, applied live every 10s, so spinners can never spin forever.
+        const currentSlotsForRearm = pendingSlotsRef.current
         const settled: any[] = (jobs || []).filter((j: any) => j.status === "completed" || j.status === "failed")
         const doneIds = new Set(JSON.parse(localStorage.getItem("pv2-nb2-done") || "[]") as string[])
+
+        // ONE image fetch for the whole pass.
+        //
+        // Each settled job used to fetch its own image, so a batch draining 20
+        // rows between two polls fired 20 requests and 20 prepends \u2014 the feed
+        // visibly reshuffling on every one. /api/my-images takes a comma list,
+        // so the finished work of an entire pass arrives in a single response
+        // and lands in one render.
+        const settledReqIds = settled
+          .filter((j: any) => j.status === "completed" && j.falRequestId && !doneIds.has(j.falRequestId))
+          .map((j: any) => j.falRequestId as string)
+        const fetchedByReq = new Map<string, any[]>()
+        if (settledReqIds.length > 0) {
+          try {
+            const imgRes = await fetch(
+              `/api/my-images?falRequestIds=${encodeURIComponent(settledReqIds.slice(0, 60).join(","))}`,
+            )
+            const imgData = await imgRes.json()
+            if (imgData.success) {
+              for (const img of (imgData.images || [])) {
+                const key = String(img.falRequestId ?? "")
+                if (!fetchedByReq.has(key)) fetchedByReq.set(key, [])
+                fetchedByReq.get(key)!.push(img)
+              }
+            }
+          } catch {}
+        }
+
         for (const j of settled) {
           const matching = pendingSlotsRef.current.filter(s =>
             (j.falRequestId && s.nb2RequestId === j.falRequestId) || s.queueJobId === j.id || s.queueId === j.id)
@@ -26811,11 +27120,13 @@ export default function PortalV2Page() {
           if (j.falRequestId) {
             if (doneIds.has(j.falRequestId)) { matching.forEach(s => handleRemovePending(s.slotId)); continue }
             doneIds.add(j.falRequestId)
-            try { localStorage.setItem("pv2-nb2-done", JSON.stringify(Array.from(doneIds).slice(-40))) } catch {}
-            try {
-              const imgRes = await fetch(`/api/my-images?falRequestIds=${encodeURIComponent(j.falRequestId)}`)
-              const imgData = await imgRes.json()
-              if (imgData.success) (imgData.images || []).forEach((img: any) => handlePrependImage({
+            // 40 was too small the moment batches existed: 69 request ids
+            // overflow it, the oldest fall out, and a job that already settled
+            // is treated as new again on the next pass \u2014 which is the tile
+            // that vanishes and comes back.
+            try { localStorage.setItem("pv2-nb2-done", JSON.stringify(Array.from(doneIds).slice(-400))) } catch {}
+            for (const img of (fetchedByReq.get(j.falRequestId) ?? [])) {
+              handlePrependImage({
                 id: img.id,
                 imageUrl: img.imageUrl,
                 prompt: img.prompt,
@@ -26824,8 +27135,8 @@ export default function PortalV2Page() {
                 referenceImageUrls: img.referenceImageUrls ?? [],
                 aspectRatio: img.aspectRatio ?? undefined,
                 quality: img.quality ?? undefined,
-              }))
-            } catch {}
+              })
+            }
             matching.forEach(s => handleRemovePending(s.slotId))
           } else {
             // Queue-row-only job (no FAL request id) — pull the newest few images
@@ -26841,9 +27152,36 @@ export default function PortalV2Page() {
           }
         }
 
+        // RE-ARM DEAD POLLERS.
+        //
+        // Every nb2 tile is resolved by its OWN interval polling fal. If that
+        // interval dies \u2014 it hit its poll ceiling, an error killed it, a
+        // re-render dropped it \u2014 nothing else harvests the result: the DB row
+        // stays 'processing' because our webhook never fires for it, so the
+        // reconcile below has nothing to react to and the tile spins forever.
+        // Reloading the page fixed it only because that re-armed the pollers.
+        // This does the same thing every 10s, which is why a refresh should
+        // never again be the thing that finishes a generation.
+        for (const slot of currentSlotsForRearm) {
+          if (slot.status !== "loading" || !slot.nb2RequestId) continue
+          if (nb2PollingIntervals.current[slot.nb2RequestId]) continue
+          const endpoint = slot.nb2FalEndpoint
+          if (!endpoint) continue
+          startNb2SlotPolling(
+            slot.nb2RequestId, endpoint, [slot.slotId], slot.prompt ?? "", "png",
+            slot.nb2AspectRatio || "auto", slot.nb2StatusUrl || "/api/admin/nb2-status",
+            slot.nb2Quality, slot.nb2TicketCost ?? 0, slot.referenceImageUrls || [],
+          )
+        }
+
         const inFlight: any[] = (jobs || []).filter((j: any) => j.status === "processing" || j.status === "queued")
         const nb2DbJobs = inFlight.filter((j: any) => j.falRequestId)
-        if (nb2DbJobs.length === 0) return
+        // Rows that are QUEUED but not yet submitted have no fal request id.
+        // They were skipped entirely, so a batch of 69 drew nothing until the
+        // promoter had worked through them one at a time \u2014 and a reload was
+        // the only way to see where the run had got to.
+        const waitingDbJobs = inFlight.filter((j: any) => !j.falRequestId)
+        if (nb2DbJobs.length === 0 && waitingDbJobs.length === 0) return
 
         const currentSlots = pendingSlotsRef.current
         const trackedRequestIds = new Set(currentSlots.map((s) => s.nb2RequestId).filter(Boolean) as string[])
@@ -26853,6 +27191,21 @@ export default function PortalV2Page() {
           currentSlots.flatMap((s) => [s.queueJobId, s.queueId].filter((v): v is number => v != null))
         )
         const doneNb2Ids = new Set(JSON.parse(localStorage.getItem("pv2-nb2-done") || "[]") as string[])
+        // THE PHANTOM-TILE RACE.
+        //
+        // A locally started generation makes its tile IMMEDIATELY, but only
+        // learns its queue id and fal request id when the POST returns. If a
+        // poll lands in that gap the tile is not yet linked to anything, the
+        // tracked-id checks below all miss, and this adopts the same job a
+        // second time \u2014 which is how sixteen generations became twenty-four
+        // tiles. A job this tab started is linked within seconds, so anything
+        // younger than the grace window is left alone; work from another
+        // device is older than that by the time it is worth showing.
+        const ADOPT_GRACE_MS = 45_000
+        const tooYoung = (j: any) => {
+          const t = Date.parse(j?.createdAt ?? j?.startedAt ?? "")
+          return Number.isFinite(t) && Date.now() - t < ADOPT_GRACE_MS
+        }
         // Dismissed ledger: a job the user dismissed must NOT resurrect as a
         // fresh loading tile just because its DB row is still 'processing'
         // (a dead-poller orphan). If it later completes, the harvest saves the
@@ -26861,9 +27214,52 @@ export default function PortalV2Page() {
         const dismissedIds = new Set(dismissed.ids)
         const dismissedReqs = new Set(dismissed.reqs)
 
+        // A tile placed for a queued row has no poller of its own, because
+        // there was nothing to poll yet. The moment its row is promoted and
+        // gains a request id, attach one \u2014 otherwise the card sits spinning
+        // until the 10s reconcile happens to catch it settled.
+        for (const j of nb2DbJobs) {
+          if (doneNb2Ids.has(j.falRequestId) || recoveredJobsRef.current.has(j.falRequestId)) continue
+          const waiting = currentSlots.find(sl =>
+            (sl.queueId === j.id || sl.queueJobId === j.id) && !sl.nb2RequestId)
+          if (!waiting) continue
+          recoveredJobsRef.current.add(j.falRequestId)
+          const params = j.parameters as any
+          const endpoint = params?.falEndpoint || params?.falInput?.endpoint
+          const statusUrl = MODEL_STATUS_URLS[j.modelId] || "/api/admin/nb2-status"
+          handleUpdatePending(waiting.slotId, { nb2RequestId: j.falRequestId, nb2FalEndpoint: endpoint, nb2StatusUrl: statusUrl })
+          if (endpoint) {
+            startNb2SlotPolling(
+              j.falRequestId, endpoint, [waiting.slotId], j.prompt, "png",
+              params?.size || params?.aspectRatio || "auto", statusUrl,
+              params?.quality, j.ticketCost ?? 0, params?.permanentReferenceUrls || params?.referenceImageUrls || [],
+            )
+          }
+        }
+
+        // Cards for queued work this tab has not seen \u2014 a batch started on
+        // another device, or this one after a reload. No poller: there is no
+        // request id yet, and the loop above attaches one when there is.
+        for (const j of waitingDbJobs) {
+          if (trackedDbJobIds.has(j.id)) continue
+          if (tooYoung(j)) continue
+          if (dismissedIds.has(j.id)) continue
+          if (recoveredJobsRef.current.has(`q${j.id}`)) continue
+          recoveredJobsRef.current.add(`q${j.id}`)
+          const params = j.parameters as any
+          handleAddPending({
+            slotId: `batch-${j.id}`,
+            status: "loading",
+            prompt: j.prompt,
+            queueId: j.id,
+            referenceImageUrls: params?.referenceImageUrls || params?.permanentReferenceUrls || [],
+          } as PendingSlot)
+        }
+
         for (const j of nb2DbJobs) {
           // Skip if already tracked by requestId, by any DB queue job ID, or already completed
           if (trackedRequestIds.has(j.falRequestId) || trackedDbJobIds.has(j.id) || doneNb2Ids.has(j.falRequestId)) continue
+          if (tooYoung(j)) continue
           if (dismissedIds.has(j.id) || dismissedReqs.has(j.falRequestId)) continue
           // SYNCHRONOUS guard: pendingSlotsRef only catches up after React
           // commits, so two poll passes in the same tick both read it as
@@ -26991,6 +27387,15 @@ export default function PortalV2Page() {
   // Dropdown upload (raw files, into the currently open folder)
   const handleLibraryUploadFiles = useCallback(
     (files: File[], folderId: number | null) => addRefsToAccount(files, folderId),
+    [addRefsToAccount]
+  )
+
+  // Meshes are uploaded by their own route first (the image path gates on MIME
+  // type, which browsers report inconsistently for .glb and .fbx), then
+  // registered here as ordinary library rows so folders, deletion and the
+  // 2D/3D filter all work on them unchanged.
+  const handleLibraryUploadUrls = useCallback(
+    (items: { url: string }[], folderId: number | null) => addRefsToAccount(items, folderId),
     [addRefsToAccount]
   )
 
@@ -28045,6 +28450,73 @@ export default function PortalV2Page() {
 
   const toggle = (key: string) => setOpenDropdown((prev) => (prev === key ? null : key))
 
+  // Employee workspaces render the portal's OWN session feed, not a second
+  // feed component: continuous cursor paging, masonry, and every per-user feed
+  // setting, identical to the image session feed by construction.
+  const renderEmployeeFeed = useCallback((
+    kind: "image" | "video",
+    nonce = 0,
+    // Shots a film has submitted but not yet received. They render as the
+    // feed's own "generating" tiles, so a film that is shooting looks like it.
+    pending: { queueId: number; prompt: string; at: number; model: string; aspect?: string; quality?: string; refs?: string[] }[] = [],
+  ) => (
+    <ImageGrid
+      key={`emp-${kind}-${imageGridKey}-${nonce}`}
+      typeFilter={kind}
+      modelFilter={imageModelFilter}
+      signedIn={user !== null}
+      // EMPTY_* are module constants on purpose: a fresh [] here is a new
+      // identity on every render, and savedFails is in ImageGrid's nav-list
+      // effect deps — that combination re-fired the effect forever
+      // ("Maximum update depth exceeded").
+      pendingSlots={
+        kind === "image"
+          ? pendingSlots
+          : pending.length
+            ? pending.map(p => ({
+                slotId: `film-${p.queueId}`,
+                status: "loading" as const,
+                prompt: p.prompt,
+                queuedAtMs: p.at,
+                // NOT queueJobId: that pairs with a missing requestId to mean
+                // "waiting for a free slot", and these are already at fal
+                // rendering — the tile was reading them as stuck in a queue.
+                modelId: p.model,
+                aspectRatio: p.aspect,
+                quality: p.quality,
+                referenceImageUrls: p.refs,
+              }))
+            : EMPTY_PENDING
+      }
+      // NOT freshImages: those are the image scanner's in-session items. Handed
+      // to a film's feeds they were prepended to BOTH columns \u2014 stills
+      // appearing under Videos, and the same generation repeated several times.
+      // A film's work reaches these feeds from the database, like everything else.
+      freshImages={EMPTY_FRESH}
+      savedFails={kind === "image" ? savedFails : EMPTY_FAILS}
+      onDismissFail={handleDismissFail}
+      onRetryFail={handleRetryFail}
+      onRetryPending={handleRetryPendingSlot}
+      tileBorders={feedTileBorders ? feedBorderMode : false}
+      onImageClick={setSelectedImage}
+      onPendingClick={setPendingDetail}
+      // Deliberately NO onNavListChange: two grids share one nav list, so they
+      // would overwrite each other on every load.
+      cols={feedCols}
+      fullSize={feedFullSize}
+      fullSizeLayout={feedFullSizeLayout}
+      masonryMode={feedMasonryMode}
+      tileRes={feedTileRes}
+      adminFilters={isAdminAccount ? adminFeedFilters : null}
+      showHidden={feedShowHidden}
+    />
+  ), [
+    imageGridKey, imageModelFilter, user, pendingSlots, savedFails,
+    handleDismissFail, handleRetryFail, handleRetryPendingSlot, feedTileBorders,
+    feedBorderMode, feedCols, feedFullSize, feedFullSizeLayout, feedMasonryMode,
+    feedTileRes, isAdminAccount, adminFeedFilters, feedShowHidden,
+  ])
+
   return (
     <div className="bg-[#050810] text-white min-h-screen">
       {needsAgeAttest && <AgeAttestModal onDone={() => setNeedsAgeAttest(false)} />}
@@ -28146,8 +28618,12 @@ export default function PortalV2Page() {
               onToggle={() => toggle("refs")}
               library={refLibrary}
               activeIds={videoRefsEnabled ? videoActiveRefIds : motionRefsEnabled ? motionActiveRefIds : activeRefIds}
-              modelMaxRefs={scannerMode === "chat" ? (chatRefCap ?? 20) : videoRefsEnabled ? 12 : motionRefsEnabled ? 1 : selectedModel.maxReferenceImages}
+              modelMaxRefs={scannerMode === "threed" ? 8 : scannerMode === "employees" && activeEmployee === "movie-studio" ? 16 : scannerMode === "chat" ? (chatRefCap ?? 20) : videoRefsEnabled ? 12 : motionRefsEnabled ? 1 : selectedModel.maxReferenceImages}
+              // Movie Studio alone counts the user's own clips separately —
+              // they are cut into the film rather than shown to a model.
+              modelMaxVideos={scannerMode === "employees" && activeEmployee === "movie-studio" ? 4 : undefined}
               onUploadFiles={handleLibraryUploadFiles}
+              onUploadUrls={handleLibraryUploadUrls}
               onDelete={handleLibraryDelete}
               onDeleteMultiple={handleLibraryDeleteMultiple}
               onClearAll={handleLibraryClearAll}
@@ -28230,16 +28706,45 @@ export default function PortalV2Page() {
             />
             {/* Frame Extractor — pull the sharpest frames out of a video.
                 ADMIN ONLY for now: not yet tested/priced for regular users. */}
+            {/* ADMIN-ONLY TASKBAR ENTRIES ARE RED, not silver. The bar's own
+                rim is silver, so red text + icon is what separates "everyone
+                gets this" from "this is not shipped yet" at a glance. */}
             {isAdminAccount && (
             <div className="relative flex-none min-w-[90px] sm:flex-1">
               <button
                 onClick={() => setFramesOpen(true)}
-                title="Extract frames from a video — auto-ranked by sharpness"
-                className={`flex items-center justify-center gap-2 w-full py-2 rounded-lg text-sm font-bold tracking-wide text-white transition-all ${
-                  framesOpen ? "bg-white/15" : "hover:bg-white/5"}`}
+                title="Extract frames from a video \u2014 auto-ranked by sharpness (admin only)"
+                className={`flex items-center justify-center gap-2 w-full py-2 rounded-lg text-sm font-bold tracking-wide text-red-300 hover:text-red-200 transition-all ${
+                  framesOpen ? "bg-red-500/15" : "hover:bg-red-500/10"}`}
               >
-                <Film size={15} className="text-slate-300" />
+                <Film size={15} className="text-red-400" />
                 Frames
+              </button>
+            </div>
+            )}
+            {isAdminAccount && (
+            <div className="relative flex-none min-w-[110px] sm:flex-1">
+              <button
+                onClick={() => { setScannerMode("employees"); setOpenDropdown(null) }}
+                title="Employees \u2014 specialists with a workspace built for one job (admin only)"
+                className={`flex items-center justify-center gap-2 w-full py-2 rounded-lg text-sm font-bold tracking-wide text-red-300 hover:text-red-200 transition-all ${
+                  scannerMode === "employees" ? "bg-red-500/15" : "hover:bg-red-500/10"}`}
+              >
+                <UsersRound size={15} className="text-red-400" />
+                Employees
+              </button>
+            </div>
+            )}
+            {isAdminAccount && (
+            <div className="relative flex-none min-w-[110px] sm:flex-1">
+              <button
+                onClick={() => { setScannerMode("threed"); setOpenDropdown(null) }}
+                title="3D Studio \u2014 meshes, scenes and rigs from the fal 3D suite (admin only)"
+                className={`flex items-center justify-center gap-2 w-full py-2 rounded-lg text-sm font-bold tracking-wide text-red-300 hover:text-red-200 transition-all ${
+                  scannerMode === "threed" ? "bg-red-500/15" : "hover:bg-red-500/10"}`}
+              >
+                <Box size={15} className="text-red-400" />
+                3D Studio
               </button>
             </div>
             )}
@@ -28322,6 +28827,21 @@ export default function PortalV2Page() {
         />
       )}
 
+      {/* Edit Reference, opened by tapping a thumbnail in an employee
+          workspace. Same canvas as everywhere else; Apply REPLACES the
+          reference in the library so the film picks up the edit. */}
+      {editingRef && (
+        <RefImageEditorModal
+          image={editingRef}
+          canUseLayers={hasEffectiveDevAccess}
+          onApply={(newUrl) => {
+            void handleEditRef(editingRef.id, newUrl)
+            setEditingRef(null)
+          }}
+          onClose={() => setEditingRef(null)}
+        />
+      )}
+
       {/* Frame Extractor — taskbar "Frames" button */}
       {framesOpen && (
         <FrameExtractorModal
@@ -28401,7 +28921,86 @@ export default function PortalV2Page() {
         />
       )}
 
-      {scannerMode === "home" ? (
+      {scannerMode === "threed" ? (
+        // Same viewport pinning as the other full-page modes: the library and
+        // the viewer must not grow the document, or the window scrollbar
+        // appears and disappears and the taskbar reflows with it.
+        <div style={{ height: "calc(100vh - 48px)" }} className="flex flex-col overflow-hidden">
+          <div className="shrink-0 flex items-center gap-2 px-3 sm:px-4 py-2">
+            <LogoDropdown
+              logoUrl={siteLogoUrl}
+              isAdmin={isAdminAccount}
+              onLogoChange={setSiteLogoUrl}
+              onGoHome={() => setScannerMode("home")}
+              onGoFeed={() => setScannerMode("image")}
+              onGoChat={() => setScannerMode("chat")}
+              size={22}
+            />
+            <Box size={13} className="text-red-400" />
+            <span className="text-[12px] font-bold tracking-wide text-red-300">3D Studio</span>
+            <span className="text-[10px] text-slate-600">meshes, scenes and rigs</span>
+          </div>
+          <ThreeDStudioWorkspace
+            signedIn={user !== null}
+            activeRefs={refLibrary
+              .filter(img => activeRefIds.includes(img.id))
+              .map(r => ({ id: r.id, url: r.url }))}
+            onRemoveRef={handleDeactivateRef}
+          />
+        </div>
+      ) : scannerMode === "employees" ? (
+        // Fixed to the viewport, like the chat branch. Unconstrained, the two
+        // feeds grew the PAGE as they loaded, so the window scrollbar appeared
+        // and disappeared — each toggle changed the viewport width, flipped the
+        // responsive breakpoint, and made the taskbar labels flash in and out.
+        <div style={{ height: "calc(100vh - 48px)" }} className="flex flex-col overflow-hidden">
+        <EmployeesView
+          isAdmin={isAdminAccount}
+          active={activeEmployee}
+          onSelect={setActiveEmployee}
+          logo={
+            <LogoDropdown
+              logoUrl={siteLogoUrl}
+              isAdmin={isAdminAccount}
+              onLogoChange={setSiteLogoUrl}
+              onGoHome={() => { setActiveEmployee(null); setScannerMode("home") }}
+              onGoFeed={() => { setActiveEmployee(null); setScannerMode("image") }}
+              onGoChat={() => { setActiveEmployee(null); setScannerMode("chat") }}
+              size={22}
+            />
+          }
+        >
+          {activeEmployee === "movie-studio" ? (
+            <MovieStudioWorkspace
+              signedIn={user !== null}
+              renderFeed={renderEmployeeFeed}
+              // The SAME references the taskbar Refs dropdown controls: a film
+              // picks its cast out of the library like every other model, and
+              // uploading here files the image into that library.
+              activeRefs={refLibrary
+                .filter(img => activeRefIds.includes(img.id))
+                .map(r => ({ id: r.id, url: r.url }))}
+              onRemoveRef={handleDeactivateRef}
+              onUploadRefs={handleUploadRef}
+              onEditRef={(id, url) => setEditingRef({ id, url })}
+            />
+          ) : activeEmployee === "face-swap" ? (
+            <FaceSwapWorkspace signedIn={user !== null} renderFeed={renderEmployeeFeed} />
+          ) : activeEmployee === "character-design" ? (
+            <CharacterStudioWorkspace
+              signedIn={user !== null}
+              renderFeed={renderEmployeeFeed}
+              activeRefs={refLibrary
+                .filter(img => activeRefIds.includes(img.id))
+                .map(r => ({ id: r.id, url: r.url }))}
+              onRemoveRef={handleDeactivateRef}
+              onUploadRefs={handleUploadRef}
+              onEditRef={(id, url) => setEditingRef({ id, url })}
+            />
+          ) : null}
+        </EmployeesView>
+        </div>
+      ) : scannerMode === "home" ? (
         <HomeView
           isAdmin={isAdminAccount}
           signedIn={user !== null}

@@ -3,6 +3,7 @@ import { cookies } from 'next/headers'
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3'
 import { getUserFromSession } from '@/lib/auth'
 import { checkIsAdmin } from '@/lib/admin-check'
+import { jsonPrivate } from '@/lib/api-json'
 
 // GET /api/admin/flux-inference/active
 //
@@ -13,12 +14,12 @@ import { checkIsAdmin } from '@/lib/admin-check'
 export async function GET(req: Request) {
   const token = (await cookies()).get('session')?.value
   const sessionUser = token ? await getUserFromSession(token) : null
-  if (!sessionUser) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!sessionUser) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
   if (!await checkIsAdmin(sessionUser.email ?? '')) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!process.env.R2_ENDPOINT || !process.env.R2_BUCKET_NAME) {
-    return NextResponse.json({ jobs: [] })
+    return jsonPrivate({ jobs: [] })
   }
 
   // Flux pipeline chains can run a long time; match the client's 3h poll cap
@@ -99,9 +100,9 @@ export async function GET(req: Request) {
       } catch { return null }
     }))).filter(Boolean)
 
-    return NextResponse.json({ jobs })
+    return jsonPrivate({ jobs })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    return NextResponse.json({ error: msg, jobs: [] }, { status: 500 })
+    return jsonPrivate({ error: msg, jobs: [] }, { status: 500 })
   }
 }

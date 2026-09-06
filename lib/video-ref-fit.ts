@@ -89,3 +89,84 @@ export async function fitRefsForVideo(urls: string[]): Promise<string[]> {
   if (!Array.isArray(urls) || urls.length === 0) return []
   return Promise.all(urls.map(u => fitRefForVideo(u)))
 }
+
+
+/* ── the other end of the same problem ────────────────────────────────────
+ *
+ * fitRefForVideo exists because a reference can be too BIG. A reference can
+ * also be far too SMALL, and that failure is silent: a 430x516 phone grab
+ * handed to a 1080p or 4K model as a start frame becomes the film's first
+ * frame, upscaled, so the shot opens soft and mushy and every frame chained
+ * off it inherits the softness. Nothing errors; the footage is just bad.
+ *
+ * Measuring costs one fetch, so results are cached for the life of the
+ * process and small images (the ones we care about) are cheap to read anyway.
+ */
+
+const dimCache = new Map<string, { width: number; height: number } | null>()
+
+/** Pixel size of a reference, or null if it cannot be read. Never throws. */
+export async function measureRef(url: string): Promise<{ width: number; height: number } | null> {
+  if (typeof url !== 'string' || !url.startsWith('https://')) return null
+  if (dimCache.has(url)) return dimCache.get(url) ?? null
+  let out: { width: number; height: number } | null = null
+  try {
+    // The header carries the dimensions, so the first chunk is usually enough.
+    // A server that ignores Range simply gives the whole file, which still
+    // parses — the request is only ever an optimisation.
+    const res = await fetch(url, { headers: { Range: 'bytes=0-131071' } })
+    if (res.ok || res.status === 206) {
+      const buf = Buffer.from(await res.arrayBuffer())
+      try {
+        const md = await sharp(buf).metadata()
+        if (md.width && md.height) out = { width: md.width, height: md.height }
+      } catch {
+        // A truncated buffer sharp cannot parse: pay for the whole file once.
+        const full = await fetch(url)
+        if (full.ok) {
+          const md = await sharp(Buffer.from(await full.arrayBuffer())).metadata()
+          if (md.width && md.height) out = { width: md.width, height: md.height }
+        }
+      }
+    }
+  } catch {
+    out = null
+  }
+  if (dimCache.size > 512) dimCache.clear()
+  dimCache.set(url, out)
+  return out
+}
+
+/** Short edge of the frame a resolution setting actually renders. */
+export function targetShortEdge(resolution?: string): number {
+  switch (String(resolution ?? '').toLowerCase()) {
+    case '480p': return 480
+    case '540p': return 540
+    case '720p': case 'hd': return 720
+    case '2k': case '1440p': return 1440
+    case '4k': case '2160p': case 'uhd': return 2160
+    default: return 1080
+  }
+}
+
+/**
+ * Is this picture good enough to BE the first frame of that video?
+ *
+ * The bar is 60% of the output's short edge, floored at 540: a model can
+ * invent detail on a modest upscale, but it cannot invent a face that was
+ * never in the pixels. Below the bar the answer is to re-plate the character
+ * at full size — not to hand the model a thumbnail and hope.
+ */
+export async function checkRefResolution(
+  url: string,
+  resolution: string | undefined,
+): Promise<{ ok: true } | { ok: false; width: number; height: number; needed: number }> {
+  const dim = await measureRef(url)
+  // Unreadable is not a failure: refusing a shot over a CDN that blocks HEAD
+  // would break films for a reason that has nothing to do with the picture.
+  if (!dim) return { ok: true }
+  const needed = Math.max(540, Math.round(targetShortEdge(resolution) * 0.6))
+  const short = Math.min(dim.width, dim.height)
+  if (short >= needed) return { ok: true }
+  return { ok: false, width: dim.width, height: dim.height, needed }
+}

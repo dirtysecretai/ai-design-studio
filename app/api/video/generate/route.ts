@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
-import { fal } from "@fal-ai/client";
+import { fal } from "@/lib/fal-client";
 import { syncAndClaimFalSlot } from '@/lib/admin-queue-helpers';
 import { isGenerationBlocked } from '@/lib/generation-guard';
 import { cookies } from 'next/headers';
@@ -9,6 +9,7 @@ import { authenticateApiKey, invalidKeyResponse, requireScopes, canUseModel, mod
 import { enforceContentFilter } from '@/lib/content-filter'
 import { FAL_ENDPOINTS, ADMIN_ONLY_VIDEO_MODELS } from '@/lib/fal-video-endpoints'
 import { videoTicketCost, VIDEO_TOOL_MODELS, INPUT_ROUTED_MODELS } from '@/lib/ticket-pricing'
+import { canonicalisePayload } from '@/lib/media-url'
 
 
 fal.config({
@@ -51,6 +52,36 @@ async function flux3SourceProblem(url: string): Promise<string | null> {
     // Network hiccup or a host that refuses HEAD — not a reason to refuse
   }
   return null;
+}
+
+/**
+ * Shrink any reference image the model would reject before it is submitted.
+ *
+ * fal caps an input file at 10MB. A generated plate is routinely well over
+ * that (a 2K NanoBanana PNG measured 19.2MB), and fal reports such a job
+ * COMPLETED and only fails when the result is fetched — so an oversized
+ * start frame did not look like an error, it looked like a render that never
+ * finished. Every caller of this route is affected: the portal animating an
+ * image from the feed, the video scanners, the public API and the chat hub.
+ *
+ * Only oversized refs are rewritten, so the normal case costs one HEAD
+ * request and nothing else changes.
+ */
+async function normalizeVideoRefs(body: any): Promise<any> {
+  if (!body || typeof body !== 'object') return body
+  try {
+    const { fitRefForVideo, fitRefsForVideo } = await import('@/lib/video-ref-fit')
+    const [imageUrl, endImageUrl, referenceImageUrls] = await Promise.all([
+      typeof body.imageUrl === 'string' ? fitRefForVideo(body.imageUrl) : body.imageUrl,
+      typeof body.endImageUrl === 'string' ? fitRefForVideo(body.endImageUrl) : body.endImageUrl,
+      Array.isArray(body.referenceImageUrls) ? fitRefsForVideo(body.referenceImageUrls) : body.referenceImageUrls,
+    ])
+    return { ...body, imageUrl, endImageUrl, referenceImageUrls }
+  } catch {
+    // Never block a generation because the fitter failed — the model's own
+    // error is a better outcome than a 500 from here.
+    return body
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -112,7 +143,7 @@ export async function POST(request: NextRequest) {
       videoTargetFps = '60',
       // Wan 2.2 LoRA serving: [{ path, scale, transformer }] — validated below
       loras = [],
-    } = await request.json();
+    } = await normalizeVideoRefs(canonicalisePayload(await request.json()));
 
     // CCBill compliance: fal content-safety flags from the client are only honored
     // for verified admins — regular users ALWAYS run with the checker ON, no matter

@@ -9,6 +9,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
 import crypto from 'crypto'
+import { jsonPrivate } from '@/lib/api-json'
 
 // POST /api/admin/gif-to-video — ADMIN ONLY
 // Turns a GIF into an H.264 MP4 stored in R2, so GIFs can be used wherever a
@@ -32,7 +33,7 @@ export async function POST(req: Request) {
     const user = token ? await getUserFromSession(token) : null
     authed = !!user && (await checkIsAdmin(user.email))
   }
-  if (!authed) return NextResponse.json({ error: 'Admin only' }, { status: 403 })
+  if (!authed) return jsonPrivate({ error: 'Admin only' }, { status: 403 })
 
   let dir: string | null = null
   try {
@@ -41,20 +42,20 @@ export async function POST(req: Request) {
       const { url } = await req.json().catch(() => ({ url: '' }))
       const publicBase = (process.env.R2_PUBLIC_URL || '').replace(/\/$/, '')
       if (typeof url !== 'string' || !publicBase || !url.startsWith(`${publicBase}/`)) {
-        return NextResponse.json({ error: 'url must point at our own storage' }, { status: 400 })
+        return jsonPrivate({ error: 'url must point at our own storage' }, { status: 400 })
       }
       const src = await fetch(url)
-      if (!src.ok) return NextResponse.json({ error: `Source fetch failed (${src.status})` }, { status: 502 })
+      if (!src.ok) return jsonPrivate({ error: `Source fetch failed (${src.status})` }, { status: 502 })
       buf = Buffer.from(await src.arrayBuffer())
     } else {
       buf = Buffer.from(await req.arrayBuffer())
     }
 
-    if (buf.length < 100) return NextResponse.json({ error: 'Empty upload' }, { status: 400 })
-    if (buf.length > MAX_GIF_BYTES) return NextResponse.json({ error: 'GIF too large (max 80MB)' }, { status: 413 })
+    if (buf.length < 100) return jsonPrivate({ error: 'Empty upload' }, { status: 400 })
+    if (buf.length > MAX_GIF_BYTES) return jsonPrivate({ error: 'GIF too large (max 80MB)' }, { status: 413 })
     // GIF magic: GIF87a / GIF89a
     if (!(buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46)) {
-      return NextResponse.json({ error: 'Not a GIF file' }, { status: 400 })
+      return jsonPrivate({ error: 'Not a GIF file' }, { status: 400 })
     }
 
     const work = await mkdtemp(path.join(tmpdir(), 'gif-video-'))
@@ -67,10 +68,10 @@ export async function POST(req: Request) {
     const mp4 = await readFile(outFile)
 
     const url = await uploadToR2(`uploads/gif-video/${crypto.randomUUID()}.mp4`, mp4, 'video/mp4')
-    return NextResponse.json({ url, bytes: mp4.length })
+    return jsonPrivate({ url, bytes: mp4.length })
   } catch (err) {
     console.error('gif-to-video error:', err instanceof Error ? err.message : err)
-    return NextResponse.json({ error: 'GIF conversion failed — try re-exporting the GIF' }, { status: 500 })
+    return jsonPrivate({ error: 'GIF conversion failed — try re-exporting the GIF' }, { status: 500 })
   } finally {
     if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {})
   }

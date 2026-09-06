@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { fal } from '@fal-ai/client'
+import { fal } from '@/lib/fal-client'
 import { cookies } from 'next/headers'
 import { getUserFromSession } from '@/lib/auth'
 import { checkIsAdmin } from '@/lib/admin-check'

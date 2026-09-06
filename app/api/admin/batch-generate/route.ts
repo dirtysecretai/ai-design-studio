@@ -6,6 +6,7 @@ import { checkIsAdmin } from '@/lib/admin-check'
 import { promoteNextQueuedJob } from '@/lib/fal-queue'
 import { resolveFalImageModelSpec, buildFalImageInput } from '@/lib/fal-image-models'
 import { getModelById } from '@/config/ai-models.config'
+import { jsonPrivate } from '@/lib/api-json'
 
 // POST /api/admin/batch-generate
 //
@@ -36,14 +37,14 @@ export async function POST(req: Request) {
   const token = (await cookies()).get('session')?.value
   const user = token ? await getUserFromSession(token) : null
   if (!user || !(await checkIsAdmin(user.email))) {
-    return NextResponse.json({ error: 'Admin only' }, { status: 403 })
+    return jsonPrivate({ error: 'Admin only' }, { status: 403 })
   }
 
   let body: any
   try {
     body = await req.json()
   } catch {
-    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+    return jsonPrivate({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
   const model = typeof body.model === 'string' ? body.model : ''
@@ -54,7 +55,7 @@ export async function POST(req: Request) {
   // Each entry is one batch: the reference images that batch runs with.
   const rawBatches: unknown = body.batches
   if (!Array.isArray(rawBatches) || rawBatches.length === 0) {
-    return NextResponse.json({ error: 'batches must be a non-empty array' }, { status: 400 })
+    return jsonPrivate({ error: 'batches must be a non-empty array' }, { status: 400 })
   }
   const batches: string[][] = rawBatches
     .slice(0, MAX_BATCHES)
@@ -64,7 +65,7 @@ export async function POST(req: Request) {
     .filter(b => b.length > 0)
 
   if (batches.length === 0) {
-    return NextResponse.json(
+    return jsonPrivate(
       { error: 'Every batch needs at least one reference image with a permanent https URL.' },
       { status: 400 },
     )
@@ -72,14 +73,14 @@ export async function POST(req: Request) {
 
   const selectedModel = getModelById(model)
   if (!selectedModel) {
-    return NextResponse.json({ error: `Unknown model: ${model}` }, { status: 400 })
+    return jsonPrivate({ error: `Unknown model: ${model}` }, { status: 400 })
   }
 
   // Only the fal-spec image suite can be prepared ahead of time — the older
   // models build their input inside /api/generate's own per-model branches.
   const probeSpec = resolveFalImageModelSpec(model, true)
   if (!probeSpec) {
-    return NextResponse.json(
+    return jsonPrivate(
       {
         error:
           `${selectedModel.displayName} can't run server-side batches yet — that only covers the fal image models. ` +
@@ -104,7 +105,7 @@ export async function POST(req: Request) {
       rows.push({ falEndpoint: built.endpoint, falInput: built.input, refs })
     } catch (err: any) {
       // One malformed batch should not silently drop the other 99
-      return NextResponse.json(
+      return jsonPrivate(
         { error: err?.message || `Could not build input for ${model}` },
         { status: 400 },
       )
@@ -112,14 +113,19 @@ export async function POST(req: Request) {
   }
 
   if (rows.length === 0) {
-    return NextResponse.json({ error: 'Nothing could be queued from those batches.' }, { status: 400 })
+    return jsonPrivate({ error: 'Nothing could be queued from those batches.' }, { status: 400 })
   }
 
   const jobPrompt = prompt || selectedModel.displayName
 
   // Admin batches are not billed, matching the client path this replaces
   // (it posted adminMode: true, which skips ticket deduction).
-  await prisma.generationQueue.createMany({
+  // createManyAndReturn, not createMany: the client needs the row ids to show
+  // a card per queued batch IMMEDIATELY. Without them the tab had nothing to
+  // draw and the only thing that produced tiles was the 10s recovery poll \u2014
+  // which is why a run of 69 looked empty until it was reloaded.
+  const created = await prisma.generationQueue.createManyAndReturn({
+    select: { id: true },
     data: rows.map(r => ({
       userId: user.id,
       modelId: model,
@@ -158,5 +164,12 @@ export async function POST(req: Request) {
   })
 
   console.log(`[batch-generate] user ${user.id} queued ${rows.length} × ${model}`)
-  return NextResponse.json({ success: true, queued: rows.length, model })
+  return jsonPrivate({
+    success: true,
+    queued: rows.length,
+    model,
+    // Paired with the refs each row was built from, so every card can show the
+    // reference it is generating against while it waits.
+    jobs: created.map((row, i) => ({ id: row.id, refs: rows[i]?.refs ?? [] })),
+  })
 }

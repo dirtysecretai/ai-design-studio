@@ -71,6 +71,92 @@ export const MOVIE_FORMATS: MovieFormat[] = [
 
 export const DEFAULT_MOVIE_FORMAT = 'short'
 
+/**
+ * What the film should SOUND like, chosen up front rather than improvised.
+ *
+ * Sound was the one production decision with no setting: the employee guessed,
+ * so two runs of the same brief came back with different soundtracks and a
+ * scoring pass sometimes appeared out of nowhere. Each plan maps to concrete
+ * tools (AUDIO_MODELS in lib/audio-models.ts), so the choice is enforceable
+ * rather than a mood.
+ *
+ * The default spends nothing extra: native audio is already paid for inside
+ * the video model, while music, sound design and narration are additional
+ * generations.
+ */
+export type AudioPlan = {
+  id: string
+  label: string
+  /** One line for the dropdown and the brief. */
+  note: string
+  /** What the employee is actually instructed to do. */
+  doctrine: string
+}
+
+export const AUDIO_PLANS: AudioPlan[] = [
+  {
+    id: 'native',
+    label: 'Shot audio only',
+    note: 'whatever the video models produce, nothing added',
+    doctrine:
+      'Use ONLY the audio the video models generate natively. Turn native audio ON for shots with dialogue, impact or a '
+      + 'clear sound event, and leave it off for pure atmosphere. Do NOT call create_audio at all, and do not pass music '
+      + 'or voice to assemble_film. The cut carries the shots\' own sound and nothing else.',
+  },
+  {
+    id: 'music',
+    label: 'Shot audio + music bed',
+    note: 'one score under the whole cut',
+    doctrine:
+      'Keep the shots\' native audio AND lay ONE music bed under the entire cut. Generate it with create_audio '
+      + '(lyria-2 by default; elevenlabs-music when the bed must match an exact runtime), then mix it in the SAME '
+      + 'assemble_film call that makes the final cut, at about -14dB with a fade out, so it sits under the shot audio '
+      + 'rather than over it. One bed for the film — never a different piece per shot.',
+  },
+  {
+    id: 'music-sfx',
+    label: 'Music + sound design',
+    note: 'score, plus foley on the silent shots',
+    doctrine:
+      'A music bed as above, PLUS sound design: for shots rendered without native audio, score them individually with '
+      + 'mmaudio-v2 (it scores TO a clip, so pass that shot\'s video_url and describe the sound you want), then cut the '
+      + 'scored versions in place of the silent ones. Do not double up — a shot with good native audio does not get a '
+      + 'second layer.',
+  },
+  {
+    id: 'narration',
+    label: 'Music + narration',
+    note: 'a voiceover over the score',
+    doctrine:
+      'A music bed as above, PLUS spoken narration. Write the narration yourself, keep it short enough to fit the '
+      + 'runtime at a natural pace (roughly 2.5 words per second), generate it with create_audio (elevenlabs-tts), and '
+      + 'pass it to assemble_film as voice with the seconds it starts at. Duck the music under the voice. Show the user '
+      + 'the narration text BEFORE you spend anything on it.',
+  },
+  {
+    id: 'silent',
+    label: 'Silent',
+    note: 'no sound at all',
+    doctrine:
+      'The film is SILENT. Render every shot with native audio off where the model allows it, never call create_audio, '
+      + 'and pass no music or voice to assemble_film. Cut for the eye alone.',
+  },
+  {
+    id: 'ask',
+    label: 'Ask me',
+    note: 'propose a soundtrack and wait',
+    doctrine:
+      'The user has NOT decided the soundtrack. Propose one in the plan — name the approach in a line and what it '
+      + 'costs — and do not generate any audio until they have approved it.',
+  },
+]
+
+export const DEFAULT_AUDIO_PLAN = 'native'
+
+export function audioPlanById(id: string | null | undefined): AudioPlan {
+  return AUDIO_PLANS.find(a => a.id === id) ?? AUDIO_PLANS.find(a => a.id === DEFAULT_AUDIO_PLAN)!
+}
+
 /** The format's runtime in seconds, for checks that must not rely on prose. */
 export function movieFormatSeconds(id: string | null | undefined): number {
   const secs = movieFormatById(id).seconds.match(/(\d+)/)
@@ -138,7 +224,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Light quality/direction/ratio systems, named portrait setups, motivated light, chiaroscuro, volumetrics, mood-by-light.',
     category: 'craft',
     summary: 'Master lighting: quality/direction/ratio systems, named portrait setups (Rembrandt, butterfly, split, rim), motivated light, chiaroscuro, volumetrics, mood-by-light. Load before any shot where light carries the mood — portraits, drama, product heroes.',
-    summaryTokens: 50, playbookTokens: 1000,
+    summaryTokens: 50, playbookTokens: 677,
     tools: [],
   },
   {
@@ -147,7 +233,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Art movements & design eras as deployable prompt language — Bauhaus, Swiss, Deco, Brutalism, Y2K, Baroque, Ukiyo-e and more.',
     category: 'craft',
     summary: 'Art movements & design eras as deployable prompt language — Bauhaus, Swiss, Deco, Nouveau, Brutalism, Memphis, Y2K, vaporwave, Baroque, Impressionism, Ukiyo-e and more, with when-to-use guidance. Load when a brief names an era/movement or needs a distinctive style direction.',
-    summaryTokens: 50, playbookTokens: 1100,
+    summaryTokens: 50, playbookTokens: 683,
     tools: [],
   },
   {
@@ -156,7 +242,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Focal-length psychology, aperture/DOF, shutter/motion, film stocks & formats, grain, framing conventions.',
     category: 'craft',
     summary: 'Photographer-grade camera language: focal-length psychology, aperture/DOF, shutter/motion, film stocks & formats, grain, framing conventions. Load before photoreal work that must read like a real photograph.',
-    summaryTokens: 45, playbookTokens: 900,
+    summaryTokens: 45, playbookTokens: 572,
     tools: [],
   },
   {
@@ -202,7 +288,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Direct-response ad creative: thumb-stopping hooks, ad visual hierarchy, offer framing and multi-variant angle strategy.',
     category: 'marketing',
     summary: 'Direct-response ad creative: thumb-stopping hooks, ad visual hierarchy, offer framing and multi-variant angles. Load before designing any ad.',
-    summaryTokens: 45, playbookTokens: 900,
+    summaryTokens: 45, playbookTokens: 444,
     tools: ['create_media', 'edit_image', 'search_refs', 'web_search'],
   },
   {
@@ -211,7 +297,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Authentic creator-style content: phone-camera look, natural light, handheld energy — believable, not studio-polished.',
     category: 'marketing',
     summary: 'Authentic creator-style content: phone-camera look, natural light, handheld energy — believable, not studio-polished. Load before making UGC-style assets.',
-    summaryTokens: 45, playbookTokens: 700,
+    summaryTokens: 45, playbookTokens: 394,
     tools: ['create_media'],
   },
   {
@@ -220,7 +306,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Studio-grade product photography: lighting recipes, surfaces, standard angle sets, e-commerce vs lifestyle treatments.',
     category: 'marketing',
     summary: 'Studio product photography: lighting recipes, surfaces, the standard e-comm angle set, lifestyle staging. Load before product shots.',
-    summaryTokens: 45, playbookTokens: 800,
+    summaryTokens: 45, playbookTokens: 416,
     tools: ['create_media', 'edit_image', 'search_refs'],
   },
   {
@@ -229,7 +315,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Extract a brand system (palette, type voice, tone) from refs or a site and enforce it on every asset; saves the kit to memory for reuse.',
     category: 'marketing',
     summary: 'Extract a brand system (palette hexes, type voice, tone words) from refs or a site, persist it to memory, and enforce it verbatim on every asset. Load before brand work.',
-    summaryTokens: 45, playbookTokens: 700,
+    summaryTokens: 45, playbookTokens: 321,
     tools: ['search_refs', 'web_search', 'save_memory', 'edit_image'],
   },
   // ── Film & Story ───────────────────────────────────────────────────────────
@@ -239,7 +325,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Film-grade camera language: shot grammar, lensing, movement vocabulary, motivated light and continuity locks.',
     category: 'film',
     summary: 'Film-grade camera language: shot grammar, lensing, movement, motivated light, continuity locks. Load before directing any cinematic shot or clip.',
-    summaryTokens: 45, playbookTokens: 900,
+    summaryTokens: 45, playbookTokens: 2468,
     tools: ['create_media'],
   },
   {
@@ -248,7 +334,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Beat sheets, shot lists and storyboard frames BEFORE spending tickets on video — structure first, render second.',
     category: 'film',
     summary: 'Beat sheets, shot lists and cheap storyboard frames BEFORE spending tickets on video. Load before planning any multi-shot piece.',
-    summaryTokens: 45, playbookTokens: 800,
+    summaryTokens: 45, playbookTokens: 377,
     tools: ['create_media', 'edit_image'],
   },
   {
@@ -257,7 +343,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Multi-shot sequences that cut together: continuity locks, rhythm, transitions, start/end-frame chaining across clips.',
     category: 'film',
     summary: 'Multi-shot sequences that cut together: continuity locks, rhythm, transitions, start/end-frame chaining. Load before generating any shot sequence.',
-    summaryTokens: 45, playbookTokens: 700,
+    summaryTokens: 45, playbookTokens: 384,
     tools: ['create_media'],
   },
   {
@@ -271,7 +357,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     category: 'film',
     summary: 'End-to-end film delivery: story -> shot list -> batched shot renders with frame-chained continuity -> stitched MP4 with a music/VO mix. Load the playbook before ANY multi-shot film.',
     // measured from the playbook text (chars/4), not estimated
-    summaryTokens: 120, playbookTokens: 1150,
+    summaryTokens: 120, playbookTokens: 12189,
     tools: ['render_shots', 'check_shots', 'assemble_film', 'create_audio', 'create_media'],
     kinds: ['image', 'video'],
   },
@@ -282,8 +368,26 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Stylized illustration — anime, western cartoon, chibi, webtoon — with style-locking vocabulary so a look holds across a set.',
     category: 'style',
     summary: 'Stylized illustration (anime, western cartoon, chibi, webtoon) with style-locking descriptors that hold across a set. Load before stylized work.',
-    summaryTokens: 45, playbookTokens: 800,
+    summaryTokens: 45, playbookTokens: 402,
     tools: ['create_media', 'search_refs'],
+  },
+  {
+    id: 'look-transfer',
+    name: 'Look transfer & filters',
+    description: 'Change how an image LOOKS without changing what is in it: grades, film stocks, camera emulations, effect passes.',
+    category: 'craft',
+    summary: 'Write look-transfer prompts that hold the subject and change only the photography \u2014 role, preservation list, physical cause, artifacts, layered grade, intensity, negative prompt, self-check.',
+    summaryTokens: 60, playbookTokens: 7562,
+    tools: ['create_media', 'edit_image'], kinds: ['image'],
+  },
+  {
+    id: 'character-design',
+    name: 'Character design',
+    description: 'Design one character and build the boards that lock them in: turnarounds, expressions, poses, wardrobe, accessories.',
+    category: 'style',
+    summary: 'Design a single character and build their board \u2014 canon descriptor, master image, then turnaround / expression / pose / wardrobe / accessory sheets, every cell checked against the master.',
+    summaryTokens: 60, playbookTokens: 1632,
+    tools: ['create_media', 'render_plates', 'edit_image', 'search_refs'], kinds: ['image'],
   },
   {
     id: 'character-consistency',
@@ -291,7 +395,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Keep one character identical across many images and shots: character sheets, locked descriptors, reference chaining.',
     category: 'style',
     summary: 'Keep one character identical across many images/shots: character sheet first, canonical descriptor paragraph, reference chaining, drift checks. Load before any recurring-character work.',
-    summaryTokens: 45, playbookTokens: 800,
+    summaryTokens: 45, playbookTokens: 410,
     tools: ['create_media', 'edit_image', 'search_refs'],
   },
   {
@@ -309,7 +413,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Type-led design: generate art WITHOUT text, then add exact type via edit_image — lockups, hierarchy, poster genres.',
     category: 'style',
     summary: 'Type-led design: generate art text-free, add exact type via edit_image — lockup patterns, hierarchy, font psychology, poster genre conventions. Load before posters or type-led layouts.',
-    summaryTokens: 45, playbookTokens: 950,
+    summaryTokens: 45, playbookTokens: 630,
     tools: ['create_media', 'edit_image'],
   },
   // ── Social & Formats ───────────────────────────────────────────────────────
@@ -319,7 +423,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Per-platform specs and native conventions: aspect ratios, safe zones, durations and hook patterns for IG, TikTok, YouTube, X.',
     category: 'social',
     summary: 'Per-platform specs: aspect ratios, safe zones, durations and hook patterns for IG/TikTok/YouTube/X, plus one-master-to-all-formats. Load before platform-targeted content.',
-    summaryTokens: 45, playbookTokens: 700,
+    summaryTokens: 45, playbookTokens: 329,
     tools: ['create_media', 'edit_image'],
   },
   {
@@ -328,7 +432,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Click-driving thumbnails: face + emotion + ≤3 words, extreme contrast, readable at 120px.',
     category: 'social',
     summary: 'Click-driving thumbnails: face+emotion+≤3 words, extreme contrast, readable at 120px. Load before thumbnail work.',
-    summaryTokens: 45, playbookTokens: 700,
+    summaryTokens: 45, playbookTokens: 309,
     tools: ['create_media', 'edit_image'],
   },
   {
@@ -337,7 +441,7 @@ export const AGENT_SKILLS: AgentSkill[] = [
     description: 'Short-form copy: hooks, captions, CTAs and hashtag strategy matched to platform and brand voice.',
     category: 'social',
     summary: 'Short-form copy: hook-value-CTA captions, platform length norms, hashtag tiering, brand-voice matching. Load before writing captions or copy.',
-    summaryTokens: 45, playbookTokens: 600,
+    summaryTokens: 45, playbookTokens: 345,
     tools: ['web_search', 'save_memory'],
   },
   {
@@ -479,8 +583,15 @@ export const BUILT_IN_EMPLOYEES: Employee[] = [
     id: 'emp-movie-studio',
     name: 'Movie Studio',
     builtIn: true,
-    skills: ['movie-production', 'video-production', 'image-generation', 'prompting-guides', 'script-storyboard', 'cinematic-direction', 'montage-sequencing', 'character-consistency', 'character-fusion', 'lighting-design', 'photoshop', 'reference-library', 'dataset-ops', 'delegation', 'project-memory'],
-    text: 'You are the MOVIE STUDIO \u2014 a one-person film production company. Your deliverable is not a clip and not a plan: it is a FINISHED SHORT FILM, a single stitched video with sound, cut from shots you generated and continuity-locked to the character images the user brought you. Video Producer makes clips; Film Director makes shot lists; you make the movie and hand it over. THE PIPELINE, always in this order: (1) INTAKE \u2014 inventory every character image in the conversation (attached, generated, reference library, dataset buckets) and write a one-line CANON DESCRIPTOR for each character from what you can SEE: face, hair, build, wardrobe with colours, distinguishing marks. Name them CHARACTER A / B / C and reuse those exact words in every shot prompt forever. (2) STORY \u2014 a logline, then beats, then a SHOT LIST. (3) SIGN-OFF \u2014 propose_plan with the shot list, the model per shot and the summed ticket total. (4) RENDER \u2014 submit the whole shot list in ONE call; never render shots one at a time. (5) SETTLE \u2014 collect each finished shot plus its LAST and MID frame, and judge the shot from those frames, because you cannot watch video. (6) ASSEMBLE \u2014 stitch the approved takes into the cut. (7) SCORE \u2014 a music bed, and a voiceover if the film narrates. (8) DELIVER \u2014 present the film, then write_summary. STORY DISCIPLINE: a film is a CHANGE, not a montage. Every film has a want, an obstacle and a turn. Eight shots is a film; eight pretty clips is a screensaver. CONTINUITY IS THE JOB: repeat verbatim in EVERY shot prompt the canon descriptors of the characters in that shot, the location, the time of day and light direction, the grade words and the lens feel \u2014 change ONLY shot size, angle and action between shots. Chain shots physically wherever the cut is continuous: the LAST FRAME of shot N becomes the start frame of shot N+1. Never chain more than three shots off one frame \u2014 drift compounds; re-anchor on the original character stills every third shot. BUDGET HONESTY: a film costs real tickets. State the total before you spend anything, and when budget is the constraint say which shots you are downgrading and why. Draft cheap, finish expensive: if the story is unproven, render a three-shot proof on the cheapest capable model, judge it, THEN commit to the full film. QUALITY CONTROL: judge every shot from its extracted frames before cutting it in \u2014 identity against the canon descriptor, hands, eyes, light direction, grade match, screen direction. A shot that fails is FLAGGED TO THE USER with what is wrong and what you would change; you do not silently reshoot and you do not silently cut a broken shot into the film. Ask for their direction, then reshoot only that shot. WHEN THE USER GIVES YOU NO STORY: never invent one silently and never ask an open question. Write 3-5 concrete loglines built from the characters you can actually see in their images, labelled A, B, C, D \u2014 each one sentence with a stated tone and runtime \u2014 then get a pick. In Ask mode put the loglines in your reply text and follow with ONE ask_user whose options are those labels, plus a runtime question and a budget question. In Plan mode you have no tools at all: the menu goes in the plan\'s opening section, you plan the strongest option in full as the recommendation, and you end by asking them to confirm or swap. In Auto mode you may not ask \u2014 pick the strongest logline yourself, say which and why in one line, and start. HARD RULES: never claim a film exists that the assembly step did not return. Never paste media URLs into your reply. Never write the summary while a shot is still rendering.',
+    skills: ['movie-production', 'look-transfer', 'video-production', 'image-generation', 'prompting-guides', 'script-storyboard', 'cinematic-direction', 'montage-sequencing', 'character-consistency', 'character-fusion', 'lighting-design', 'photoshop', 'reference-library', 'dataset-ops', 'delegation', 'project-memory'],
+    text: 'You are the MOVIE STUDIO \u2014 a one-person film production company. Your deliverable is not a clip and not a plan: it is a FINISHED SHORT FILM, a single stitched video with sound, cut from shots you generated and continuity-locked to the character images the user brought you. Video Producer makes clips; Film Director makes shot lists; you make the movie and hand it over. THE PIPELINE, always in this order: (1) INTAKE \u2014 inventory every character image in the conversation (attached, generated, reference library, dataset buckets) and write a one-line CANON DESCRIPTOR for each character from what you can SEE: face, hair, build, wardrobe with colours, distinguishing marks. Name them CHARACTER A / B / C and reuse those exact words in every shot prompt forever. (2) STORY \u2014 a logline, then beats, then a SHOT LIST. (3) SIGN-OFF \u2014 propose_plan with the shot list, the model per shot and the summed ticket total. (4) BOARD \u2014 render the plates, then present_storyboard: the film as stills, one frame per shot, and WAIT. render_shots is refused until it is approved. (5) RENDER \u2014 submit the whole shot list in ONE call; never render shots one at a time. (5) SETTLE \u2014 collect each finished shot plus its LAST and MID frame, and judge the shot from those frames, because you cannot watch video. (6) ASSEMBLE \u2014 stitch the approved takes into the cut. (7) SCORE \u2014 a music bed, and a voiceover if the film narrates. (8) DELIVER \u2014 present the film, then write_summary. STORY DISCIPLINE: a film is a CHANGE, not a montage. Every film has a want, an obstacle and a turn. Eight shots is a film; eight pretty clips is a screensaver. CONTINUITY IS THE JOB: repeat verbatim in EVERY shot prompt the canon descriptors of the characters in that shot, the location, the time of day and light direction, the grade words and the lens feel \u2014 change ONLY shot size, angle and action between shots. Chain shots physically wherever the cut is continuous: the LAST FRAME of shot N becomes the start frame of shot N+1. Never chain more than three shots off one frame \u2014 drift compounds; re-anchor on the original character stills every third shot. BUDGET HONESTY: a film costs real tickets. State the total before you spend anything, and when budget is the constraint say which shots you are downgrading and why. Draft cheap, finish expensive: if the story is unproven, render a three-shot proof on the cheapest capable model, judge it, THEN commit to the full film. QUALITY CONTROL: judge every shot from its extracted frames before cutting it in \u2014 identity against the canon descriptor, hands, eyes, light direction, grade match, screen direction. A shot that fails is FLAGGED TO THE USER with what is wrong and what you would change; you do not silently reshoot and you do not silently cut a broken shot into the film. Ask for their direction, then reshoot only that shot. WHEN THE USER GIVES YOU NO STORY: never invent one silently and never ask an open question. Write 3-5 concrete loglines built from the characters you can actually see in their images, labelled A, B, C, D \u2014 each one sentence with a stated tone and runtime \u2014 then get a pick. In Ask mode put the loglines in your reply text and follow with ONE ask_user whose options are those labels, plus a runtime question and a budget question. In Plan mode you have no tools at all: the menu goes in the plan\'s opening section, you plan the strongest option in full as the recommendation, and you end by asking them to confirm or swap. In Auto mode you may not ask \u2014 pick the strongest logline yourself, say which and why in one line, and start. HARD RULES: never claim a film exists that the assembly step did not return. Never paste media URLs into your reply. Never write the summary while a shot is still rendering.',
+  },
+  {
+    id: 'emp-character-design',
+    name: 'Character Design',
+    builtIn: true,
+    skills: ['character-design', 'look-transfer', 'character-consistency', 'character-fusion', 'image-generation', 'prompting-guides', 'figure-anatomy', 'lighting-design', 'color-theory', 'photoshop', 'reference-library', 'dataset-ops', 'project-memory'],
+    text: 'You are CHARACTER DESIGN \u2014 a character designer who takes ONE character and makes them real enough to use. The user arrives with either reference photos of a character or nothing but a description, and leaves with a CHARACTER BOARD: a locked design plus the sheets that let anyone else draw, cast or shoot that character consistently. ONE CHARACTER PER PROJECT. If the user brings several, ask which one this project is for and offer to start the others separately \u2014 a board that drifts between two people is worth nothing to either. THE PIPELINE: (1) INTAKE \u2014 look at every reference and write the CANON DESCRIPTOR: one paragraph naming face shape, eyes, hair (colour, length, texture, how it sits), skin, build, height read, age read, and every distinguishing mark. From a description alone, ask 2-4 focused questions (era/genre, silhouette, palette, one adjective for their presence) and OFFER concrete options rather than open questions. (2) MASTER \u2014 if the references are weak, restore or regenerate a clean high-resolution master first, verify the likeness against the originals, and treat the master as canonical from then on. From a description, generate 3-4 distinct interpretations and get a pick BEFORE building anything on top. (3) THE BOARD \u2014 build the sheets the user asked for, each anchored on the master and the descriptor verbatim. (4) REVIEW \u2014 check every sheet against the master for drift before presenting: same face, same marks, same proportions. Flag what drifted rather than quietly shipping it. (5) DELIVER \u2014 present the board, restate the final canon descriptor as text the user can paste into any other tool, CALL character_notes to save the descriptor, profile, want, wardrobe and restrictions (this is what lets the Movie Studio cast this character into a film \u2014 a board without notes is a dead end), and write_summary. THE SHEETS YOU BUILD, each a real deliverable: TURNAROUND (front, three-quarter, profile, back, consistent height and lighting), EXPRESSION SHEET (neutral, joy, anger, fear, thinking, and one that belongs to this character specifically), POSE SHEET (standing neutral, walking, sitting, an action native to who they are, a resting posture that shows personality), WARDROBE (their default outfit plus alternates for the contexts they appear in \u2014 keep the same body and face, change only the clothes), ACCESSORIES AND PROPS (the objects they carry, in isolation on a clean ground so they can be reused), COLOUR AND MATERIAL (palette swatches with the fabrics and finishes named), CLOSE STUDIES (hands, footwear, hair from behind, any signature detail). HOW TO SHOOT A SHEET: one generation per cell wherever the cells must match \u2014 a single image asked to contain six poses gives six slightly different people. Generate each cell with the master in reference_image_urls and the descriptor repeated verbatim, changing ONLY the one variable that cell is about. Keep lighting, distance and background identical across a sheet so the differences read as design rather than noise; a plain neutral background is correct for a board. Use edit_image to lay finished cells out into a contact sheet with labels when the user wants one image to hand around. QUALITY BAR: a board is judged on whether the SAME PERSON appears in every cell. Identity beats prettiness \u2014 a gorgeous cell with the wrong jaw is a failed cell. Check hands, ear shape, hairline and any mark every time. HARD RULES: never invent a second character inside this project; never change the design mid-board without saying so; never present a sheet you have not compared against the master.',
   },
   {
     id: 'emp-social-manager',
@@ -503,6 +614,11 @@ const MODEL_RATES: Record<string, { in: number; out: number }> = {
   'openai/gpt-5.4-mini':           { in: 0.3,  out: 1.2 },
   'google/gemini-3.1-pro-preview': { in: 1.25, out: 10 },
   'google/gemini-3.5-flash':       { in: 0.1,  out: 0.4 },
+  'google/gemini-3.5-flash-lite':  { in: 0.05, out: 0.2 },
+  'google/gemini-3.6-flash':       { in: 0.1,  out: 0.4 },
+  // The model every EMPLOYEE actually runs on. Its absence meant the cost
+  // readout showed $0.00 for exactly the runs that matter most.
+  'google/gemini-3.7-flash':       { in: 0.1,  out: 0.4 },
   'xai/grok-4.5':                  { in: 3,    out: 15 },
   'xai/grok-4.1-fast-reasoning':   { in: 0.4,  out: 1 },
 }

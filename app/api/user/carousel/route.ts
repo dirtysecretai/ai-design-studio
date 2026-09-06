@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getUserFromSession } from '@/lib/auth';
 import { cookies } from 'next/headers';
-import { uploadToR2 } from '@/lib/r2';
+import { uploadToR2, uploadPublicAsset } from '@/lib/r2';
 
 
 const MAX_IMAGES_PER_SIDE = 5;
@@ -119,7 +119,7 @@ export async function POST(req: NextRequest) {
 
     // Upload to R2
     const fileBuffer = Buffer.from(await file.arrayBuffer());
-    const url = await uploadToR2(`carousel/${user.id}/${side}-${Date.now()}.${file.name.split('.').pop()}`, fileBuffer, file.type);
+    const url = await uploadPublicAsset(`carousel/${user.id}/${side}-${Date.now()}.${file.name.split('.').pop()}`, fileBuffer, file.type);
 
     // Create carousel image record
     const carouselImage = await prisma.carouselImage.create({

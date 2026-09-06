@@ -4,6 +4,8 @@ import prisma from '@/lib/prisma'
 import { getUserFromSession } from '@/lib/auth'
 import { getUserRefLimit } from '@/lib/ref-limits'
 import { resolveRequestUser, requireScopes } from '@/lib/api-key-auth'
+import { jsonPrivate } from '@/lib/api-json'
+import { canonicalisePayload } from '@/lib/media-url'
 
 // Account-scoped reference library (portal-v2 Refs dropdown).
 // "Clear" is a soft delete (isCleared) — rows and R2 files are kept so
@@ -41,10 +43,10 @@ export async function GET(req: Request) {
       getUserRefLimit(user.id, user.email),
     ])
 
-    return NextResponse.json({ references, folders, limit, count: references.length })
+    return jsonPrivate({ references, folders, limit, count: references.length })
   } catch (error) {
     console.error('references GET error:', error)
-    return NextResponse.json({ error: 'Server error' }, { status: 500 })
+    return jsonPrivate({ error: 'Server error' }, { status: 500 })
   }
 }
 
@@ -59,10 +61,10 @@ export async function POST(req: Request) {
       if (denied) return denied
     }
 
-    const body = await req.json()
+    const body = canonicalisePayload(await req.json())
     const items: { url?: unknown; folderId?: unknown }[] = Array.isArray(body?.items) ? body.items : []
     if (items.length === 0 || items.length > 100) {
-      return NextResponse.json({ error: 'items must be 1-100 entries' }, { status: 400 })
+      return jsonPrivate({ error: 'items must be 1-100 entries' }, { status: 400 })
     }
 
     // Only permanent https URLs — a base64 data URL here would recreate the
@@ -70,7 +72,7 @@ export async function POST(req: Request) {
     const clean: { url: string; folderId: number | null }[] = []
     for (const it of items) {
       if (typeof it?.url !== 'string' || !it.url.startsWith('https://')) {
-        return NextResponse.json({ error: 'Each item needs an https url' }, { status: 400 })
+        return jsonPrivate({ error: 'Each item needs an https url' }, { status: 400 })
       }
       const folderId = typeof it.folderId === 'number' ? it.folderId : null
       clean.push({ url: it.url, folderId })
@@ -81,7 +83,7 @@ export async function POST(req: Request) {
     if (folderIds.length > 0) {
       const owned = await prisma.userRefFolder.count({ where: { id: { in: folderIds }, userId: user.id } })
       if (owned !== folderIds.length) {
-        return NextResponse.json({ error: 'Invalid folder' }, { status: 400 })
+        return jsonPrivate({ error: 'Invalid folder' }, { status: 400 })
       }
     }
 
@@ -105,13 +107,13 @@ export async function POST(req: Request) {
       return rows
     })
 
-    return NextResponse.json({ references: created, limit })
+    return jsonPrivate({ references: created, limit })
   } catch (error: any) {
     if (error?.code === 'REF_LIMIT') {
-      return NextResponse.json({ error: 'limit', limit: error.limit, count: error.count }, { status: 409 })
+      return jsonPrivate({ error: 'limit', limit: error.limit, count: error.count }, { status: 409 })
     }
     console.error('references POST error:', error)
-    return NextResponse.json({ error: 'Server error' }, { status: 500 })
+    return jsonPrivate({ error: 'Server error' }, { status: 500 })
   }
 }
 
@@ -119,27 +121,27 @@ export async function POST(req: Request) {
 export async function PATCH(req: Request) {
   try {
     const user = await getAuthUser()
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!user) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
 
-    const body = await req.json()
-    if (body?.action !== 'move') return NextResponse.json({ error: 'Unknown action' }, { status: 400 })
+    const body = canonicalisePayload(await req.json())
+    if (body?.action !== 'move') return jsonPrivate({ error: 'Unknown action' }, { status: 400 })
     const ids: number[] = Array.isArray(body.ids) ? body.ids.filter((n: unknown) => typeof n === 'number') : []
-    if (ids.length === 0) return NextResponse.json({ error: 'ids required' }, { status: 400 })
+    if (ids.length === 0) return jsonPrivate({ error: 'ids required' }, { status: 400 })
     const folderId: number | null = typeof body.folderId === 'number' ? body.folderId : null
 
     if (folderId !== null) {
       const owned = await prisma.userRefFolder.count({ where: { id: folderId, userId: user.id } })
-      if (owned === 0) return NextResponse.json({ error: 'Invalid folder' }, { status: 400 })
+      if (owned === 0) return jsonPrivate({ error: 'Invalid folder' }, { status: 400 })
     }
 
     const result = await prisma.userReference.updateMany({
       where: { id: { in: ids }, userId: user.id, isCleared: false },
       data: { folderId },
     })
-    return NextResponse.json({ moved: result.count })
+    return jsonPrivate({ moved: result.count })
   } catch (error) {
     console.error('references PATCH error:', error)
-    return NextResponse.json({ error: 'Server error' }, { status: 500 })
+    return jsonPrivate({ error: 'Server error' }, { status: 500 })
   }
 }
 
@@ -147,7 +149,7 @@ export async function PATCH(req: Request) {
 export async function DELETE(req: Request) {
   try {
     const user = await getAuthUser()
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!user) return jsonPrivate({ error: 'Unauthorized' }, { status: 401 })
 
     const { searchParams } = new URL(req.url)
     const all = searchParams.get('all') === 'true'
@@ -157,7 +159,7 @@ export async function DELETE(req: Request) {
       .filter(n => !isNaN(n))
 
     if (!all && ids.length === 0) {
-      return NextResponse.json({ error: 'ids or all=true required' }, { status: 400 })
+      return jsonPrivate({ error: 'ids or all=true required' }, { status: 400 })
     }
 
     const result = await prisma.userReference.updateMany({
@@ -168,9 +170,9 @@ export async function DELETE(req: Request) {
       },
       data: { isCleared: true, clearedAt: new Date() },
     })
-    return NextResponse.json({ cleared: result.count })
+    return jsonPrivate({ cleared: result.count })
   } catch (error) {
     console.error('references DELETE error:', error)
-    return NextResponse.json({ error: 'Server error' }, { status: 500 })
+    return jsonPrivate({ error: 'Server error' }, { status: 500 })
   }
 }

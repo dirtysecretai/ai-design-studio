@@ -3,6 +3,7 @@ import { VIDEO_MODEL_IDS, VIDEO_FILE_EXTS } from '@/lib/fal-video-endpoints'
 import prisma from '@/lib/prisma'
 import { deleteFromR2 } from '@/lib/r2'
 import { resolveRequestUser, requireScopes } from '@/lib/api-key-auth'
+import { jsonPrivate } from '@/lib/api-json'
 
 
 export async function GET(request: Request) {
@@ -74,7 +75,7 @@ export async function GET(request: Request) {
         where: { userId: user.id, isDeleted: false, falRequestId: { in: ids } },
         orderBy: { createdAt: 'desc' },
       })
-      return NextResponse.json({
+      return jsonPrivate({
         success: true,
         images: images.map(img => ({
           id: img.id,
@@ -166,7 +167,7 @@ export async function GET(request: Request) {
     // hand back the next cursor so the client doesn't have to reconstruct it.
     if (cursorMode) {
       const last = images[images.length - 1]
-      return NextResponse.json({
+      return jsonPrivate({
         success: true,
         images: mapped,
         hasMore: images.length === limit,
@@ -178,7 +179,7 @@ export async function GET(request: Request) {
     // Count with the SAME filter as the list, or totalPages overshoots by the
     // number of excluded dataset uploads.
     const total = await prisma.generatedImage.count({ where: { AND: [baseWhere, uploadWhere, modelFilter] } })
-    return NextResponse.json({
+    return jsonPrivate({
       success: true,
       images: mapped,
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
@@ -186,7 +187,7 @@ export async function GET(request: Request) {
 
   } catch (error: any) {
     console.error('Error fetching generated images:', error)
-    return NextResponse.json(
+    return jsonPrivate(
       { error: 'Failed to fetch images' },
       { status: 500 }
     )
@@ -213,7 +214,7 @@ export async function PATCH(request: Request) {
       : []
 
     if (ids.length === 0) {
-      return NextResponse.json({ error: 'No image IDs provided' }, { status: 400 })
+      return jsonPrivate({ error: 'No image IDs provided' }, { status: 400 })
     }
 
     // Move action: reassign the images' folder. folderId null = unfiled (root).
@@ -222,19 +223,19 @@ export async function PATCH(request: Request) {
       const folderId: number | null = typeof body.folderId === 'number' ? body.folderId : null
       if (folderId !== null) {
         const owned = await prisma.userGenerationFolder.count({ where: { id: folderId, userId: user.id } })
-        if (owned === 0) return NextResponse.json({ error: 'Invalid folder' }, { status: 400 })
+        if (owned === 0) return jsonPrivate({ error: 'Invalid folder' }, { status: 400 })
       }
       const moved = await prisma.generatedImage.updateMany({
         where: { id: { in: ids }, userId: user.id, isDeleted: false },
         data: { folderId },
       })
-      return NextResponse.json({ success: true, moved: moved.count })
+      return jsonPrivate({ success: true, moved: moved.count })
     }
 
     // Default action: hide/unhide.
     const hidden: boolean = body.hidden
     if (typeof hidden !== 'boolean') {
-      return NextResponse.json({ error: 'hidden must be a boolean' }, { status: 400 })
+      return jsonPrivate({ error: 'hidden must be a boolean' }, { status: 400 })
     }
 
     // User-scoped where prevents any cross-user modification
@@ -243,10 +244,10 @@ export async function PATCH(request: Request) {
       data: { isHidden: hidden },
     })
 
-    return NextResponse.json({ success: true, updated: result.count })
+    return jsonPrivate({ success: true, updated: result.count })
   } catch (error: any) {
     console.error('Error updating image visibility:', error)
-    return NextResponse.json({ error: 'Failed to update images' }, { status: 500 })
+    return jsonPrivate({ error: 'Failed to update images' }, { status: 500 })
   }
 }
 
@@ -267,7 +268,7 @@ export async function DELETE(request: Request) {
     const ids: number[] = body.ids
 
     if (!Array.isArray(ids) || ids.length === 0) {
-      return NextResponse.json({ error: 'No image IDs provided' }, { status: 400 })
+      return jsonPrivate({ error: 'No image IDs provided' }, { status: 400 })
     }
 
     // Fetch blob URLs before soft-deleting so we can remove them from Vercel Blob
@@ -291,9 +292,9 @@ export async function DELETE(request: Request) {
       }
     }
 
-    return NextResponse.json({ success: true, deleted: result.count })
+    return jsonPrivate({ success: true, deleted: result.count })
   } catch (error: any) {
     console.error('Error deleting images:', error)
-    return NextResponse.json({ error: 'Failed to delete images' }, { status: 500 })
+    return jsonPrivate({ error: 'Failed to delete images' }, { status: 500 })
   }
 }

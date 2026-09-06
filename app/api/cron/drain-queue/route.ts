@@ -18,6 +18,12 @@ import { releaseQueueSlot } from '@/lib/admin-queue-helpers'
 const STALE_MINUTES = 12
 // Video generation is legitimately slow — give it a much longer leash
 const STALE_MINUTES_VIDEO = 60
+/**
+ * 3D is minutes-long work by nature: Hi3D averages ~9 min, Hunyuan World more.
+ * The suite's own settle() gives up at an hour, so the cron matches it rather
+ * than second-guessing it from the outside.
+ */
+const STALE_MINUTES_3D = 60
 
 /**
  * GET /api/cron/drain-queue
@@ -61,9 +67,20 @@ export async function GET(request: Request) {
     // for. Only jobs fal reports as gone/failed (or that we can't identify) are
     // reset. Unreachable fal = leave it alone and re-check next minute.
     const verifyWithFal = async (j: typeof staleCandidates[number]): Promise<'completed' | 'alive' | 'dead' | 'unknown'> => {
-      const params = j.parameters as { falEndpoint?: string } | null
-      const ep = params?.falEndpoint
-      if (!j.falRequestId || !ep || !process.env.FAL_KEY) return 'dead' // never submitted → safe to fail
+      const params = j.parameters as { falEndpoint?: string; endpoint?: string } | null
+      // Two spellings in the wild: the image and video routes write
+      // `falEndpoint`, the 3D route writes `endpoint`. Reading only the first
+      // meant every 3D job fell through to the "never submitted" branch below
+      // and was killed at twelve minutes WITHOUT fal ever being asked — the
+      // precise opposite of what this function exists to do. Hi3D runs eight to
+      // eleven minutes, so it was being executed at random.
+      const ep = params?.falEndpoint ?? params?.endpoint
+      // No request id means it genuinely never reached fal, and failing it is
+      // right. A missing endpoint is OUR bookkeeping gap, not evidence about
+      // the job — when there is a request id, the only safe answer is "don't
+      // know", which leaves the job alone and re-checks next minute.
+      if (!j.falRequestId) return 'dead'
+      if (!ep || !process.env.FAL_KEY) return 'unknown'
       try {
         // fal status lives under owner/app — sub-paths like /edit 405
         const baseApp = ep.split('/').slice(0, 2).join('/')
@@ -83,8 +100,12 @@ export async function GET(request: Request) {
     const toHarvest: typeof staleCandidates = []
     let sparedAlive = 0
     for (const j of staleCandidates) {
-      // Video gets a much longer grace period before we even consider it stale
-      const limitMin = j.modelType === 'video' ? STALE_MINUTES_VIDEO : STALE_MINUTES
+      // Video and 3D both run far longer than an image. Hi3D alone averages
+      // nine minutes and has finished at eleven, so the twelve-minute image
+      // limit gave it almost no headroom.
+      const limitMin = j.modelType === 'video' ? STALE_MINUTES_VIDEO
+        : j.modelType === 'threed' ? STALE_MINUTES_3D
+        : STALE_MINUTES
       if (j.startedAt && Date.now() - j.startedAt.getTime() < limitMin * 60 * 1000) continue
       const verdict = await verifyWithFal(j)
       if (verdict === 'dead') toFail.push(j.id)

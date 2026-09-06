@@ -3,7 +3,7 @@ import { createAnthropic } from '@ai-sdk/anthropic'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createXai } from '@ai-sdk/xai'
-import { fal } from '@fal-ai/client'
+import { fal } from '@/lib/fal-client'
 import prisma from '@/lib/prisma'
 import { decryptKey } from '@/lib/chat-key-crypto'
 import { parseRunpodConfig } from '@/lib/runpod-config'
@@ -15,11 +15,12 @@ import {
   type ChatHubModel, type ChatHubProvider, type ChatHubRoute, type CustomChatModel,
 } from '@/lib/chat-hub-models'
 import { buildFalCall, generateWithGeminiApi, persistChatGeneration } from '@/lib/chat-hub-create'
-import { AGENT_SKILLS, skillOn, movieFormatById, movieFormatSeconds, DEFAULT_MOVIE_FORMAT, type SkillSet } from '@/lib/chat-hub-skills'
+import { AGENT_SKILLS, skillOn, movieFormatById, movieFormatSeconds, DEFAULT_MOVIE_FORMAT, audioPlanById, DEFAULT_AUDIO_PLAN, type SkillSet } from '@/lib/chat-hub-skills'
 import { policyMarker, strictFilterRisk } from '@/lib/model-content-policy'
 import { submitChatVideo } from '@/lib/chat-video-submit'
 import { submitChatImage } from '@/lib/chat-image-submit'
-import { executeRenderShots, executeCheckShots, executeAssembleFilm, executeCreateAudio, executeExtractFrames } from '@/lib/chat-film-tools'
+import { executeRenderShots, executeRenderPlates, executeCheckShots, executeAssembleFilm, executeCreateAudio, executeExtractFrames, executeRelight, executeRelightVideo, executeRecamera } from '@/lib/chat-film-tools'
+import { writeFilmNotes, BIBLE_TEMPLATE, CHARACTER_TEMPLATE, BIBLE_MAX } from '@/lib/film-notes'
 import { AUDIO_MODELS } from '@/lib/audio-models'
 import { getPlaybook } from '@/lib/chat-hub-playbooks'
 
@@ -31,7 +32,7 @@ export type AgentMode = 'plan' | 'accept' | 'approved'
 
 export type AgentStep = {
   id: string                 // toolCallId — upsert key
-  tool: 'delegate_task' | 'generate_image' | 'create_media' | 'edit_image' | 'search_refs' | 'dataset' | 'dataset_edit' | 'web_search' | 'save_memory' | 'edit_instructions' | 'ask_user' | 'propose_plan' | 'reasoning' | 'record_evaluation' | 'write_summary' | 'load_skill' | 'remember' | 'publish_instagram' | 'render_shots' | 'check_shots' | 'assemble_film' | 'create_audio' | 'extract_frames'
+  tool: 'present_storyboard' | 'film_notes' | 'character_notes' | 'relight' | 'relight_video' | 'recamera' | 'render_plates' | 'delegate_task' | 'generate_image' | 'create_media' | 'edit_image' | 'search_refs' | 'dataset' | 'dataset_edit' | 'web_search' | 'save_memory' | 'edit_instructions' | 'ask_user' | 'propose_plan' | 'reasoning' | 'record_evaluation' | 'write_summary' | 'load_skill' | 'remember' | 'publish_instagram' | 'render_shots' | 'check_shots' | 'assemble_film' | 'create_audio' | 'extract_frames'
   status: 'running' | 'done' | 'error' | 'pending' | 'denied' | 'superseded'
   model?: string             // delegate target / create model id
   task?: string
@@ -48,6 +49,8 @@ export type AgentStep = {
   queueId?: number           // video submitted to the queue — settled later by
                              // the film-status route, not by this turn
   queueIds?: number[]        // render_shots: every shot submitted by this step
+  shotModels?: Record<string, string> // render_shots: queueId -> model id, so a
+                             // finished clip can say which engine shot it
   error?: string
   ms?: number
   seg?: number               // text-segment round the call was made in — the UI
@@ -90,12 +93,18 @@ export function toolPausesForApproval(toolName: string, mode: AgentMode, planBud
   // approval — never budget-exempt. Reads (the `dataset` tool) stay auto.
   if (toolName === 'dataset_edit') return true
   if (toolName === 'propose_plan' || toolName === 'ask_user' || toolName === 'edit_instructions') return true
+  // The storyboard is the user's money gate, so it pauses even in Auto:
+  // a checkpoint that approves itself is not a checkpoint.
+  if (toolName === 'present_storyboard') return true
   // AUTO mode ('approved') = full autonomy: media calls run inline, no plan
   // budget required. Ask/plan modes keep the plan-approval economy.
-  if (toolName === 'create_media' || toolName === 'generate_image' || toolName === 'render_shots' || toolName === 'create_audio') {
+  if (toolName === 'create_media' || toolName === 'generate_image' || toolName === 'render_shots' || toolName === 'render_plates' || toolName === 'create_audio') {
     return mode === 'approved' ? false : !planBudgetActive
   }
   if (toolName === 'check_shots' || toolName === 'assemble_film' || toolName === 'extract_frames') return false
+  // Notes cost nothing and destroy nothing; pausing for them would turn the
+  // one habit that keeps a long production affordable into a chore.
+  if (toolName === 'film_notes' || toolName === 'character_notes') return false
   if (mode === 'accept' && (toolName === 'delegate_task' || toolName === 'edit_image')) return !planBudgetActive
   return false
 }
@@ -119,11 +128,29 @@ export async function loadUserKeys(userId: number): Promise<Record<string, strin
 
 export type ModelPrefs = { video?: string; image?: string; notes?: string }
 
+/** The saved routing map, validated — same shape the send route accepts. */
+function sanitizeRoutingMap(raw: unknown): RoutingMap {
+  const out: RoutingMap = {}
+  if (raw && typeof raw === 'object') {
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if ((v === 'gateway' || v === 'direct') && ['Anthropic', 'OpenAI', 'Google', 'xAI'].includes(k)) {
+        out[k as keyof RoutingMap] = v
+      }
+    }
+  }
+  return out
+}
+
 export async function loadChatPrefs(userId: number): Promise<{
   customModels: CustomChatModel[]
   agentRoster: string[] | null
   modelPrefs: ModelPrefs
   movieFormat: string
+  audioPlan: string
+  /** Hard ticket ceiling for a film, 0 = none. */
+  budgetCap: number
+  /** Saved provider routing (gateway vs the provider's own key). */
+  routing: RoutingMap
 }> {
   try {
     const row = await prisma.user.findUnique({
@@ -138,9 +165,16 @@ export async function loadChatPrefs(userId: number): Promise<{
     return {
       customModels: sanitizeCustomModels(prefs.chatHubCustomModels),
       agentRoster: roster && roster.length > 0 ? roster : null,
+      routing: sanitizeRoutingMap(prefs.chatHubRouting),
       movieFormat: typeof prefs.chatHubMovieFormat === 'string'
         ? prefs.chatHubMovieFormat
         : DEFAULT_MOVIE_FORMAT,
+      audioPlan: typeof prefs.chatHubAudioPlan === 'string'
+        ? prefs.chatHubAudioPlan
+        : DEFAULT_AUDIO_PLAN,
+      budgetCap: typeof prefs.movieStudioBudgetCap === 'number' && prefs.movieStudioBudgetCap > 0
+        ? prefs.movieStudioBudgetCap
+        : 0,
       modelPrefs: {
         video: typeof mp.video === 'string' && getCreateModel(mp.video) ? mp.video : undefined,
         image: typeof mp.image === 'string' && getCreateModel(mp.image) ? mp.image : undefined,
@@ -148,8 +182,25 @@ export async function loadChatPrefs(userId: number): Promise<{
       },
     }
   } catch {
-    return { customModels: [], agentRoster: null, modelPrefs: {}, movieFormat: DEFAULT_MOVIE_FORMAT }
+    return { customModels: [], agentRoster: null, modelPrefs: {}, routing: {}, movieFormat: DEFAULT_MOVIE_FORMAT, audioPlan: DEFAULT_AUDIO_PLAN, budgetCap: 0 }
   }
+}
+
+
+/**
+ * What the film should sound like. Same contract as movieFormatInstructions:
+ * a setting the user has already made in the UI is not a question to ask again.
+ */
+export function audioPlanInstructions(skills: SkillSet, planId: string): string {
+  if (!skillOn(skills, 'movie-production')) return ''
+  const a = audioPlanById(planId)
+  if (a.id === 'ask') return `SOUNDTRACK — ${a.doctrine}`
+  return (
+    `SOUNDTRACK — ALREADY SETTLED: the user chose "${a.label}" (${a.note}) in this employee\'s own settings. `
+    + `DO NOT ask them what the film should sound like and do not offer soundtrack options. ${a.doctrine} `
+    + `Say in one line which soundtrack you are working to, and price any audio generation in the plan. `
+    + `If the story genuinely needs something else, say so in one line and let them change the dropdown.`
+  )
 }
 
 /**
@@ -172,6 +223,22 @@ export function movieFormatInstructions(skills: SkillSet, formatId: string): str
     'BUDGET IS A MANDATE, NOT A CEILING. If the user picked a large budget or said no limit, a shot list that never touches the flagship tier (SeeDance 2.5, then 2.0) is a planning failure — they paid for a better film and got change instead. Put the opening image, the turn and the closing image on the best model each one is ALLOWED to use, and remember a strict provider only refuses the shots the restricted character appears in, so plates, landscapes, weather, effects and object inserts can always take the flagship. Say the tier you chose per shot so the user can move the money.',
     // The owner's standing instruction, kept always-on because the on-demand
     // playbook loads too late to shape the FIRST plan the user is shown.
+    // The runtime forces top-tier plates; if the PLAN quotes the cheap tier
+    // the budget arithmetic the user approves is simply wrong.
+    'FILM PLATES RENDER AT THE HIGHEST QUALITY TIER THE IMAGE MODEL OFFERS, ALWAYS. A still generated for a film is the source of a video shot and of every frame cut out of it, so the cheap tier caps the whole shot and the system renders these at the top tier regardless of what you request. PRICE THEM THAT WAY IN THE PLAN: NanoBanana Pro 2 is 12 tickets, not 7; NanoBanana Pro is 14, not 7; Pro Scanner is 15, not 7. A plan that quotes the 2K price for a plate understates the budget the user is approving, which is why they end up short. Never propose a 2K film plate.',
+    'LOOK AT THE REFERENCE QUALITY AT INTAKE. A film inherits the weakest reference it was built from: a screengrab or a compressed phone photo carries the likeness but not the detail, and every shot generated from it is soft. Before planning, judge what you were given and RAISE it when it is weak, and WHICH WAY depends on who they are. If the character is RECOGNISABLE (a real person or a well-known character), a strong model already carries that likeness: generate fresh high-resolution imagery with the references attached and the person named — NanoBanana Pro 2 is the best at this — rather than upscaling a screengrab, because a correct sharp likeness beats a cleaned-up bad capture every time. If the character is ORIGINAL or unknown, the reference is the only place that face exists, so RESTORE it instead (Topaz restore/precision/denoise/sharpen keep the same face, cleaner) and check any regeneration hard for drift. Say in one line what you found and what you did about it.',
+    'KEEP THE PRODUCTION BIBLE, AND KEEP IT SHORT. This film outlives every single run, and the notes at the top of your context are what carries it: the cast, the world, the look, and the decisions the user has already made. CALL film_notes the moment something durable is settled — a character is named, a face is described, the user makes a call, a shot establishes continuity — and rewrite the whole thing each time rather than adding to it. For a RECOGNISABLE character a name and one line is enough, because the models already know them. For an ORIGINAL character the notes are the ONLY place that person exists, so build them up over time: their face, hair, build, wardrobe, voice, and the reference urls that show them. If you are about to shoot an original character and the notes do not describe them well enough to keep them consistent, ASK before you spend anything. Never write run narration, reasoning or pleasantries into the notes — a line that would not change a future shot is a line that costs money on every step of every run for nothing.',
+    'ASK THE QUESTIONS YOU ACTUALLY NEED, AND ASK THEM FIRST. One ask_user round, up to four questions, BEFORE you plan — never a fixed checklist. Work out what you genuinely cannot infer from the brief, the references and the notes, and ask THAT. Budget and story direction are usually two of them; the other two should change from film to film. Good candidates when the brief does not settle them: WHOSE STORY it is when several characters are attached, what the ending should be, whether an original character needs describing, whether a location is meant to be somewhere specific, and how far the film may stray from the references. ONE OF THE FOUR IS ALWAYS THE TITLE: ask what to call it, and make "name it after I have seen it" one of the options — if they choose that, say nothing more about it and propose a title once the cut exists. Do not ask anything the UI has already settled (runtime, resolution, aspect, soundtrack), anything in the notes, or anything you can decide yourself and state in a line. And do not shoot around a gap you could have closed with a question: a blind guess about who the film is about costs a whole shot list.',
+    'SOUND IS THREE LAYERS, NOT ONE TRACK. A single music bed running from the first frame to the last is the sound of a slideshow and it is the default failure. The shots\' OWN native audio is your dialogue, footsteps and impacts \u2014 turn it ON for anything with a sound event in frame. MUSIC is a LIST of cues with startSec and endSec, so score in pieces with silence between them: under the opening, out before dialogue, back on the turn, a final cue that lands on the last shot. EFFECTS go in sfx with atSec set to the exact second the thing happens \u2014 you know every shot\'s offset in the cut, so there is no excuse for a door that slams late. Say your cue sheet in the plan in one line.',
+    'SILENCE MUST BE A DECISION, AND A CUE MUST BE AS LONG AS IT CLAIMS. Two failures sound identical to a viewer and both read as a broken export: a music bed that stops halfway and leaves NOTHING behind it, and a lone sound effect in a film that is otherwise quiet. Cover the runtime: if a cue ends, something takes over \u2014 the next cue, the shots\' own native audio, or an ambience bed running underneath. And REQUEST THE LENGTH YOU NEED: music models return whatever length they return, so ask create_audio for a duration that covers the cue (elevenlabs-music takes an exact length; lyria-2 does not), and if the file comes back short either generate more or shorten the cue to match. assemble_film reports how many seconds of the film actually ended up with music under them \u2014 read that number, and fix it before you deliver.',
+    'THE BEST TRANSITION IS A SHOT, NOT AN EFFECT. Kling 3.0, SeeDance 1.5 and Flux 3 accept a START frame AND an END frame: hand them the last frame of one scene and the first frame of the next (extract_frames gives you both) and the model invents the move between \u2014 a character walking out of one location into another, a match cut on a turning head, a push through a doorway. Budget one shot for a bridge like this on any film with a real scene change; it is the single most film-like thing available here. Everything else you get by WRITING the shots: cut on action, end one shot and start the next on the same motion or shape, match a camera move across the join, or pass something through the foreground at both ends. Hard cuts remain the default \u2014 the point is that you chose one.',
+    'OPEN EVERY PLAN WITH THE STORY, NOT THE SHOT LIST. Four lines before anything else, because a shot list written without them is a slideshow with continuity: the LOGLINE (one sentence, characters by ROLE and never by name \u2014 \'a family is forced to live in silence while hiding from monsters with ultra-sensitive hearing\'); the THEME (what the film is about underneath the events); the SETTING (where and when); and a short TREATMENT of three to six sentences that grows the logline into the key plot points and ends on the moment the film builds to. Every shot you then list must be traceable to a line in that treatment \u2014 if it is not, it is decoration and it is the first thing to cut when the budget is tight. Names stay OUT of the logline and treatment (industry standard: characters change, the plot and theme are the guide) and go back IN the moment you write a prompt, where a recognisable name is what carries the likeness.',
+    'GIVE EVERY CHARACTER A WANT BEFORE YOU SHOOT THEM. Goal (what they want), motivation (why) and stakes (what they gain or lose) \u2014 one line per named character, in the plan and then in the film notes. Plot is made of DISCOVERIES AND DECISIONS, so a character who never decides anything is set dressing, and in a film this short that has to be a deliberate choice rather than something you noticed afterwards. This is also what makes the shots castable: what someone wants tells you their posture, their eyeline and what their hands are doing, and that is the difference between a person in a frame and a photograph of a person.',
+    'YOU ARE THE ENTIRE CREW, AND THE FAILURES THAT SHIP ARE THE ROLES NOBODY ASKED. Director, producer, scriptwriter, casting, costume, hair and makeup, production designer, DP, camera operator, gaffer, grip, sound mixer, sound designer, VFX, editor \u2014 all of them are you, on every film. Before you call a cut finished, ask it as them: would the DP accept this framing, the gaffer this light against the shot before it, the costume designer this wardrobe for this period, the editor this pacing, the sound designer a music bed with nothing else in it, the producer this cost for this result? Load the movie-production playbook for what each role owns here and which tool does it.',
+    'THE PIPELINE NOW HAS A BOARD IN IT, AND IT IS NOT OPTIONAL. After the plan is approved: render the PLATES first, then call present_storyboard with one frame per shot \u2014 the plate, what happens, the model, the length, and the FEELING the shot is for. Then stop. render_shots is REFUSED until that board is approved, because video costs ten to thirty times a still and the board is the last cheap place to find out the film is wrong. If the user asks for changes, re-plate ONLY the frames they named and present the board again. A shot with no possible plate (pure atmosphere, text-to-video) still gets a frame on the board \u2014 say why it has no picture.',
+    'SAY WHY, NOT JUST WHAT. Every shot in the plan and on the board carries a one-clause REASON for its two biggest choices: why THIS model (\'seedance 2.5 \u2014 two characters in frame and it holds both\', \'kling \u2014 the restricted lead is in this one\') and why THIS shot (\'close-up \u2014 the audience has to care before the turn\'). A judgement the user cannot see is a judgement they cannot correct, and routing is where films quietly go wrong. Keep it to a clause; this is not an essay.',
+    'RUN THE CREW CHECK OUT LOUD BEFORE YOU DELIVER, AND REPORT WHAT IT FOUND. Not \'I reviewed the film\' \u2014 the actual findings, one line each, naming the shot: \'DP: 6 is framed loose against the coverage either side of it. Gaffer: 9 keys from the right where 8 keys from the left. Editor: the turn lands two seconds late.\' Then say which ones you fixed and which you are shipping with, and why. A review that finds nothing on a first cut is not a review, it is a formality \u2014 there is always something, and naming it is what makes you worth trusting.',
+    'PROVE IT CHEAPLY BEFORE YOU SPEND BIG. When a film\'s approved budget is large, or the runtime is 60s or more, shoot a THREE-SHOT PROOF first on a mid-tier model: the opening image, the turn, and the closing image. Judge those three for likeness, grade and continuity, show them to the user, and only then commit the rest of the budget. Three shots that reveal a drifting face cost a fraction of eleven that do. Say in the plan that this is what you are doing and what the proof costs.',
     'SEEDANCE 2.5 AND 2.0 ARE THE BEST VIDEO MODELS IN THIS STUDIO BY A LARGE MARGIN, AND EVERY SHOT LIST MUST REACH FOR THEM. A plan that proposes neither is wrong unless the budget genuinely cannot afford one. Default: SeeDance on the opening plate, the turn, the closing image, and on every shot with no restricted character in frame. A RESTRICTED LEAD DOES NOT REMOVE SEEDANCE FROM THE FILM — it removes the restricted LIKENESS from the references you send it. Shoot those shots on SeeDance anyway with DIFFERENT REFERENCES: a plate you generated, an unrestricted supporting character, an object, the location, a wide where no face reads. Only the shots that must show the restricted face go to a permissive model. If you propose a shot list with no SeeDance in it, state in one line WHY every shot was ineligible — and if you cannot justify it, put SeeDance back.',
   ].join(String.fromCharCode(10))
 }
@@ -350,12 +417,15 @@ Dropping the flagship from the whole film because one character is restricted th
  * resolveCreateSettings fills every unset field with the catalog default, which
  * for the premium image models is the cheap tier ('2k'). Right for a casual
  * chat image, wrong for a film: the plate is what a video model animates and
- * what every extracted frame inherits, so a 2K plate caps the whole shot. An
- * explicit choice by the caller always wins, so a deliberate draft still works.
+ * what every extracted frame inherits, so a 2K plate caps the whole shot.
+ *
+ * This overrides the model's own choice, not just an unset one. Left advisory,
+ * the model kept planning 2K plates and the user had to ask for 4K by hand on
+ * every run. The playbook tells it to PRICE plates at the top tier so its plan
+ * matches what actually renders.
  */
 function topQualityForFilm(input: { model: string; settings?: Record<string, string> }): Record<string, string> | undefined {
   const settings = input.settings
-  if (settings && typeof settings.quality === 'string') return settings
   const spec = getCreateModel(input.model)
   if (!spec || spec.kind !== 'image') return settings
   const field = (spec.fields ?? []).find(f => f.key === 'quality')
@@ -803,6 +873,26 @@ export async function executeCreateMedia(
   const refs = spec.maxRefs > 0 ? baseRefs.slice(0, spec.maxRefs) : []
   if (spec.needsRef && refs.length === 0) {
     return { error: `${spec.label} needs a reference image (image-to-${spec.kind} model) — attach one or pass reference_image_urls with an image from this conversation` }
+  }
+
+  // A prompt that addresses @Image6 while four urls were passed asks the model
+  // for something it cannot see, and the ticket is spent proving it. Caught
+  // here rather than in the render.
+  const refTags = [
+    ...String(input.prompt ?? '').matchAll(/@Image\s*(\d+)/gi),
+  ].map(m => Number(m[1])).filter(n => Number.isFinite(n))
+  const zeroTags = [
+    ...String(input.prompt ?? '').matchAll(/<IMAGE_REF_(\d+)>/gi),
+  ].map(m => Number(m[1])).filter(n => Number.isFinite(n))
+  const highest = Math.max(0, ...refTags, ...zeroTags.map(n => n + 1))
+  if (highest > refs.length) {
+    return {
+      error:
+        `The prompt refers to @Image${highest} but only ${refs.length} reference image(s) were passed to this call, so that tag points at nothing. `
+        + `@ImageN counts positions in reference_image_urls FOR THIS CALL: @Image1 is the first url, @Image2 the second. `
+        + `The model cannot see the conversation or the user's attachment strip — only what you pass here. `
+        + `Either pass the missing image in reference_image_urls (up to ${spec.maxRefs}) or renumber the prompt to 1-${refs.length}, then call again. Nothing was charged.`,
+    }
   }
 
   // Both kinds now submit through the site's own generation routes, which own
@@ -2551,6 +2641,10 @@ export function makeAgentTools(ctx: {
   allowedImages: Set<string>
   /** Runtime the user picked in the format dropdown, in seconds (0 = unset). */
   targetSeconds?: number
+  /** Hard ticket ceiling for this film, from the studio settings. 0 = none. */
+  budgetCap?: number
+  /** Scopes the film tools' duplicate-submit guard to this conversation. */
+  chatId?: number
   projectId: number | null
   // Approved plan budget (propose_plan): while set, in-plan work executes
   // inline without pausing; the object is shared with the route for persistence
@@ -2645,8 +2739,15 @@ export function makeAgentTools(ctx: {
         : 'Pauses for the user\'s approval — a plan approved via propose_plan replaces per-call approvals.') +
     ' ' +
     (ctx.attachedImageUrls.length
-      ? 'The user\'s attached reference images are automatically passed to models that accept them.'
-      : '')
+      ? 'The user\'s attached reference images are automatically passed to models that accept them. '
+      : '') +
+    // The model wrote "@Image6" while passing four references — something the
+    // image model has no way to resolve, since it only sees this call's list.
+    'REFERENCE NUMBERING: @Image1, @Image2 (and <IMAGE_REF_0>, <IMAGE_REF_1> on the Gemini video models) count '
+    + 'positions in reference_image_urls FOR THIS CALL ONLY — @Image1 is the first url you pass, @Image2 the second. '
+    + 'The generation model cannot see the conversation, the attachment strip, the reference library, or anything you '
+    + 'did not include in this call. If you pass four urls, @Image5 and @Image6 DO NOT EXIST and the prompt is asking '
+    + 'for something the model cannot satisfy. Count the urls you are passing, then number against that count.'
 
   // Without an approved plan budget, create_media only gets execute in AUTO
   // mode (full autonomy) — in Ask/Plan the pause IS the approval. With a
@@ -2790,6 +2891,40 @@ export function makeAgentTools(ctx: {
       return { type: 'json' as const, value: output }
     }
   }
+  const renderPlatesTool = tool({
+    description:
+      'Submit SEVERAL STILLS at once — character plates, location plates, end frames, title backgrounds. '
+      + 'create_media waits for its image so you can judge it, which is right for ONE plate and wrong for a set: '
+      + 'six of them cost the sum of six waits. This submits them in parallel and returns immediately; they finish '
+      + 'on the server and appear in the feed. Use it whenever you need more than one still, and use create_media '
+      + 'when you need to LOOK at the result before deciding what comes next.',
+    inputSchema: jsonSchema<{ plates: { n: number; model: string; prompt: string; settings?: Record<string, string>; reference_image_urls?: string[] }[]; aspect?: string }>({
+      type: 'object',
+      properties: {
+        plates: {
+          type: 'array',
+          description: 'The stills to render together, max 8',
+          items: {
+            type: 'object',
+            properties: {
+              n: { type: 'number', description: 'Plate number, for your own reference' },
+              model: { type: 'string', description: 'Image model id for THIS plate' },
+              prompt: { type: 'string', description: 'Full prompt, carrying the canon descriptors verbatim' },
+              settings: { type: 'object', description: 'Per-plate settings (aspect, quality)', additionalProperties: { type: 'string' } },
+              reference_image_urls: { type: 'array', items: { type: 'string' }, description: 'References from this conversation' },
+            },
+            required: ['n', 'model', 'prompt'],
+            additionalProperties: false,
+          },
+        },
+        aspect: { type: 'string', description: 'Aspect ratio applied to every plate unless one overrides it' },
+      },
+      required: ['plates'],
+      additionalProperties: false,
+    }),
+    execute: (input) => executeRenderPlates(input as any, ctx as any),
+  })
+
   const renderShotsTool = tool({
     description:
       'Submit an ENTIRE shot list for rendering in ONE call. Each shot names its own model, prompt, settings and reference images, so different shots use different models — that is the point. Returns queue ids immediately; the renders outlive this reply and come back on their own. Never loop create_media to render a sequence.',
@@ -2823,7 +2958,7 @@ export function makeAgentTools(ctx: {
 
   const checkShotsTool = tool({
     description:
-      'Status of submitted shots, with the MID and LAST frame of every finished one. You cannot watch video — these frames are how you judge a shot, and a LAST frame is the start image for a chained next shot.',
+      'Status of submitted shots, with the MID and LAST frame of every finished one. You cannot watch video — these frames are how you judge a shot, and a LAST frame is the start image for a chained next shot. CALL IT ONCE. If any shot is still rendering, END THE TURN: renders take minutes on the server and CANNOT finish while you keep polling. You are continued automatically when they land, and calling this again with nothing settled is refused as an error.',
     inputSchema: jsonSchema<{ queue_ids: number[] }>({
       type: 'object',
       properties: { queue_ids: { type: 'array', items: { type: 'number' }, description: 'Queue ids returned by render_shots' } },
@@ -2835,8 +2970,8 @@ export function makeAgentTools(ctx: {
 
   const assembleFilmTool = tool({
     description:
-      'Cut the approved shots into ONE film, and/or mix music and voiceover over an existing cut. Pass clips (shot URLs in cut order) to stitch; pass video_url plus music/voice to score a cut you already made. Costs no tickets — it is ffmpeg, not a model.',
-    inputSchema: jsonSchema<{ clips?: { url: string; trimStart?: number; trimEnd?: number }[]; video_url?: string; aspect?: string; fps?: number; music?: { url: string; gainDb?: number; fadeOutSec?: number }; voice?: { url: string; atSec?: number; gainDb?: number }[] }>({
+      'Cut the approved shots into ONE film, and/or mix music and voiceover over an existing cut. Pass clips (shot URLs in cut order) to stitch; pass video_url plus music/voice to score a cut you already made. Costs no tickets — it is ffmpeg, not a model. EVERY shot that landed goes in the cut unless you list it in `omitted` with a reason: footage the user paid for must not be silently dropped.',
+    inputSchema: jsonSchema<{ clips?: { url: string; trimStart?: number; trimEnd?: number; transition?: { type?: string; durationSec?: number } }[]; transition?: { type?: string; durationSec?: number }; video_url?: string; aspect?: string; fps?: number; omitted?: { queueId: number; reason: string }[]; short_ok?: { reason: string }; music?: { url: string; startSec?: number; endSec?: number; gainDb?: number; fadeInSec?: number; fadeOutSec?: number }[]; sfx?: { url: string; atSec: number; gainDb?: number }[]; voice?: { url: string; atSec?: number; gainDb?: number }[] }>({
       type: 'object',
       properties: {
         clips: {
@@ -2848,24 +2983,106 @@ export function makeAgentTools(ctx: {
               url: { type: 'string' },
               trimStart: { type: 'number', description: 'Seconds to trim off the head' },
               trimEnd: { type: 'number', description: 'Cut point in seconds from the clip start' },
+              transition: {
+                type: 'object',
+                description:
+                  'How this clip is joined to the one BEFORE it. Omit for a hard cut, which is right most of the time.',
+                properties: {
+                  type: {
+                    type: 'string',
+                    enum: [
+                      'fade', 'fadeblack', 'fadewhite', 'dissolve', 'radial', 'pixelize',
+                      'wipeleft', 'wiperight', 'wipeup', 'wipedown',
+                      'slideleft', 'slideright', 'slideup', 'slidedown',
+                      'smoothleft', 'smoothright', 'smoothup', 'smoothdown',
+                      'circleopen', 'circleclose', 'zoomin',
+                    ],
+                  },
+                  durationSec: { type: 'number', description: 'Default 0.5. Clamped to half the shorter neighbour.' },
+                },
+                additionalProperties: false,
+              },
             },
             required: ['url'],
             additionalProperties: false,
           },
         },
+        transition: {
+          type: 'object',
+          description:
+            'A default join for EVERY cut in the film. Use sparingly \u2014 a dissolve on every join is the mark of an '
+            + 'amateur edit. Per-clip transitions override it.',
+          properties: {
+            type: { type: 'string' },
+            durationSec: { type: 'number' },
+          },
+          additionalProperties: false,
+        },
         video_url: { type: 'string', description: 'An existing cut to score instead of stitching' },
+        short_ok: {
+          type: 'object',
+          description:
+            'ONLY when the user has explicitly asked for a film shorter than their runtime setting. Without this a '
+            + 'cut under 85% of the target is refused, because a half-length film is an unfinished one rather than a '
+            + 'short one.',
+          properties: { reason: { type: 'string', description: 'What the user asked for, in their words' } },
+          required: ['reason'],
+          additionalProperties: false,
+        },
+        omitted: {
+          type: 'array',
+          description:
+            'Shots that landed but are deliberately NOT in the cut, each with the reason. Leaving footage out is allowed, '
+            + 'but it has to be a decision you state, not an oversight: the cut is refused if landed shots are missing and '
+            + 'are not listed here.',
+          items: {
+            type: 'object',
+            properties: {
+              queueId: { type: 'number' },
+              reason: { type: 'string', description: 'Why this shot is not in the film' },
+            },
+            required: ['queueId', 'reason'],
+            additionalProperties: false,
+          },
+        },
         aspect: { type: 'string', description: 'e.g. 16:9 — every shot is padded to this' },
         fps: { type: 'number' },
         music: {
-          type: 'object',
-          description: 'Music bed from create_audio',
-          properties: {
-            url: { type: 'string' },
-            gainDb: { type: 'number', description: 'Default -14: under the shot audio, not over it' },
-            fadeOutSec: { type: 'number' },
+          type: 'array',
+          description:
+            'Music CUES from create_audio, each with where it starts and stops. A film is scored in pieces — '
+            + 'something under the opening, nothing under the dialogue, something else under the last beat. '
+            + 'One cue with no times is the old wall-to-wall bed, which is almost always the wrong answer.',
+          items: {
+            type: 'object',
+            properties: {
+              url: { type: 'string' },
+              startSec: { type: 'number', description: 'Where this cue enters. Default 0.' },
+              endSec: { type: 'number', description: 'Where it leaves. Default: the end of the film.' },
+              gainDb: { type: 'number', description: 'Default -14: under the shot audio, not over it' },
+              fadeInSec: { type: 'number', description: 'Default 0.5' },
+              fadeOutSec: { type: 'number', description: 'Default 2' },
+            },
+            required: ['url'],
+            additionalProperties: false,
           },
-          required: ['url'],
-          additionalProperties: false,
+        },
+        sfx: {
+          type: 'array',
+          description:
+            'Sound effects from create_audio, each dropped AT a moment in the cut: a door, a gunshot, a body hitting '
+            + 'gravel, a distant siren. This is what makes a film sound built rather than scored-over. Place each one '
+            + 'on the frame the action happens, not near it.',
+          items: {
+            type: 'object',
+            properties: {
+              url: { type: 'string' },
+              atSec: { type: 'number', description: 'Seconds into the FINISHED CUT where this effect lands' },
+              gainDb: { type: 'number', description: 'Default 0 — effects sit at the picture, not under it' },
+            },
+            required: ['url', 'atSec'],
+            additionalProperties: false,
+          },
         },
         captions: {
           type: 'array',
@@ -2900,17 +3117,23 @@ export function makeAgentTools(ctx: {
 
   const createAudioTool = tool({
     description:
-      `Generate a music bed, a voiceover line, or sound scored to a clip. Models: ${AUDIO_MODELS.map(m => `${m.id} (${m.kind})`).join(', ')}. Write voiceover to picture AFTER the cut exists — you cannot time narration to shots you have not seen.`,
+      `Generate music, a voiceover line, or a sound effect. Models: ${AUDIO_MODELS.map(m => `${m.id} (${m.kind})`).join(', ')}. `
+      + `TWO KINDS OF EFFECT, and picking the wrong one wastes the call: elevenlabs-sfx writes a STANDALONE sound from `
+      + `a description ("heavy wooden gate slamming") which you then place on the cut at an exact second via `
+      + `assemble_film's sfx array — use it for a hit that must land on a frame. mmaudio-v2 scores a WHOLE CLIP: pass `
+      + `that shot's video_url and it syncs itself because it watches the picture — use it for a shot that rendered `
+      + `silent. Write voiceover to picture AFTER the cut exists — you cannot time narration to shots you have not seen.`,
     inputSchema: jsonSchema<{ kind: string; model?: string; prompt?: string; text?: string; duration_sec?: number; voice?: string; video_url?: string }>({
       type: 'object',
       properties: {
         kind: { type: 'string', enum: ['music', 'voice', 'sfx'], description: 'music bed | spoken line | sound scored to a clip' },
         model: { type: 'string', description: 'Specific audio model id (optional — one is chosen per kind)' },
         prompt: { type: 'string', description: 'music/sfx: what it should sound like' },
+
         text: { type: 'string', description: 'voice: the line to speak' },
-        duration_sec: { type: 'number', description: 'Target length — match the cut' },
+        duration_sec: { type: 'number', description: 'Target length. Music: match the cue. Standalone sfx: 0.5-22s, and short is usually right.' },
         voice: { type: 'string', description: 'voice: named voice' },
-        video_url: { type: 'string', description: 'sfx: the clip to score' },
+        video_url: { type: 'string', description: 'sfx with mmaudio-v2 only: the clip to score. Leave it out for a standalone effect.' },
       },
       required: ['kind'],
       additionalProperties: false,
@@ -3090,11 +3313,197 @@ export function makeAgentTools(ctx: {
 
   // ask_user NEVER gets execute — it renders a quiz in the approval bar and
   // resumes with the user's answers via the approve route
+  const filmNotesTool = tool({
+    description:
+      'Rewrite this film\'s PRODUCTION BIBLE \u2014 the notes that survive every run: the cast, the world, the look, '
+      + 'the decisions the user has already made, and what the current cut establishes. It is already in your context '
+      + 'at the top of this conversation, so read it there; this tool REPLACES it wholesale. '
+      + 'Free, instant, no approval. Call it whenever something durable is settled: a character is named or described, '
+      + 'the user makes a call you must not re-ask, a shot establishes continuity. '
+      + `Hard cap ${BIBLE_MAX} characters, which is the point \u2014 rewriting forces you to decide what still matters. `
+      + 'KEEP: character names with one canon description line each and their reference urls, provider restrictions, '
+      + 'the user\'s standing decisions, the look rules, one continuity line per shot in the cut. '
+      + 'DROP: narration of what you did, step-by-step reasoning, anything already visible in the shot list, '
+      + 'pleasantries, and any line that would not change a future shot.',
+    inputSchema: jsonSchema<{ notes: string }>({
+      type: 'object',
+      properties: {
+        notes: {
+          type: 'string',
+          description: `The complete replacement text. Structure it as:\n${BIBLE_TEMPLATE}`,
+        },
+      },
+      required: ['notes'],
+      additionalProperties: false,
+    }),
+    execute: async (input) => {
+      if (!ctx.chatId) return { error: 'No film is open, so there is nothing to take notes on' }
+      return writeFilmNotes(ctx.chatId, ctx.user.id, String(input.notes ?? ''))
+    },
+  })
+
+  const relightTool = tool({
+    description:
+      'Relight a STILL with IC-Light, a model built for exactly this. Use it when a plate\'s light does not match the '
+      + 'scene it has to cut into \u2014 a reference shot at noon going into a dusk sequence, two characters carrying two '
+      + 'different suns, a face lit from the wrong side. It keeps the subject and replaces the light, so the likeness '
+      + 'survives in a way that re-generating the image does not. '
+      + 'DO IT BEFORE the plate becomes a start frame: there is no video relighting model, so once a shot is rendered '
+      + 'its light is fixed and a mismatch costs a reshoot. Spends tickets like an image generation.',
+    inputSchema: jsonSchema<{ image_url: string; prompt: string; direction?: string; negative_prompt?: string }>({
+      type: 'object',
+      properties: {
+        image_url: { type: 'string', description: 'A still from this conversation' },
+        prompt: {
+          type: 'string',
+          description:
+            'The NEW light, dictated: direction, quality, colour temperature and where the shadows fall. '
+            + 'e.g. "low warm sun from frame left, long shadows to the right, cool ambient fill, dusk"',
+        },
+        direction: {
+          type: 'string',
+          enum: ['None', 'Left', 'Right', 'Top', 'Bottom'],
+          description: 'Where the key light comes from. Sets the lighting condition the model starts from.',
+        },
+        negative_prompt: { type: 'string' },
+      },
+      required: ['image_url', 'prompt'],
+      additionalProperties: false,
+    }),
+    execute: (input) => executeRelight(input as any, ctx as any),
+  })
+
+  const relightVideoTool = tool({
+    description:
+      'Relight a FINISHED CLIP with Light-X. Until now the light in a rendered shot was permanent and a mismatch cost '
+      + 'a reshoot \u2014 this fixes it in place. Use it when a shot cuts badly against its neighbours: wrong time of day, '
+      + 'a sun on the wrong side, a grade that jumps. PRICED PER SECOND OF OUTPUT, and not cheaply: relight the shot '
+      + 'that is wrong, never the whole film. Relighting the STILL before you shoot is still the cheaper fix, so '
+      + 'prefer relight when the plate has not become a shot yet.',
+    inputSchema: jsonSchema<{ video_url: string; prompt?: string; direction?: string; reference_image_url?: string; mode?: string }>({
+      type: 'object',
+      properties: {
+        video_url: { type: 'string', description: 'A clip from this conversation' },
+        prompt: { type: 'string', description: 'The new light: time of day, direction, quality, colour temperature' },
+        direction: { type: 'string', enum: ['Left', 'Right', 'Top', 'Bottom'], description: 'Where the key light comes from' },
+        mode: {
+          type: 'string',
+          enum: ['ic', 'ref', 'hdr', 'bg'],
+          description:
+            "'ic' (default) relights from your description alone. 'ref' matches a reference image's light, 'hdr' uses "
+            + "an HDR map, 'bg' composites onto a background \u2014 all three need reference_image_url.",
+        },
+        reference_image_url: { type: 'string', description: "Required for 'ref', 'hdr' and 'bg'" },
+      },
+      required: ['video_url'],
+      additionalProperties: false,
+    }),
+    execute: (input) => executeRelightVideo(input as any, ctx as any),
+  })
+
+  const recameraTool = tool({
+    description:
+      'Re-shoot an existing clip on a NEW CAMERA MOVE with Light-X ReCamera. The move a video model gave you used to '
+      + 'be the move you got; this re-renders the same footage along a different path. Good for turning a static take '
+      + 'into a push, or getting a second angle on a shot whose likeness you cannot risk re-rendering. Priced per '
+      + 'second of output, so it is a deliberate choice, not a default.',
+    inputSchema: jsonSchema<{ video_url: string; mode?: string; prompt?: string }>({
+      type: 'object',
+      properties: {
+        video_url: { type: 'string', description: 'A clip from this conversation' },
+        mode: {
+          type: 'string',
+          enum: ['gradual', 'bullet', 'direct', 'dolly-zoom'],
+          description: "'gradual' is a normal move; 'bullet' is a frozen orbit; 'dolly-zoom' is the vertigo effect",
+        },
+        prompt: { type: 'string', description: 'Optional description of the move' },
+      },
+      required: ['video_url'],
+      additionalProperties: false,
+    }),
+    execute: (input) => executeRecamera(input as any, ctx as any),
+  })
+
+  const presentStoryboardTool = tool({
+    description:
+      'Show the user the film as a BOARD OF STILLS and wait for sign-off, BEFORE any video is rendered. This is the '
+      + 'gate: render_shots is refused until a board has been approved. Call it after the plates land, with one frame '
+      + 'per planned shot in cut order, each carrying the plate_queue_id render_plates gave you. Free \u2014 no model '
+      + 'runs. You do NOT have to wait for the plates to finish: the board resolves ids to pictures as they land, so '
+      + 'present it as soon as the plates are submitted. Getting a no here costs a still; getting a no after '
+      + 'the shoot costs the film. Include EVERY shot, in order, and be honest in the descriptions: the board is what '
+      + 'the user is agreeing to spend on.',
+    inputSchema: jsonSchema<{
+      frames: { n: number; plate_url?: string; plate_queue_id?: number; description: string; model?: string; seconds?: number; feeling?: string }[]
+      note?: string
+    }>({
+      type: 'object',
+      properties: {
+        frames: {
+          type: 'array',
+          description: 'One per shot, in CUT ORDER',
+          items: {
+            type: 'object',
+            properties: {
+              n: { type: 'number', description: 'Shot number' },
+              plate_url: { type: 'string', description: 'The still for this shot, if you have its URL.' },
+              plate_queue_id: {
+                type: 'number',
+                description:
+                  'The queue id render_plates returned for this shot\'s plate. USE THIS \u2014 render_plates hands back '
+                  + 'ids, not urls, because the images are still rendering when it returns. The board resolves the '
+                  + 'id to the finished picture itself. Only omit both when the shot genuinely has no plate.',
+              },
+              description: { type: 'string', description: 'What happens in this shot, in one line' },
+              model: { type: 'string', description: 'Which video model will shoot it' },
+              seconds: { type: 'number', description: 'How long it runs' },
+              feeling: { type: 'string', description: 'What the audience should FEEL here \u2014 the reason this shot exists' },
+            },
+            required: ['n', 'description'],
+            additionalProperties: false,
+          },
+        },
+        note: { type: 'string', description: 'One line: what the board adds up to, and the total ticket cost to shoot it' },
+      },
+      required: ['frames'],
+      additionalProperties: false,
+    }),
+    execute: async (input) => ({
+      presented: Array.isArray(input.frames) ? input.frames.length : 0,
+      note:
+        'The board is with the user. Do NOT render any video until they approve it. If they ask for changes, '
+        + 're-plate only the frames they named and present the board again.',
+    }),
+  })
+
+  const characterNotesTool = tool({
+    description:
+      'Rewrite THIS CHARACTER\'s notes \u2014 the canon descriptor, the profile, what they want, their wardrobe and any '
+      + 'provider restrictions. Free, instant, no approval. These notes are not a private memo: the Movie Studio '
+      + 'reads them to CAST this character into films, so the descriptor you write here is the text that will be '
+      + 'pasted verbatim into shot prompts months from now. Write it once the design is locked, and rewrite it '
+      + 'whenever the design changes. A board with no notes cannot be cast from.',
+    inputSchema: jsonSchema<{ notes: string }>({
+      type: 'object',
+      properties: {
+        notes: { type: 'string', description: `The complete replacement text. Structure it as:\n${CHARACTER_TEMPLATE}` },
+      },
+      required: ['notes'],
+      additionalProperties: false,
+    }),
+    execute: async (input) => {
+      if (!ctx.chatId) return { error: 'No character is open, so there is nothing to take notes on' }
+      return writeFilmNotes(ctx.chatId, ctx.user.id, String(input.notes ?? ''))
+    },
+  })
+
   const askUserTool = tool({
     description:
-      'Ask the user a short multiple-choice quiz (1-4 questions, 2-6 short options each) to pin down ' +
+      'Ask the user a short quiz (1-4 questions, 2-6 short options each) to pin down ' +
       'requirements when the request is ambiguous and the answers materially change the output. ' +
-      'Execution pauses until they answer. Use sparingly — never ask what you can infer.',
+      'Execution pauses until they answer. Use sparingly — never ask what you can infer. ' +
+      'The user can also TYPE an answer instead of picking one of your options, so write options that cover the ' +
+      'obvious directions and treat anything they write as the decision, in their own words.',
     inputSchema: jsonSchema<{ questions: { question: string; options: string[]; allow_multiple?: boolean }[] }>({
       type: 'object',
       properties: {
@@ -3300,8 +3709,15 @@ export function makeAgentTools(ctx: {
     record_evaluation: recordEvaluationTool, write_summary: writeSummaryTool,
     ...(loadableSkills.length ? { load_skill: loadSkillTool } : {}),
     ...(skillOn(skills, 'reference-library') ? { search_refs: searchRefsTool } : {}),
+    ...(skillOn(skills, 'character-design') ? { character_notes: characterNotesTool } : {}),
     ...(skillOn(skills, 'movie-production') ? {
       render_shots: renderShotsTool,
+      render_plates: renderPlatesTool,
+      film_notes: filmNotesTool,
+      present_storyboard: presentStoryboardTool,
+      relight: relightTool,
+      relight_video: relightVideoTool,
+      recamera: recameraTool,
       check_shots: checkShotsTool,
       assemble_film: assembleFilmTool,
       create_audio: createAudioTool,
@@ -3653,6 +4069,19 @@ export function agentStreamResponse(opts: {
                   s.status = 'running'
                   ;(s as AgentStep & { queueIds?: number[] }).queueIds =
                     (out.queueIds as unknown[]).filter((n): n is number => typeof n === 'number')
+                  // Which engine shot which id — a batch mixes models by design,
+                  // so the step's single `model` field cannot answer it.
+                  if (Array.isArray(out.submitted)) {
+                    const map: Record<string, string> = {}
+                    for (const sub of out.submitted as any[]) {
+                      if (sub && typeof sub.queueId === 'number' && typeof sub.model === 'string') {
+                        map[String(sub.queueId)] = sub.model
+                      }
+                    }
+                    if (Object.keys(map).length) {
+                      ;(s as AgentStep & { shotModels?: Record<string, string> }).shotModels = map
+                    }
+                  }
                   s.resultPreview = String(out.note ?? '').slice(0, 4000) || undefined
                 } else if (out.pending === true && typeof out.queueId === 'number') {
                   // A video that was SUBMITTED, not rendered. It stays running

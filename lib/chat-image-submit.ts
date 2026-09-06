@@ -53,6 +53,7 @@ export async function submitChatImage(
   refs: string[],
   settings: ChatCreateSettings,
   userId: number,
+  opts?: { noWait?: boolean },
 ): Promise<ChatImageResult> {
   let queueId: number | null = null
   let ticketCost = 0
@@ -83,6 +84,10 @@ export async function submitChatImage(
   } catch (err: any) {
     return { ok: false, error: String(err?.message || err).slice(0, 300) }
   }
+
+  // A BATCH of plates is submitted and settled later: waiting here would make
+  // six parallel submissions finish one after another.
+  if (opts?.noWait) return { ok: true, pending: true, queueId, ticketCost }
 
   // ── wait for it, so the agent can still see and judge its own image ──
   const deadline = Date.now() + WAIT_MS

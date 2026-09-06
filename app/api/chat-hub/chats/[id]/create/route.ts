@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { fal } from '@fal-ai/client'
+import { fal } from '@/lib/fal-client'
 import prisma from '@/lib/prisma'
 import { requireChatHubAdmin } from '@/lib/chat-hub-auth'
 import {

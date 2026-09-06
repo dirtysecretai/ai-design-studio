@@ -2,7 +2,7 @@
 // IMAGE generation endpoint with database saving
 
 import { NextRequest, NextResponse } from 'next/server';
-import { fal } from "@fal-ai/client";
+import { fal } from "@/lib/fal-client";
 import prisma from '@/lib/prisma';
 import { uploadToR2 } from '@/lib/r2';
 import { GoogleGenerativeAI } from '@google/generative-ai';

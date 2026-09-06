@@ -61,6 +61,32 @@ export const AUDIO_MODELS: AudioModelSpec[] = [
     notes: 'Alternative TTS voice set.',
   },
   {
+    id: 'sonilo-sfx',
+    label: 'Sonilo Sound Effects',
+    kind: 'sfx',
+    endpoint: 'sonilo/v1.1/text-to-sound-effects',
+    ticketCost: 1, // PLACEHOLDER — fal publishes $0.0018 per second of output
+    // Verified on fal 2026-09-02: required ['prompt']; duration (int seconds),
+    // audio_format enum. Returns { audio, audios }.
+    notes:
+      'Text to sound effect, and the cheapest way to make one: fal prices it per second of output, an order of '
+      + 'magnitude under the alternatives. Standalone audio, placed on the cut by timestamp. Default choice for a '
+      + 'one-off hit.',
+  },
+  {
+    id: 'elevenlabs-sfx',
+    label: 'ElevenLabs Sound Effects',
+    kind: 'sfx',
+    endpoint: 'fal-ai/elevenlabs/sound-effects',
+    ticketCost: 2, // PLACEHOLDER
+    // Verified on fal 2026-09-02: required ['text']; duration_seconds (0.5-22),
+    // prompt_influence, output_format. Returns { audio }.
+    notes:
+      'Text to sound effect: "heavy wooden gate slamming", "single gunshot, close, tail in a valley". Returns a '
+      + 'STANDALONE audio file, so it is placed on the cut by timestamp with assemble_film\'s sfx array. The right '
+      + 'tool for a stinger you need on an exact frame.',
+  },
+  {
     id: 'mmaudio-v2',
     label: 'MMAudio v2',
     kind: 'sfx',
@@ -106,11 +132,42 @@ export function buildAudioCall(
     }
   }
 
-  // sfx: scored to a clip, so it needs the clip
-  const videoUrl = (input.video_url ?? '').trim()
-  const prompt = (input.prompt ?? '').trim()
-  if (!videoUrl) return { error: `${spec.label} scores an existing clip — pass video_url.` }
+  // Two kinds of sound effect, and they are not interchangeable.
+  const prompt = (input.prompt ?? input.text ?? '').trim()
   if (!prompt) return { error: `${spec.label} needs a prompt describing the sound.` }
+
+  if (spec.id === 'sonilo-sfx') {
+    // duration is a whole number of seconds here, not a float.
+    const secs = input.duration_sec
+    return {
+      endpoint: spec.endpoint,
+      input: {
+        prompt,
+        ...(secs ? { duration: Math.max(1, Math.min(30, Math.round(secs))) } : {}),
+        audio_format: 'mp3',
+      },
+    }
+  }
+
+  if (spec.id === 'elevenlabs-sfx') {
+    // Standalone: a file you then place on the cut at a timestamp. fal caps
+    // the length at 22s and picks its own when none is given, which is
+    // usually right for a one-off hit.
+    const secs = input.duration_sec
+    return {
+      endpoint: spec.endpoint,
+      input: {
+        text: prompt,
+        ...(secs ? { duration_seconds: Math.max(0.5, Math.min(22, secs)) } : {}),
+        prompt_influence: 0.6,
+      },
+    }
+  }
+
+  // Scored TO a clip, so it needs the clip. Syncs itself because it watches
+  // the picture — the right tool for a whole shot that rendered silent.
+  const videoUrl = (input.video_url ?? '').trim()
+  if (!videoUrl) return { error: `${spec.label} scores an existing clip — pass video_url.` }
   return {
     endpoint: spec.endpoint,
     input: { video_url: videoUrl, prompt, ...(input.duration_sec ? { duration: input.duration_sec } : {}) },

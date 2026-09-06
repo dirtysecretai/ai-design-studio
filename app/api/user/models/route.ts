@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getUserFromSession } from '@/lib/auth';
 import { cookies } from 'next/headers';
+import { jsonPrivate } from '@/lib/api-json'
 
 
 // GET - Fetch all user models
@@ -11,7 +12,7 @@ export async function GET(request: NextRequest) {
     const token = cookieStore.get('session')?.value;
 
     if (!token) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: 'Not authenticated' },
         { status: 401 }
       );
@@ -19,7 +20,7 @@ export async function GET(request: NextRequest) {
 
     const user = await getUserFromSession(token);
     if (!user) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: 'Invalid session' },
         { status: 401 }
       );
@@ -30,13 +31,13 @@ export async function GET(request: NextRequest) {
       orderBy: { createdAt: 'desc' }
     });
 
-    return NextResponse.json({
+    return jsonPrivate({
       success: true,
       models
     });
   } catch (error: any) {
     console.error('Error fetching user models:', error);
-    return NextResponse.json(
+    return jsonPrivate(
       { error: 'Failed to fetch models' },
       { status: 500 }
     );
@@ -50,7 +51,7 @@ export async function POST(request: NextRequest) {
     const token = cookieStore.get('session')?.value;
 
     if (!token) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: 'Not authenticated' },
         { status: 401 }
       );
@@ -58,7 +59,7 @@ export async function POST(request: NextRequest) {
 
     const user = await getUserFromSession(token);
     if (!user) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: 'Invalid session' },
         { status: 401 }
       );
@@ -68,21 +69,21 @@ export async function POST(request: NextRequest) {
 
     // Validation
     if (!name || !name.trim()) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: 'Model name is required' },
         { status: 400 }
       );
     }
 
     if (!Array.isArray(referenceImageUrls) || referenceImageUrls.length === 0) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: 'At least one reference image is required' },
         { status: 400 }
       );
     }
 
     if (referenceImageUrls.length > 8) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: 'Maximum 8 reference images allowed' },
         { status: 400 }
       );
@@ -97,13 +98,13 @@ export async function POST(request: NextRequest) {
       }
     });
 
-    return NextResponse.json({
+    return jsonPrivate({
       success: true,
       model: newModel
     });
   } catch (error: any) {
     console.error('Error creating user model:', error);
-    return NextResponse.json(
+    return jsonPrivate(
       { error: 'Failed to create model' },
       { status: 500 }
     );
@@ -117,7 +118,7 @@ export async function DELETE(request: NextRequest) {
     const token = cookieStore.get('session')?.value;
 
     if (!token) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: 'Not authenticated' },
         { status: 401 }
       );
@@ -125,7 +126,7 @@ export async function DELETE(request: NextRequest) {
 
     const user = await getUserFromSession(token);
     if (!user) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: 'Invalid session' },
         { status: 401 }
       );
@@ -135,7 +136,7 @@ export async function DELETE(request: NextRequest) {
     const modelId = searchParams.get('id');
 
     if (!modelId) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: 'Model ID is required' },
         { status: 400 }
       );
@@ -150,7 +151,7 @@ export async function DELETE(request: NextRequest) {
     });
 
     if (!model) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: 'Model not found' },
         { status: 404 }
       );
@@ -161,13 +162,13 @@ export async function DELETE(request: NextRequest) {
       where: { id: parseInt(modelId) }
     });
 
-    return NextResponse.json({
+    return jsonPrivate({
       success: true,
       message: 'Model deleted successfully'
     });
   } catch (error: any) {
     console.error('Error deleting user model:', error);
-    return NextResponse.json(
+    return jsonPrivate(
       { error: 'Failed to delete model' },
       { status: 500 }
     );

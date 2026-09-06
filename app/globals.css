@@ -210,3 +210,56 @@
   0%   { background-position: 200% center; }
   100% { background-position: -200% center; }
 }
+
+/*
+ * Silver shimmer text (taskbar Image/Video, the AI Guide tab, model titles).
+ *
+ * This was five copies of the same inline style, and all of them FLICKERED on
+ * iPad: animating background-position on a background-clip:text element while a
+ * filter: drop-shadow() is applied makes Safari re-rasterise the text layer
+ * every frame, and it blinks out. The fixes that matter:
+ *   - -webkit-text-fill-color, which Safari honours where `color` alone is not
+ *     enough with -webkit-background-clip
+ *   - no filter: the drop-shadow is what forced the fragile layer. A text-shadow
+ *     gives the same glow without creating a filter layer... except text-shadow
+ *     paints UNDER clipped text, so the glow is dropped entirely rather than
+ *     traded for a flicker.
+ *   - an explicit compositing layer, so the gradient is rasterised once
+ */
+.silver-shimmer-text {
+  background-image: linear-gradient(90deg, #94a3b8, #f8fafc, #e2e8f0, #64748b, #f8fafc, #94a3b8);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: silver-shimmer 3.5s linear infinite;
+  will-change: background-position;
+  transform: translateZ(0);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+.silver-shimmer-text-slow { animation-duration: 6s; }
+
+/*
+ * Static silver edge.
+ *
+ * The animated rim (SilverRimOverlay) spins a conic gradient in an element
+ * 300% the width of its box. That is fine once or twice; the Movie Studio had
+ * SEVEN on screen at once, and on an iPad the compositor could not keep up —
+ * the shimmering taskbar titles flickered as it dropped frames. Panels that
+ * only need the brand edge use this instead: same palette, one painted border,
+ * no animation, no layer.
+ */
+.silver-edge {
+  border: 1px solid transparent;
+  background-image:
+    linear-gradient(#0a0f1a, #0a0f1a),
+    linear-gradient(135deg, #64748b, #e2e8f0, #94a3b8, #f8fafc, #64748b);
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .silver-shimmer-text { animation: none; background-position: 50% center; }
+}

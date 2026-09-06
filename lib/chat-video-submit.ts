@@ -1,7 +1,6 @@
 import { NextRequest } from 'next/server'
 import prisma from '@/lib/prisma'
 import type { ChatCreateModel, ChatCreateSettings } from '@/lib/chat-hub-models'
-import { fitRefsForVideo } from '@/lib/video-ref-fit'
 
 // Chat video generation, routed through the site's OWN generation path.
 //
@@ -77,11 +76,9 @@ export async function submitChatVideo(
   settings: ChatCreateSettings,
   meta?: Record<string, unknown>,
 ): Promise<ChatVideoSubmission> {
-  // A freshly generated plate is a 2K-4K PNG and routinely exceeds fal's 10MB
-  // input cap, which the model rejects AFTER reporting the job complete. Fit
-  // any oversized ref before it is ever submitted.
-  const fitted = await fitRefsForVideo(refs)
-  const body = { ...buildBody(spec, prompt, fitted, settings), ...(meta ?? {}) }
+  // Oversized refs are fitted by /api/video/generate itself, which covers the
+  // portal and the scanners too — nothing to do here.
+  const body = { ...buildBody(spec, prompt, refs, settings), ...(meta ?? {}) }
 
   try {
     // Imported lazily: the route module pulls fal + prisma + the queue helpers,

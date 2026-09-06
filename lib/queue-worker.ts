@@ -1,5 +1,5 @@
 import prisma from '@/lib/prisma';
-import { fal } from '@fal-ai/client';
+import { fal } from '@/lib/fal-client';
 
 fal.config({ credentials: process.env.FAL_KEY });
 

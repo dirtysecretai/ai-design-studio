@@ -309,15 +309,11 @@ export default function ChatWidget({ sideTabOnly = false }: { sideTabOnly?: bool
             <SiteLogoBox size={22} rounded={7} />
             {/* Silver-shimmer title — same treatment as the taskbar Image/Video buttons */}
             <span
-              className="text-[10px] font-extrabold tracking-widest uppercase bg-clip-text text-transparent whitespace-nowrap shrink-0 leading-none"
-              style={{
-                writingMode: 'vertical-lr',
-                transform: 'rotate(180deg)',
-                backgroundImage: 'linear-gradient(90deg,#94a3b8,#f8fafc,#e2e8f0,#64748b,#f8fafc,#94a3b8)',
-                backgroundSize: '200% 100%',
-                animation: 'silver-shimmer 3.5s linear infinite',
-                filter: 'drop-shadow(0 0 5px rgba(248,250,252,0.28))',
-              }}
+              className="text-[10px] font-extrabold tracking-widest uppercase silver-shimmer-text whitespace-nowrap shrink-0 leading-none"
+              // The tab reads bottom-to-top; the class composites with
+              // translateZ(0), so the rotation has to carry it along or the
+              // layer promotion is lost.
+              style={{ writingMode: 'vertical-lr', transform: 'rotate(180deg) translateZ(0)' }}
             >
               AI Guide
             </span>

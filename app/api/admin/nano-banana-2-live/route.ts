@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { fal } from '@fal-ai/client'
+import { fal } from '@/lib/fal-client'
 import { uploadToR2 } from '@/lib/r2'
 import prisma from '@/lib/prisma'
 import { syncAndClaimFalSlot } from '@/lib/admin-queue-helpers'
@@ -9,6 +9,7 @@ import { cookies } from 'next/headers'
 import { isGenerationBlocked } from '@/lib/generation-guard'
 import { deductGenerationTickets, refundGenerationTickets, isAdminEmail } from '@/lib/ticket-gate'
 import { enforceContentFilter } from '@/lib/content-filter'
+import { jsonPrivate } from '@/lib/api-json'
 
 fal.config({ credentials: process.env.FAL_KEY })
 
@@ -22,7 +23,7 @@ export async function POST(req: Request) {
     const sessionUser = token ? await getUserFromSession(token) : null
 
     if (await isGenerationBlocked(sessionUser?.email)) {
-      return NextResponse.json({ error: 'Generation is temporarily disabled for maintenance. Please check back soon.' }, { status: 503 })
+      return jsonPrivate({ error: 'Generation is temporarily disabled for maintenance. Please check back soon.' }, { status: 503 })
     }
 
     const body = await req.json()
@@ -40,7 +41,7 @@ export async function POST(req: Request) {
     } = body
 
     if (!prompt?.trim()) {
-      return NextResponse.json({ error: 'Prompt is required' }, { status: 400 })
+      return jsonPrivate({ error: 'Prompt is required' }, { status: 400 })
     }
 
     const input: Record<string, unknown> = {
@@ -104,7 +105,7 @@ export async function POST(req: Request) {
     }))
 
     const targetUserId: number | null = sessionUser?.id ?? null
-    if (!targetUserId) return NextResponse.json({ error: 'Not authenticated — log in before using the admin scanner' }, { status: 401 })
+    if (!targetUserId) return jsonPrivate({ error: 'Not authenticated — log in before using the admin scanner' }, { status: 401 })
 
     // Server-side ticket check — cost: 12 for 4K, 7 otherwise
     const ticketCost = (resolution as string) === '4K' ? 12 : 7
@@ -118,7 +119,7 @@ export async function POST(req: Request) {
     // CCBill content filter — must pass BEFORE any charge or provider submit
     {
       const _cf = await enforceContentFilter(prompt, sessionUser?.email)
-      if (!_cf.ok) return NextResponse.json({ error: _cf.reason }, { status: 400 })
+      if (!_cf.ok) return jsonPrivate({ error: _cf.reason }, { status: 400 })
     }
     const claim = await claimUserGenerationRow({
       userId: targetUserId,
@@ -129,7 +130,7 @@ export async function POST(req: Request) {
       ticketCost: chargedCost,
     })
     if (!claim.ok) {
-      return NextResponse.json(
+      return jsonPrivate(
         { error: `Queue full (${claim.activeCount}/${claim.limit} active). Wait for a generation to finish.` },
         { status: 429 }
       )
@@ -137,7 +138,7 @@ export async function POST(req: Request) {
     const ticketResult = await deductGenerationTickets(targetUserId, sessionUser!.email, ticketCost)
     if (!ticketResult.ok) {
       await prisma.generationQueue.delete({ where: { id: claim.rowId } }).catch(() => {})
-      return NextResponse.json(
+      return jsonPrivate(
         { error: `Insufficient tickets — need ${ticketResult.need}, have ${ticketResult.have}` },
         { status: 402 },
       )
@@ -154,7 +155,7 @@ export async function POST(req: Request) {
       // At capacity — queue for later (counter was NOT incremented)
       await prisma.generationQueue.update({ where: { id: claim.rowId }, data: { status: 'queued' } })
       console.log(`NanoBanana 2 queued (at capacity, max=${maxConcurrent}) → queueId #${claim.rowId}`)
-      return NextResponse.json({ success: true, queued: true, queueId: claim.rowId, permanentReferenceUrls })
+      return jsonPrivate({ success: true, queued: true, queueId: claim.rowId, permanentReferenceUrls })
     }
 
     // Slot claimed (counter already incremented) — submit to FAL
@@ -167,7 +168,7 @@ export async function POST(req: Request) {
 
       console.log(`NanaBanana 2 submitted (${endpoint}) requestId=${submitted.request_id} queueId=#${claim.rowId}`)
 
-      return NextResponse.json({
+      return jsonPrivate({
         success: true,
         requestId: submitted.request_id,
         falEndpoint: endpoint,
@@ -190,7 +191,7 @@ export async function POST(req: Request) {
     }
   } catch (error: any) {
     console.error('NanoBanana 2 submit error:', error)
-    return NextResponse.json(
+    return jsonPrivate(
       { error: error.message || 'Submission failed' },
       { status: 500 }
     )

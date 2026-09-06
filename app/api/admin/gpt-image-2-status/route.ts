@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { fal } from '@fal-ai/client'
+import { fal } from '@/lib/fal-client'
 import { uploadToR2 } from '@/lib/r2'
 import prisma from '@/lib/prisma'
 import { releaseQueueSlot } from '@/lib/admin-queue-helpers'

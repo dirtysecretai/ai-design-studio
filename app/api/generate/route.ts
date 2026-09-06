@@ -4,11 +4,12 @@ import prisma from '@/lib/prisma'
 import { resolveRequestUser, requireScopes, canUseModel, modelNotPermittedResponse } from '@/lib/api-key-auth'
 import { uploadToR2 } from '@/lib/r2'
 import { getTicketCost, getModelById } from '@/config/ai-models.config'
-import { fal } from "@fal-ai/client"
+import { fal } from "@/lib/fal-client"
 import { isGenerationBlocked } from '@/lib/generation-guard'
 import { reserveGenerationTickets } from '@/lib/ticket-gate'
 import { checkUserConcurrency } from '@/lib/user-concurrency'
 import { enforceContentFilter } from '@/lib/content-filter'
+import { canonicalisePayload } from '@/lib/media-url'
 import {
   FAL_IMAGE_MODEL_IDS,
   getFalImageModelSpec,
@@ -86,7 +87,7 @@ export async function POST(request: Request) {
     }
 
     // Parse request body
-    const body = await request.json()
+    const body = canonicalisePayload(await request.json())
     const {
       prompt,
       quality = '2k',
@@ -1015,15 +1016,6 @@ export async function POST(request: Request) {
             if (loraSteps) inputParams.num_inference_steps = loraSteps
           }
 
-        } else if (model === 'nano-banana-pro-2') {
-          // NanoBanana Pro 2 — same shape as the admin scanner's own route
-          inputParams.resolution = quality === '4k' ? '4K' : '2K'
-          inputParams.aspect_ratio = aspectRatio
-          inputParams.output_format = 'png'
-          inputParams.num_images = 1
-          inputParams.safety_tolerance = '6'
-          inputParams.enable_web_search = true
-          console.log(`NanoBanana Pro 2: resolution=${inputParams.resolution} aspect=${aspectRatio}`)
         } else if (model === 'nano-banana-pro') {
           // NanoBanana Pro
           inputParams.resolution = quality === '4k' ? '4K' : '2K'
@@ -1049,8 +1041,6 @@ export async function POST(request: Request) {
 
           if (model === 'seedream-4.5') {
             modelEndpoint = 'fal-ai/bytedance/seedream/v4.5/edit'
-          } else if (model === 'nano-banana-pro-2') {
-            modelEndpoint = 'fal-ai/nano-banana-2/edit'
           } else if (model === 'nano-banana-pro') {
             modelEndpoint = 'fal-ai/nano-banana-pro/edit'
           } else if (model === 'flux-2') {
